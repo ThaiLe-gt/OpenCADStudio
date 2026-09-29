@@ -8214,6 +8214,105 @@ mod dimtad_tests {
 }
 
 #[cfg(test)]
+mod exported_dimension_diagnostics {
+    use super::*;
+
+    #[test]
+    #[ignore = "requires METAL_DIAGNOSTIC_DXF exported by a live native replay"]
+    fn exported_native_dimensions_produce_text_geometry() {
+        let path = std::env::var("METAL_DIAGNOSTIC_DXF").unwrap();
+        let doc = codec::DxfReader::from_file(path)
+            .unwrap()
+            .read()
+            .unwrap();
+        let mut count = 0;
+        for entity in doc.entities() {
+            let EntityType::Dimension(dim) = entity else {
+                continue;
+            };
+            if !dim.base().style_name.starts_with("METAL-AUTO") {
+                continue;
+            }
+            count += 1;
+            let text = baked_dimension_text_entity(dim, &doc, 1.0);
+            assert!(
+                text.is_some(),
+                "missing text for {:?}",
+                dim.base().common.handle
+            );
+            let colored = crate::scene::tessellate_entity_dim_text(
+                &doc,
+                &Default::default(),
+                None,
+                [0., 0., 0., 1.],
+                1.,
+                text.as_ref().unwrap(),
+                None,
+                Some(5.),
+                [0., 0., 1., 1.],
+            );
+            assert!(
+                colored
+                    .iter()
+                    .flat_map(|w| &w.text_verts)
+                    .all(|v| v.color == [0., 0., 1., 1.]),
+                "SDF dimension glyphs must inherit the requested dimension text color"
+            );
+            let wires = dim.tessellate(
+                &doc,
+                dim.base().common.handle,
+                false,
+                [0., 1., 0., 1.],
+                1.,
+                1.,
+                &Default::default(),
+                None,
+                [0., 0., 0., 1.],
+                None,
+                Some(5.),
+            );
+            let glyphs: usize = wires.iter().map(|w| w.text_verts.len()).sum();
+            let position = match text.as_ref().unwrap() {
+                EntityType::Text(t) => t.insertion_point,
+                EntityType::MText(t) => t.insertion_point,
+                _ => unreachable!(),
+            };
+            let view = [
+                position.x as f32 - 1000.,
+                position.y as f32 - 1000.,
+                position.x as f32 + 1000.,
+                position.y as f32 + 1000.,
+            ];
+            let visible = dim.tessellate(
+                &doc,
+                dim.base().common.handle,
+                false,
+                [0., 1., 0., 1.],
+                1.,
+                1.,
+                &Default::default(),
+                None,
+                [0., 0., 0., 1.],
+                Some(view),
+                Some(5.),
+            );
+            assert!(
+                visible.iter().any(|w| !w.text_verts.is_empty()),
+                "viewport culled dimension text at {:?}",
+                position
+            );
+            println!(
+                "dimension {:?}: text={:?}, glyph vertices={glyphs}",
+                dim.base().common.handle,
+                text
+            );
+            assert!(glyphs > 0, "dimension has no glyph vertices");
+        }
+        assert_eq!(count, 18);
+    }
+}
+
+#[cfg(test)]
 mod angular_unit_tests {
     use super::format_angular_value;
     use codec::tables::DimStyle;

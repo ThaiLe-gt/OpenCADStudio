@@ -2,9 +2,9 @@
 
 use crate::app::{Message, StyleKind};
 use crate::t;
+use crate::ui::style::common::muted_style;
 use iced::widget::{button, canvas, checkbox, column, container, row, scrollable, text, text_input};
 use iced::{mouse, Background, Border, Element, Length, Point, Rectangle, Theme};
-use crate::ui::style::common::muted_style;
 use std::borrow::Cow;
 
 pub struct TextStyleView<'a> {

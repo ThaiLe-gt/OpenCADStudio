@@ -1,7 +1,7 @@
 use super::document::DocumentTab;
 use super::document::DynComponent;
 use super::history::history_dropdown_labels;
-use super::{ArrowKey, Message, OpenCADStudio};
+use super::{ArrowKey, Message, MetalOverlayKind, OpenCADStudio};
 use crate::scene::pick::grip::{grips_to_screen, grips_to_screen_paper, grips_to_screen_rte};
 use crate::scene::view::viewport_pane::ViewportPane;
 use crate::scene::{VIEWCUBE_PAD, VIEWCUBE_REGION_PX};
@@ -24,7 +24,8 @@ mod viewcube;
 
 use controls::{dyn_component_value, viewport_controls};
 use overlay::{
-    mtext_editor_overlay, position_canvas_overlay, position_canvas_overlay_near_cursor,
+    mtext_editor_overlay, position_canvas_overlay, position_canvas_overlay_centered,
+    position_canvas_overlay_near_cursor,
     qselect_overlay, text_inline_overlay, viewport_context_menu_overlay,
 };
 use viewcube::{viewcube_nav_controls, viewcube_ucs_picker, UCS_PICKER_W};
@@ -1257,49 +1258,143 @@ bg={bg_ms:.1}ms n={view_count}"
                 viewport_stack = viewport_stack.push(input);
             }
 
-            // Model-space render-mode picker, top-left. Sits ABOVE the
-            // viewport mouse_area so clicks inside its bounds reach it
-            // instead of the shader behind it; `opaque` stops them bubbling
-            // further. Outside the chip the Fill container is transparent so
-            // viewport drawing / selection is unaffected. In a paper layout
-            // the active viewport gets its own picker (below) instead.
-            if !is_paper && !tab.is_start {
-                let (vw, vh) = tab.scene.selection.borrow().vp_size;
-                let rect = tab.scene.active_model_tile_bounds(vw, vh);
-                // Unified control chip: split buttons + render-mode picker +
-                // grid / grid-snap toggles, for the active Model tile.
-                let bar = viewport_controls(
-                    tab.render_mode,
-                    self.show_grid,
-                    self.snapper.grid_snap(),
-                    true,
-                    tab.scene.model_tiles.borrow().len(),
-                    self.render_mode_menu_open,
-                    self.render_mode_preview,
-                );
-                // Adaptive: DensitySwap measures the bar's real width every frame
-                // (reported into `render_bar_w`, which the ViewCube reads to decide
-                // overlap) and swaps it for an empty spacer only when it no longer
-                // fits the tile. The fixed-width container bounds that fit decision
-                // to the tile, not the whole canvas.
-                let adaptive: Element<'_, Message> = DensitySwap::new(vec![
-                    iced::widget::opaque(bar),
-                    Space::new()
-                        .width(iced::Length::Fixed(0.0))
-                        .height(iced::Length::Fixed(0.0))
-                        .into(),
-                ])
-                .report_width0(self.render_bar_w.clone())
-                .report_width0(tab.scene.model_pane_min_reporter())
-                .into();
-                // Pin the bar to the active model tile's top-left corner so it
-                // follows the active panel in a tiled layout.
-                let bar_layer = iced::widget::pin(
-                    container(adaptive).width(iced::Length::Fixed(rect.width.max(1.0))),
-                )
-                .position(iced::Point::new(rect.x.max(0.0), rect.y.max(0.0)));
-                viewport_stack = viewport_stack.push(bar_layer);
+
+        // Host-owned review bubbles remain a constant screen size while their
+        // anchor follows model space. Previously the registry was accepted but
+        // never rendered, so users saw only tiny selected geometry at a
+        // zoom-to-extents scale and had no A/B/C marker to click.
+        if !tab.is_start && !self.metal_model_overlays.is_empty() {
+            let (vw, vh) = tab.scene.selection.borrow().vp_size;
+            for item in &self.metal_model_overlays {
+                let projected = if let Some((camera, bounds)) = tab.scene.viewport_edit_frame((vw, vh)) {
+                    camera.project(item.world, bounds)
+                        .map(|point| (iced::Point::new(bounds.x + point.x, bounds.y + point.y), bounds))
+                } else {
+                    let bounds = tab.scene.active_model_tile_bounds(vw, vh);
+                    tab.scene.camera.borrow().project(item.world, bounds)
+                        .map(|point| (iced::Point::new(bounds.x + point.x, bounds.y + point.y), bounds))
+                };
+                let Some((anchor, visible_bounds)) = projected else { continue };
+                // Do not clamp a marker whose native anchor is off-screen onto
+                // a viewport edge: that makes it appear to own unrelated
+                // visible geometry. It will reappear when its component is
+                // panned or zoomed back into this viewport.
+                if anchor.x < visible_bounds.x
+                    || anchor.x > visible_bounds.x + visible_bounds.width
+                    || anchor.y < visible_bounds.y
+                    || anchor.y > visible_bounds.y + visible_bounds.height
+                {
+                    continue;
+                }
+                let id = item.id.clone();
+                let accent = match item.kind {
+                    MetalOverlayKind::ComponentReview => match item.state.as_str() {
+                        "group-1" => Color::from_rgb8(84, 164, 255),
+                        "group-2" => Color::from_rgb8(231, 166, 61),
+                        "group-3" => Color::from_rgb8(201, 105, 219),
+                        "merge" => Color::from_rgb8(255, 119, 119),
+                        _ => Color::from_rgb8(78, 202, 160),
+                    },
+                    MetalOverlayKind::Preview => Color::from_rgb8(239, 184, 74),
+                    MetalOverlayKind::Agent => Color::from_rgb8(156, 132, 255),
+                    MetalOverlayKind::Comment => Color::from_rgb8(102, 196, 255),
+                    MetalOverlayKind::Generic => Color::from_rgb8(180, 180, 190),
+                };
+                let active = item.active;
+                let bubble = button(text(item.label.clone()).size(12))
+                    .on_press(Message::MetalOverlayClicked(id.clone()))
+                    .padding([6, 10])
+                    .style(move |_: &Theme, status| {
+                        let hovered = matches!(status, button::Status::Hovered | button::Status::Pressed);
+                        button::Style {
+                            background: Some(Background::Color(if hovered || active { accent } else {
+                                Color::from_rgba(accent.r, accent.g, accent.b, 0.82)
+                            })),
+                            text_color: Color::WHITE,
+                            border: Border { color: if active { Color::WHITE } else { accent }, width: if active { 2.0 } else { 1.0 }, radius: 14.0.into() },
+                            ..Default::default()
+                        }
+                    });
+                // The bubble itself is centred on the native selection bounds.
+                // Detail/actions remain adjacent so their changing size cannot
+                // move the marker away from its component.
+                viewport_stack = viewport_stack.push(position_canvas_overlay_centered(
+                    anchor,
+                    58.0,
+                    bubble.into(),
+                ));
+                let mut content = column![].spacing(4);
+                if item.active && !item.detail.is_empty() {
+                    content = content.push(container(text(item.detail.clone()).size(10)).padding([4, 7])
+                        .style(|theme: &Theme| container::Style {
+                            background: Some(Background::Color(theme.palette().background.strong.color)),
+                            text_color: Some(theme.palette().background.strong.text),
+                            border: Border { radius: 5.0.into(), ..Default::default() },
+                            ..Default::default()
+                        }));
+                }
+                if !item.actions.is_empty() {
+                    let mut actions = row![].spacing(4);
+                    for action in &item.actions {
+                        actions = actions.push(button(text(action.label.clone()).size(10))
+                            .on_press(Message::MetalOverlayAction(id.clone(), action.id.clone()))
+                            .padding([4, 7]));
+                    }
+                    content = content.push(actions);
+                }
+                if (item.active && !item.detail.is_empty()) || !item.actions.is_empty() {
+                    viewport_stack = viewport_stack.push(position_canvas_overlay_near_cursor(
+                        anchor,
+                        58.0,
+                        content.into(),
+                    ));
+                }
             }
+        }
+
+        // Model-space render-mode picker, top-left. Sits ABOVE the
+        // viewport mouse_area so clicks inside its bounds reach it
+        // instead of the shader behind it; `opaque` stops them bubbling
+        // further. Outside the chip the Fill container is transparent so
+        // viewport drawing / selection is unaffected. In a paper layout
+        // the active viewport gets its own picker (below) instead.
+        if !is_paper && !tab.is_start {
+            let (vw, vh) = tab.scene.selection.borrow().vp_size;
+            let rect = tab.scene.active_model_tile_bounds(vw, vh);
+            // Unified control chip: split buttons + render-mode picker +
+            // grid / grid-snap toggles, for the active Model tile.
+            let bar = viewport_controls(
+                tab.render_mode,
+                self.show_grid,
+                self.snapper.grid_snap(),
+                true,
+                tab.scene.model_tiles.borrow().len(),
+                self.render_mode_menu_open,
+                self.render_mode_preview,
+            );
+            // Adaptive: DensitySwap measures the bar's real width every frame
+            // (reported into `render_bar_w`, which the ViewCube reads to decide
+            // overlap) and swaps it for an empty spacer only when it no longer
+            // fits the tile. The fixed-width container bounds that fit decision
+            // to the tile, not the whole canvas.
+            let adaptive: Element<'_, Message> = DensitySwap::new(vec![
+                iced::widget::opaque(bar),
+                Space::new()
+                    .width(iced::Length::Fixed(0.0))
+                    .height(iced::Length::Fixed(0.0))
+                    .into(),
+            ])
+            .report_width0(self.render_bar_w.clone())
+            .report_width0(tab.scene.model_pane_min_reporter())
+            .into();
+            // Pin the bar to the active model tile's top-left corner so it
+            // follows the active panel in a tiled layout.
+            let bar_layer = iced::widget::pin(
+                container(adaptive).width(iced::Length::Fixed(rect.width.max(1.0))),
+            )
+            .position(iced::Point::new(rect.x.max(0.0), rect.y.max(0.0)));
+            viewport_stack = viewport_stack.push(bar_layer);
+        }
 
             // Active paper-space viewport overlays: a render-mode picker in
             // its top-left corner and a ViewCube hit area in its top-right,
@@ -2764,8 +2859,13 @@ impl OpenCADStudio {
             super::control::http_bridge::subscribe().map(Message::ControlRequest),
         ]);
         #[cfg(target_arch = "wasm32")]
-        let control = iced::time::every(std::time::Duration::from_millis(50))
-            .map(|_| Message::PollWebControl);
+
+        let control = iced::time::every(std::time::Duration::from_millis(50)).map(|_|Message::PollWebControl);
+        #[cfg(target_arch = "wasm32")]
+        let metal_bridge = iced::time::every(std::time::Duration::from_millis(100))
+            .map(|_| Message::MetalBridgePoll);
+        #[cfg(not(target_arch = "wasm32"))]
+        let metal_bridge = iced::Subscription::none();
         iced::Subscription::batch([
             if self.spacemouse.moving() && self.spacemouse_focused && !self.spacemouse_paused {
                 window::frames().map(Message::SpaceMouseFrame)
@@ -2784,6 +2884,7 @@ impl OpenCADStudio {
                 _ => None,
             }),
             control,
+            metal_bridge,
             frames,
             history_tick,
             layout_settle,

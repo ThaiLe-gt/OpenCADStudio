@@ -559,6 +559,7 @@ impl shader::Primitive for Primitive {
                 .as_ref()
                 .map_or(true, |source| !Arc::ptr_eq(source, &vp.text_verts))
                 || vp.wire_content_id != inner.cached_wire_id
+                || inner.text_atlas_needs_upload()
             {
                 inner.upload_text(
                     device,
@@ -1336,6 +1337,19 @@ retained_contributors={}",
             // `mesh_fill` is false for Wireframe 2D / Wireframe 3D — flip
             // the draw path so meshes use the wireframe pipeline + the
             // pre-built triangle-edge index buffer.
+            // Bind Metal QA evidence to the camera actually encoded this frame,
+            // rather than the earlier focus command acknowledgement.
+            #[cfg(target_arch = "wasm32")]
+            if let Some(window) = web_sys::window() {
+                use wasm_bindgen::{JsCast, JsValue};
+                if let Ok(marker) = js_sys::Reflect::get(&window, &JsValue::from_str("__METAL_MARK_QA_RENDER")) {
+                    if let Some(marker) = marker.dyn_ref::<js_sys::Function>() {
+                        let _ = marker.call2(&JsValue::NULL,
+                            &JsValue::from_f64(vp.geometry_epoch as f64),
+                            &JsValue::from_f64(vp.camera_generation as f64));
+                    }
+                }
+            }
             let mesh_wireframe = !vp.mesh_fill;
             inner.render(
                 encoder,

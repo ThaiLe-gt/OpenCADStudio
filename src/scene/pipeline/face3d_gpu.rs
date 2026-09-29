@@ -28,11 +28,7 @@ pub(crate) fn planar_solid_faces_view(wire: &WireModel, view_dir: glam::Vec3) ->
     let view = view_dir.as_dvec3().normalize_or_zero();
     let point = |index: usize| {
         let high = wire.fill_tris[index];
-        let low = wire
-            .fill_tris_low
-            .get(index)
-            .copied()
-            .unwrap_or([0.0; 3]);
+        let low = wire.fill_tris_low.get(index).copied().unwrap_or([0.0; 3]);
         glam::DVec3::new(
             high[0] as f64 + low[0] as f64,
             high[1] as f64 + low[1] as f64,
@@ -48,10 +44,7 @@ pub(crate) fn planar_solid_faces_view(wire: &WireModel, view_dir: glam::Vec3) ->
     })
 }
 
-pub(crate) fn planar_solid_visibility_key(
-    wires: &[WireModel],
-    view_dir: glam::Vec3,
-) -> u64 {
+pub(crate) fn planar_solid_visibility_key(wires: &[WireModel], view_dir: glam::Vec3) -> u64 {
     let mut key = 0xcbf29ce484222325_u64;
     for wire in wires
         .iter()

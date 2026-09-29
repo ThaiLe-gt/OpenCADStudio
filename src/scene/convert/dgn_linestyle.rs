@@ -161,8 +161,9 @@ pub fn symbol_radius(doc: &CadDocument, block: Handle, scale: f64) -> f64 {
                     distance(circle.center.x, circle.center.y) + circle.radius
                 }
                 EntityType::Arc(arc) => distance(arc.center.x, arc.center.y) + arc.radius,
-                EntityType::Line(line) => distance(line.start.x, line.start.y)
-                    .max(distance(line.end.x, line.end.y)),
+                EntityType::Line(line) => {
+                    distance(line.start.x, line.start.y).max(distance(line.end.x, line.end.y))
+                }
                 _ => crate::scene::convert::tess::entity_world_aabb_f64(&placed)
                     .map(|[min_x, min_y, max_x, max_y]| {
                         [

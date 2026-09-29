@@ -3,9 +3,9 @@
 //! `OpenCADStudio --mcp` speaks MCP over stdio. All drawing work is forwarded
 //! to the authenticated GUI control bridge; this module contains no geometry.
 
-use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use serde::Deserialize;
-use serde_json::{Map, Value, json};
+use serde_json::{json, Map, Value};
 use std::{
     collections::{HashMap, VecDeque},
     fs::{File, OpenOptions},
@@ -1614,12 +1614,10 @@ mod tests {
         )
         .unwrap();
         assert_eq!(initialized["result"]["protocolVersion"], "2025-11-25");
-        assert!(
-            initialized["result"]["instructions"]
-                .as_str()
-                .unwrap()
-                .contains("geometry kernel")
-        );
+        assert!(initialized["result"]["instructions"]
+            .as_str()
+            .unwrap()
+            .contains("geometry kernel"));
 
         let listed = handle_message(
             json!({"jsonrpc":"2.0","id":2,"method":"tools/list"}),
@@ -1645,10 +1643,9 @@ mod tests {
         assert_eq!(discovered["result"]["ttlMs"], CACHE_TTL_MS);
         assert_eq!(discovered["result"]["cacheScope"], "public");
         assert_eq!(discovered["result"]["supportedVersions"][0], "2026-07-28");
-        assert!(
-            discovered["result"]["capabilities"]["extensions"]["io.modelcontextprotocol/tasks"]
-                .is_object()
-        );
+        assert!(discovered["result"]["capabilities"]["extensions"]
+            ["io.modelcontextprotocol/tasks"]
+            .is_object());
         assert_eq!(
             discovered["result"]["_meta"]["io.modelcontextprotocol/serverInfo"]["name"],
             "OpenCADStudio"
@@ -1704,12 +1701,10 @@ mod tests {
         )
         .unwrap();
         assert_eq!(called["result"]["isError"], true);
-        assert!(
-            called["result"]["structuredContent"]["error"]
-                .as_str()
-                .unwrap()
-                .contains("request_id")
-        );
+        assert!(called["result"]["structuredContent"]["error"]
+            .as_str()
+            .unwrap()
+            .contains("request_id"));
     }
 
     #[test]
@@ -1746,11 +1741,9 @@ mod tests {
             "request_id":"draw",
             "steps":[{"op":"run","request_id":"nested","cmd":"LINE 0,0 10,0"}]
         });
-        assert!(
-            validate_execute_request(&invalid, "batch")
-                .unwrap_err()
-                .contains("omit request_id")
-        );
+        assert!(validate_execute_request(&invalid, "batch")
+            .unwrap_err()
+            .contains("omit request_id"));
 
         let compact = compact_state(&json!({
             "session_id":"s","document_id":3,"revision":4,"geometry_revision":5,

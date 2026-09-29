@@ -592,7 +592,8 @@ mod tests {
         original.model_space.selection_window_color = 5;
 
         let serialized = serde_json::to_string(&original).expect("serialize config");
-        let deserialized: AppConfig = serde_json::from_str(&serialized).expect("deserialize config");
+        let deserialized: AppConfig =
+            serde_json::from_str(&serialized).expect("deserialize config");
 
         assert_eq!(deserialized.model_space.mode, ModelSpaceMode::Custom);
         assert_eq!(deserialized.model_space.custom_bg, Some([12, 34, 56]));
@@ -605,9 +606,18 @@ mod tests {
     fn test_parse_theme_name() {
         assert_eq!(parse_theme_name("light"), Some(iced::Theme::Light));
         assert_eq!(parse_theme_name("DARK"), Some(iced::Theme::Dark));
-        assert_eq!(parse_theme_name("solarized light"), Some(iced::Theme::SolarizedLight));
-        assert_eq!(parse_theme_name("tokyo-night-storm"), Some(iced::Theme::TokyoNightStorm));
-        assert_eq!(parse_theme_name("Kanagawa_Lotus"), Some(iced::Theme::KanagawaLotus));
+        assert_eq!(
+            parse_theme_name("solarized light"),
+            Some(iced::Theme::SolarizedLight)
+        );
+        assert_eq!(
+            parse_theme_name("tokyo-night-storm"),
+            Some(iced::Theme::TokyoNightStorm)
+        );
+        assert_eq!(
+            parse_theme_name("Kanagawa_Lotus"),
+            Some(iced::Theme::KanagawaLotus)
+        );
         assert_eq!(parse_theme_name("1"), None);
         assert_eq!(parse_theme_name("0"), None);
         assert_eq!(parse_theme_name("nonexistent_theme"), None);

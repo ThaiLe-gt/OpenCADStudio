@@ -67,7 +67,9 @@ pub(crate) use boundary::{
 // other tessellation code); re-exported here so this root and sibling topic
 // modules (each does `use super::*`) keep referencing them unqualified.
 pub(crate) use convert::tess::{
-    entity_aabb, entity_world_aabb_f64, is_unindexable_entity, tessellate_entity_dim_text,
+
+    entity_aabb, entity_world_aabb_3d_f64, entity_world_aabb_f64, is_unindexable_entity,
+    tessellate_entity_dim_text,
 };
 
 /// Keep construction-history curves in the same per-entity tessellation memo
@@ -6956,7 +6958,10 @@ impl Scene {
         // unused by `model_tile_wires_arc`.
         if self.current_layout == "Model" {
             let cam = self.camera.borrow().clone();
-            return self.model_tile_wires_arc(0, &cam, 1.0, 1.0);
+            // Use the actual render pixel scale. A dummy one-pixel viewport
+            // makes visible INSERTs appear sub-pixel to the block LOD culler,
+            // silently removing them from click/window selection and copying.
+            return self.model_tile_wires_arc(0, &cam, 1.0, 0.0);
         }
         // Paper space: extend sheet wires with projected viewport content.
         // This composite is the CPU pick/snap set; the projection follows the
@@ -12081,6 +12086,40 @@ mod journal_tests {
         s.bump_entities(&[(h(30), ChangeKind::Added)]);
         s.bump_geometry(); // full delta
         assert!(s.replay_since(e0).is_none(), "a spanned full delta ⇒ None");
+    }
+
+    #[test]
+    fn rendered_block_remains_in_model_pick_wires() {
+        use codec::entities::Line;
+        use codec::types::{Transform, Vector3};
+        let mut scene = Scene::new();
+        let span = scene.camera.borrow().ortho_size() as f64 * 0.1;
+        let line = scene.add_entity(EntityType::Line(Line::from_points(
+            Vector3::ZERO,
+            Vector3::new(span, 0.0, 0.0),
+        )));
+        let insert = scene
+            .create_block_from_entities(
+                &[line],
+                "SECTION_TEST",
+                &Transform::identity(),
+                &Transform::identity(),
+            )
+            .unwrap();
+        scene.set_render_pixel_scale(1000.0, 800.0);
+        let camera = scene.camera.borrow().clone();
+        let picked = scene.hit_test_wires();
+        let rendered = scene.model_tile_wires_arc(0, &camera, 1.25, 800.0);
+        let name = insert.value().to_string();
+        assert!(rendered
+            .iter()
+            .any(|wire| wire.name == name && wire.points.len() >= 2));
+        assert!(
+            picked
+                .iter()
+                .any(|wire| wire.name == name && wire.points.len() >= 2),
+            "a visible block must not be culled from the picking geometry"
+        );
     }
 
     #[test]

@@ -289,9 +289,7 @@ pub(crate) fn parse_plugin_toml(text: &str) -> Option<ExternalPlugin> {
             continue;
         }
         if let Some(header) = line.strip_prefix('[') {
-            section = header
-                .find(']')
-                .map(|end| header[..end].trim());
+            section = header.find(']').map(|end| header[..end].trim());
             continue;
         }
         let Some((key, value)) = line.split_once('=') else {
@@ -644,7 +642,10 @@ rustc_version = ""
         let p = parse_plugin_toml(toml).expect("parsed");
         assert!(p.rustc_declared);
         assert!(p.rustc_version.is_none());
-        assert!(!p.rustc_compatible(), "declared but empty rustc is incompatible");
+        assert!(
+            !p.rustc_compatible(),
+            "declared but empty rustc is incompatible"
+        );
         assert!(!p.loadable());
     }
 
@@ -679,7 +680,10 @@ rustc_version = "{other}"
         );
         let p = parse_plugin_toml(&toml).expect("parsed");
         assert!(p.rustc_declared);
-        assert!(!p.rustc_compatible(), "mismatched rustc should be incompatible");
+        assert!(
+            !p.rustc_compatible(),
+            "mismatched rustc should be incompatible"
+        );
         assert!(!p.loadable());
     }
 
@@ -737,6 +741,7 @@ api_version = 4
         let p = parse_plugin_toml(toml).expect("parsed");
         assert!(!p.acadrust_declared);
         assert!(p.acadrust_source.is_none());
+
         assert!(!p.acadrust_compatible());
         assert!(!p.loadable());
     }
@@ -756,7 +761,10 @@ acadrust_source = ""
         let p = parse_plugin_toml(toml).expect("parsed");
         assert!(p.acadrust_declared);
         assert!(p.acadrust_source.is_none());
-        assert!(!p.acadrust_compatible(), "declared but empty source is incompatible");
+        assert!(
+            !p.acadrust_compatible(),
+            "declared but empty source is incompatible"
+        );
         assert!(!p.loadable());
     }
 

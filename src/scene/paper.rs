@@ -195,6 +195,7 @@ impl Scene {
                 continue;
             };
             if !vp.status.is_on
+                || vp.common.invisible
                 || self.entity_temporarily_hidden(handle)
             {
                 continue;
@@ -242,7 +243,11 @@ impl Scene {
         Arc<Vec<HatchModel>>,
         Arc<Vec<ImageModel>>,
     ) {
-        let selected = if tint_selected { self.selected_hatch_sig() } else { 0 };
+        let selected = if tint_selected {
+            self.selected_hatch_sig()
+        } else {
+            0
+        };
         let reuse = {
             let cache = self.paper_sheet_render_cache.borrow();
             if let Some(cache) = cache.get(&self.current_layout) {
@@ -297,11 +302,7 @@ impl Scene {
         if let Some(sheet) = self.paper_sheet_fill() {
             hatches.push(sheet);
         }
-        hatches.extend(
-            self.paper_canvas_hatches(tint_selected)
-                .iter()
-                .cloned(),
-        );
+        hatches.extend(self.paper_canvas_hatches(tint_selected).iter().cloned());
         let hatches = Arc::new(hatches);
         let wipeouts = self.paper_canvas_wipeouts();
         let images = self.paper_sheet_images();

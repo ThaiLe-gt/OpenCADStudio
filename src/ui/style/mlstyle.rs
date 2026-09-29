@@ -2,9 +2,9 @@
 
 use crate::app::Message;
 use crate::t;
+use crate::ui::style::common::muted_style;
 use iced::widget::{button, canvas, checkbox, column, container, row, text, text_input};
 use iced::{mouse, Color, Element, Length, Point, Rectangle, Theme};
-use crate::ui::style::common::muted_style;
 use std::borrow::Cow;
 
 pub struct MlStyleView<'a> {

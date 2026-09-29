@@ -571,6 +571,17 @@ pub async fn open_bytes_web(
     }
 }
 
+/// Parse bytes supplied by the trusted Metal desktop host through the same
+/// browser loading path as OpenCAD's control channel.
+#[cfg(target_arch = "wasm32")]
+pub async fn load_metal_web_bytes(
+    name: String,
+    bytes: Vec<u8>,
+    progress: Arc<OpenProgressState>,
+) -> WebOpenOutcome {
+    open_bytes_web(name, Arc::from(bytes), progress).await
+}
+
 /// Reopen a browser-private recent copy without showing the file picker.
 #[cfg(target_arch = "wasm32")]
 pub async fn open_recent_web(

@@ -888,6 +888,9 @@ pub(super) struct HistoryState {
 
 pub(super) struct PendingHistorySnapshot {
     pub(super) label: String,
+    /// Explicit multi-message transactions close only on commit, rollback, or
+    /// the start of another edit. Ordinary commands close at the UI boundary.
+    pub(super) finish_at_message_boundary: bool,
     pub(super) current_layout: String,
     pub(super) active_layer: String,
     pub(super) selected_before: Vec<Handle>,

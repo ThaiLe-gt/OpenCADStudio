@@ -10,6 +10,15 @@ const HASH_MARKER: &str = "\nreport-source-sha256:";
 const PROTOCOL_VERSION: u16 = 4;
 const WORKER_URL: &str = "ocs-parse-worker.js?v=4";
 
+struct WorkerGuard(Worker);
+impl Drop for WorkerGuard {
+    fn drop(&mut self) {
+        self.0.set_onmessage(None);
+        self.0.set_onerror(None);
+        self.0.terminate();
+    }
+}
+
 #[derive(serde::Deserialize)]
 struct EntityRuntimeFields {
     handle: u64,
@@ -42,7 +51,10 @@ pub(super) async fn parse_document(
     >();
     let sender = Rc::new(RefCell::new(Some(sender)));
     let message_sender = sender.clone();
+    let completed_worker = worker.clone();
     let on_message = Closure::<dyn FnMut(MessageEvent)>::new(move |event: MessageEvent| {
+        // Release the parser WASM heap before decoding its document in the UI heap.
+        completed_worker.terminate();
         let data = event.data();
         let ok = Reflect::get(&data, &JsValue::from_str("ok"))
             .ok()
@@ -107,6 +119,7 @@ pub(super) async fn parse_document(
     });
     worker.set_onerror(Some(on_error.as_ref().unchecked_ref()));
 
+    let _worker_guard = WorkerGuard(worker.clone());
     let payload = Object::new();
     Reflect::set(
         &payload,
@@ -177,7 +190,10 @@ pub(super) async fn sha256_document(bytes: &[u8]) -> Result<String, super::OpenL
     >();
     let sender = Rc::new(RefCell::new(Some(sender)));
     let message_sender = sender.clone();
+    let completed_worker = worker.clone();
     let on_message = Closure::<dyn FnMut(MessageEvent)>::new(move |event: MessageEvent| {
+        // Release the parser WASM heap before decoding its document in the UI heap.
+        completed_worker.terminate();
         let data = event.data();
         let result = Reflect::get(&data, &JsValue::from_str("digest"))
             .map_err(|error| super::OpenLoadError::from(js_error(error)))
@@ -200,6 +216,7 @@ pub(super) async fn sha256_document(bytes: &[u8]) -> Result<String, super::OpenL
     });
     worker.set_onerror(Some(on_error.as_ref().unchecked_ref()));
 
+    let _worker_guard = WorkerGuard(worker.clone());
     let payload = Object::new();
     Reflect::set(
         &payload,

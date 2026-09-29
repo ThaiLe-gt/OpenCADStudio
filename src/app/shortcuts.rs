@@ -211,9 +211,7 @@ impl OpenCADStudio {
 
     /// Reset the working rows and live bindings to the shipped defaults.
     pub(super) fn reset_shortcuts_to_defaults(&mut self) {
-        let mut rows: Vec<(String, String)> = default_bindings()
-            .into_iter()
-            .collect();
+        let mut rows: Vec<(String, String)> = default_bindings().into_iter().collect();
         rows.sort_by(|a, b| a.0.cmp(&b.0));
         self.shortcut_editor_rows = rows;
         self.shortcut_pending_add = false;

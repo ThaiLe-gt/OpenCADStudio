@@ -50,6 +50,18 @@ pub fn text_atlas() -> &'static Mutex<GlyphAtlas> {
 /// issue #347's grow-the-atlas conditions). The tessellation memo guard folds
 /// this in, so a growth re-lays-out the text instead of leaving stale quads.
 static ATLAS_GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static ATLAS_CONTENT_REVISION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Unlike UV generation, this changes even when a new tile fits without growth.
+/// Each GPU consumer tracks its own uploaded revision; clearing the shared
+/// dirty bit in one viewport must not hide new tiles from another viewport.
+pub fn content_revision() -> u64 {
+    ATLAS_CONTENT_REVISION.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+fn bump_content_revision() {
+    ATLAS_CONTENT_REVISION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+}
 
 /// Current atlas UV generation — see [`ATLAS_GENERATION`]. Anything that caches
 /// glyph quads must treat a change here as "re-lay-out the text".
@@ -266,6 +278,7 @@ impl GlyphAtlas {
     /// next use (e.g. after TEXTFILL toggles between fill and outline).
     pub fn reset(&mut self) {
         *self = GlyphAtlas::new(self.width, self.height);
+        bump_content_revision();
         // The packer rewound, so every previously handed-out UV is now stale.
         bump_generation();
     }
@@ -355,6 +368,7 @@ impl GlyphAtlas {
         self.solid_uv[1] *= sy;
         self.height = new_h;
         self.dirty = true;
+        bump_content_revision();
         // Every already-emitted quad's V now addresses the wrong tile.
         bump_generation();
         true
@@ -388,6 +402,7 @@ impl GlyphAtlas {
         self.cursor_x += tile.w;
         self.shelf_h = self.shelf_h.max(tile.h);
         self.dirty = true;
+        bump_content_revision();
 
         let (fw, fh) = (self.width as f32, self.height as f32);
         Some(AtlasEntry {
@@ -626,6 +641,22 @@ mod tests {
         let overlap_u = a.uv_min[0] < b.uv_max[0] && b.uv_min[0] < a.uv_max[0];
         let overlap_v = a.uv_min[1] < b.uv_max[1] && b.uv_min[1] < a.uv_max[1];
         assert!(!(overlap_u && overlap_v), "tiles overlap in the atlas");
+    }
+
+    #[test]
+    fn new_tiles_remain_observable_after_another_consumer_clears_dirty() {
+        let mut atlas = GlyphAtlas::new(256, 256);
+        let first_consumer_revision = content_revision();
+        atlas
+            .pack(bake_glyph(&filled_square(), PEN_HALF_UNITS).unwrap())
+            .unwrap();
+        assert!(content_revision() > first_consumer_revision);
+        let second_consumer_revision = content_revision();
+        atlas.clear_dirty();
+        assert!(!atlas.is_dirty());
+        assert!(content_revision() > first_consumer_revision);
+        atlas.reset();
+        assert!(content_revision() > second_consumer_revision);
     }
 
     #[test]

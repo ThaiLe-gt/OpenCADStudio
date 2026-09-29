@@ -229,7 +229,14 @@ pub fn extract_circle_instance_from_geom_indexed(
             axis_x,
             axis_y,
             radius,
-        } => (center, axis_x, axis_y, radius, 0.0f32, std::f32::consts::TAU),
+        } => (
+            center,
+            axis_x,
+            axis_y,
+            radius,
+            0.0f32,
+            std::f32::consts::TAU,
+        ),
         crate::scene::model::wire_model::TangentGeom::Arc {
             center,
             axis_x,
@@ -253,8 +260,18 @@ pub fn extract_circle_instance_from_geom_indexed(
 
     let (ch, cl) = split_ds_xyz(center[0], center[1], center[2]);
     let hw = wire.line_weight_px * 0.5;
-    let pat0 = [wire.pattern[0], wire.pattern[1], wire.pattern[2], wire.pattern[3]];
-    let pat1 = [wire.pattern[4], wire.pattern[5], wire.pattern[6], wire.pattern[7]];
+    let pat0 = [
+        wire.pattern[0],
+        wire.pattern[1],
+        wire.pattern[2],
+        wire.pattern[3],
+    ];
+    let pat1 = [
+        wire.pattern[4],
+        wire.pattern[5],
+        wire.pattern[6],
+        wire.pattern[7],
+    ];
 
     let (start_width, end_width) = if !wire.taper_widths.is_empty() {
         if wire.taper_widths.len() >= 2 && wire.tangent_geoms.len() == 1 {
@@ -413,12 +430,13 @@ mod tests {
     #[test]
     fn extract_circle_instance_planar_success() {
         let mut wire = crate::scene::WireModel::default();
-        wire.tangent_geoms.push(crate::scene::model::wire_model::TangentGeom::PlanarCircle {
-            center: [100.0, 200.0, 300.0],
-            axis_x: [1.0, 0.0, 0.0],
-            axis_y: [0.0, 1.0, 0.0],
-            radius: 50.0,
-        });
+        wire.tangent_geoms
+            .push(crate::scene::model::wire_model::TangentGeom::PlanarCircle {
+                center: [100.0, 200.0, 300.0],
+                axis_x: [1.0, 0.0, 0.0],
+                axis_y: [0.0, 1.0, 0.0],
+                radius: 50.0,
+            });
         wire.line_weight_px = 2.0;
         wire.color = [1.0, 0.0, 0.0, 1.0];
 
@@ -435,14 +453,15 @@ mod tests {
     #[test]
     fn extract_circle_instance_arc_success() {
         let mut wire = crate::scene::WireModel::default();
-        wire.tangent_geoms.push(crate::scene::model::wire_model::TangentGeom::Arc {
-            center: [10.0, 20.0, 30.0],
-            axis_x: [1.0, 0.0, 0.0],
-            axis_y: [0.0, 1.0, 0.0],
-            radius: 25.0,
-            start_angle: 0.5,
-            end_angle: 2.5,
-        });
+        wire.tangent_geoms
+            .push(crate::scene::model::wire_model::TangentGeom::Arc {
+                center: [10.0, 20.0, 30.0],
+                axis_x: [1.0, 0.0, 0.0],
+                axis_y: [0.0, 1.0, 0.0],
+                radius: 25.0,
+                start_angle: 0.5,
+                end_angle: 2.5,
+            });
         wire.line_weight_px = 3.0;
         wire.color = [0.0, 1.0, 0.0, 1.0];
 
@@ -458,12 +477,13 @@ mod tests {
     #[test]
     fn extract_circle_instance_rejects_non_planar_or_complex() {
         let mut wire = crate::scene::WireModel::default();
-        wire.tangent_geoms.push(crate::scene::model::wire_model::TangentGeom::PlanarCircle {
-            center: [0.0, 0.0, 0.0],
-            axis_x: [1.0, 0.0, 0.0],
-            axis_y: [0.0, 1.0, 0.0],
-            radius: 10.0,
-        });
+        wire.tangent_geoms
+            .push(crate::scene::model::wire_model::TangentGeom::PlanarCircle {
+                center: [0.0, 0.0, 0.0],
+                axis_x: [1.0, 0.0, 0.0],
+                axis_y: [0.0, 1.0, 0.0],
+                radius: 10.0,
+            });
         // 1. With fill_tris (e.g. 3D solid or hatch)
         wire.fill_tris = vec![[0.0; 3]];
         assert!(extract_circle_instance(&wire, 0.0).is_none());

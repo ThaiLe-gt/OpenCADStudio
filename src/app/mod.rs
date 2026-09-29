@@ -1,6 +1,7 @@
 mod alias;
 mod automation;
 pub(crate) mod control;
+mod reference_dimension_style;
 pub(crate) fn automation_action_names() -> &'static [&'static str] {
     control::action_names()
 }
@@ -322,6 +323,8 @@ pub struct OpenProgress {
     pub recovery_read_stats: Option<codec::ReadStats>,
     #[cfg(target_arch = "wasm32")]
     pub recovery_bytes: Option<std::sync::Arc<[u8]>>,
+    #[cfg(target_arch = "wasm32")]
+    pub metal_command_id: Option<String>,
     /// Disk state captured before parsing starts. If another editor changes the
     /// file while it loads, the first Save must not silently overwrite it.
     #[cfg(not(target_arch = "wasm32"))]
@@ -363,6 +366,38 @@ pub enum StartSection {
     Supporters,
 }
 
+/// A transient host-owned item embedded in OpenCAD model space. Overlay items
+/// are not CAD entities and therefore never leak into DWG/DXF persistence.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum MetalOverlayKind {
+    Agent,
+    Comment,
+    Preview,
+    ComponentReview,
+    Generic,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct MetalModelOverlayAction {
+    pub id: String,
+    pub label: String,
+    pub tone: String,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct MetalModelOverlayItem {
+    pub id: String,
+    pub kind: MetalOverlayKind,
+    pub label: String,
+    pub detail: String,
+    pub state: String,
+    pub world: glam::DVec3,
+    pub entity_handles: Vec<codec::Handle>,
+    pub active: bool,
+    pub draggable: bool,
+    pub actions: Vec<MetalModelOverlayAction>,
+}
+
 /// What the Space / Enter keys currently mean at the command line. One
 /// decision point (`OpenCADStudio::text_entry_mode`) for every keyboard
 /// route that used to re-derive the answer from editor state.
@@ -389,6 +424,9 @@ pub(super) struct OpenCADStudio {
     active_tab: usize,
     hovered_doc_tab: Option<usize>,
     tab_counter: usize,
+    metal_model_overlays: Vec<MetalModelOverlayItem>,
+    metal_overlay_drag: Option<String>,
+    metal_qa_camera: Option<(usize, String, u64, crate::scene::view::camera::Camera)>,
     ribbon: Ribbon,
     /// Recently opened files, newest first — backs the Start page panel.
     recent_files: Vec<std::path::PathBuf>,
@@ -1316,7 +1354,6 @@ pub(super) struct OpenCADStudio {
     pending_tab_closes: std::collections::VecDeque<u64>,
     /// Latest save job per stable tab id. Older completions may finish, but
     /// cannot mark a newer document state clean or redirect its path.
-    #[cfg(not(target_arch = "wasm32"))]
     active_save_jobs: std::collections::HashMap<u64, u64>,
     #[cfg(not(target_arch = "wasm32"))]
     save_job_serial: u64,
@@ -2103,6 +2140,15 @@ pub enum Message {
     /// Web: periodic check for per-script fonts a drawing needs but hasn't
     /// fetched yet (#141). Native: never emitted.
     PollWebFonts,
+    /// Metal desktop host: poll the same-origin command queue used to feed
+    /// NEW and user-approved project files into this WASM Studio instance.
+    #[cfg(target_arch = "wasm32")]
+    MetalBridgePoll,
+    /// A host-owned model-space bubble was clicked. These overlays are UI
+    /// only and never become drawing entities.
+    MetalOverlayClicked(String),
+    /// An action inside a host-owned model-space bubble was clicked.
+    MetalOverlayAction(String, String),
     /// Web: a per-script font finished fetching — `Ok(bytes)` or `Err(reason)`.
     WebFontLoaded(
         crate::scene::text::web_font::Script,
@@ -2460,6 +2506,16 @@ pub enum Message {
         version: codec::DxfVersion,
         bounds: Option<iced::Rectangle>,
         screenshot: Option<iced::window::Screenshot>,
+    },
+    #[cfg(target_arch = "wasm32")]
+    WebSaveCompleted {
+        tab_id: u64,
+        revision: u64,
+        epoch: u64,
+        filename: String,
+        version: codec::DxfVersion,
+        close_after: bool,
+        result: Result<bool, String>,
     },
     /// Retry the failed save after the other application releases the file.
     #[cfg(not(target_arch = "wasm32"))]
@@ -3969,6 +4025,9 @@ impl OpenCADStudio {
             active_tab: 0,
             hovered_doc_tab: None,
             tab_counter: 0,
+            metal_model_overlays: Vec::new(),
+            metal_overlay_drag: None,
+            metal_qa_camera: None,
             ribbon: Ribbon::new(),
             // Populated from the consolidated config after construction
             // (`apply_config`); default empty here.
@@ -4279,7 +4338,6 @@ impl OpenCADStudio {
             queued_interaction_indices: std::collections::VecDeque::new(),
             pending_close: None,
             pending_tab_closes: std::collections::VecDeque::new(),
-            #[cfg(not(target_arch = "wasm32"))]
             active_save_jobs: std::collections::HashMap::new(),
             #[cfg(not(target_arch = "wasm32"))]
             save_job_serial: 0,

@@ -170,6 +170,17 @@ pub(crate) fn entity_type_matches(entity: &codec::EntityType, requested: &str) -
 
 /// One entity as JSON. Summary mode carries identity only, geometry adds the
 /// entity's defining values, and full also includes its world bounds.
+fn color_json(color: codec::types::Color) -> Value {
+    use codec::types::Color;
+    match color {
+        Color::Index(index) => json!(index),
+        Color::Rgb { r, g, b } => json!({"r": r, "g": g, "b": b}),
+        Color::ByLayer => json!("ByLayer"),
+        Color::ByBlock => json!("ByBlock"),
+        Color::None => json!("None"),
+    }
+}
+
 pub(crate) fn entity_json(e: &codec::EntityType, detail: &str) -> Value {
     use codec::EntityType as E;
     let c = e.common();
@@ -182,10 +193,32 @@ pub(crate) fn entity_json(e: &codec::EntityType, detail: &str) -> Value {
         return obj;
     }
     let map = obj.as_object_mut().expect("json object");
+    // Preserve presentation evidence alongside geometry. Without these fields
+    // template transfer can only guess colors and lineweights from layer names.
+    use codec::types::LineWeight;
+    map.insert("color".into(), color_json(c.color));
+    map.insert("linetype".into(), json!(c.linetype));
+    map.insert("linetypeScale".into(), json!(c.linetype_scale));
+    map.insert(
+        "lineweight".into(),
+        match c.line_weight {
+            LineWeight::Value(value) => json!(value as f64 / 100.0),
+            LineWeight::ByLayer => json!("ByLayer"),
+            LineWeight::ByBlock => json!("ByBlock"),
+            LineWeight::Default => json!("Default"),
+        },
+    );
     match e {
         E::Line(l) => {
             map.insert("start".into(), v3(l.start));
             map.insert("end".into(), v3(l.end));
+        }
+        E::Spline(spline) => {
+            map.insert(
+                "samplePoints".into(),
+                json!(crate::entities::spline::measurement_polyline(spline)),
+            );
+            map.insert("degree".into(), json!(spline.degree));
         }
         E::Circle(cc) => {
             map.insert("center".into(), v3(cc.center));
@@ -215,13 +248,50 @@ pub(crate) fn entity_json(e: &codec::EntityType, detail: &str) -> Value {
         }
         E::MText(t) => {
             map.insert("value".into(), json!(t.value));
-            map.insert(
-                "text".into(),
-                json!(codec::entities::mtext_format::parse_mtext(&t.value, true)
-                    .to_plain_text()),
-            );
+            let plain = codec::entities::mtext_format::parse_mtext(&t.value, true)
+                .to_plain_text();
+            map.insert("text".into(), json!(plain));
+            map.insert("plainText".into(), json!(plain));
             map.insert("position".into(), v3(t.insertion_point));
             map.insert("height".into(), json!(t.height));
+        }
+        E::Dimension(dimension) => {
+            use codec::entities::Dimension;
+            let base = dimension.base();
+            map.insert("dimensionStyleName".into(), json!(base.style_name));
+            map.insert("definitionPoint".into(), v3(base.definition_point));
+            map.insert("textMiddlePoint".into(), v3(base.text_middle_point));
+            map.insert(
+                "textUserPositioned".into(),
+                json!(base.text_user_positioned),
+            );
+            map.insert("textRotation".into(), json!(base.text_rotation));
+            map.insert("measurement".into(), json!(base.actual_measurement));
+            map.insert(
+                "textOverride".into(),
+                json!(base.user_text.as_deref().unwrap_or(&base.text)),
+            );
+            match dimension {
+                Dimension::Linear(d) => {
+                    map.insert("dimensionKind".into(), json!("linear"));
+                    map.insert("firstPoint".into(), v3(d.first_point));
+                    map.insert("secondPoint".into(), v3(d.second_point));
+                    map.insert("definitionPoint".into(), v3(d.definition_point));
+                    map.insert("rotation".into(), json!(d.rotation));
+                }
+                Dimension::Aligned(d) => {
+                    map.insert("dimensionKind".into(), json!("aligned"));
+                    map.insert("firstPoint".into(), v3(d.first_point));
+                    map.insert("secondPoint".into(), v3(d.second_point));
+                    map.insert("definitionPoint".into(), v3(d.definition_point));
+                }
+                _ => {
+                    map.insert(
+                        "dimensionKind".into(),
+                        json!(format!("{:?}", base.dimension_type)),
+                    );
+                }
+            }
         }
         E::LwPolyline(pl) => {
             let pts: Vec<Value> = pl
@@ -230,6 +300,42 @@ pub(crate) fn entity_json(e: &codec::EntityType, detail: &str) -> Value {
                 .map(|v| json!([v.location.x, v.location.y]))
                 .collect();
             map.insert("vertices".into(), json!(pts));
+        }
+        E::Polyline2D(pl) => {
+            // Legacy DWG polylines keep vertices in OCS. Metal's topology
+            // contract consumes world points, matching the browser bridge.
+            let ocs = codec::types::Matrix3::arbitrary_axis(pl.normal);
+            let pts: Vec<Value> = pl
+                .vertices
+                .iter()
+                .map(|vertex| {
+                    v3(ocs
+                        * codec::types::Vector3::new(
+                            vertex.location.x,
+                            vertex.location.y,
+                            pl.elevation,
+                        ))
+                })
+                .collect();
+            map.insert("vertices".into(), json!(pts));
+            map.insert("closed".into(), json!(pl.is_closed()));
+            map.insert(
+                "bulges".into(),
+                json!(pl.vertices.iter().map(|v| v.bulge).collect::<Vec<_>>()),
+            );
+            map.insert("normal".into(), v3(pl.normal));
+        }
+        E::Polyline3D(pl) => {
+            map.insert(
+                "vertices".into(),
+                json!(pl
+                    .vertices
+                    .iter()
+                    .map(|v| v3(v.position))
+                    .collect::<Vec<_>>()),
+            );
+            map.insert("closed".into(), json!(pl.is_closed()));
+            map.insert("normal".into(), v3(pl.normal));
         }
         E::Insert(ins) => {
             map.insert("block".into(), json!(ins.block_name));
@@ -1099,6 +1205,74 @@ impl OpenCADStudio {
                 continue;
             }
             let mut entity = entity_json(e, detail);
+            if detail != "summary" {
+                if let codec::EntityType::Dimension(dimension) = e {
+                    if let Some(style) = tab.scene.document.dim_styles.iter().find(|style| {
+                        style
+                            .name
+                            .eq_ignore_ascii_case(&dimension.base().style_name)
+                            || (dimension.base().style_name.trim().is_empty()
+                                && style.name.eq_ignore_ascii_case("Standard"))
+                    }) {
+                        let mut effective = crate::entities::dimension::resolved_dimension_style(
+                            style,
+                            dimension,
+                            &tab.scene.document,
+                        );
+                        // Surface resource failures during read-only evidence
+                        // collection, before planning a native transaction.
+                        match crate::app::reference_dimension_style::copy_style(
+                            &tab.scene.document, &effective, &effective.name,
+                        ) {
+                            // Publish the resolved name for post-write style
+                            // comparison; retain source handles for provenance.
+                            Ok(resolved) => {
+                                if effective.dimtxsty != resolved.dimtxsty
+                                    && tab.scene.document.text_styles.get(&effective.dimtxsty).is_none()
+                                    && !tab.scene.document.text_styles.iter().any(|entry|
+                                        !effective.dimtxsty_handle.is_null() && entry.handle == effective.dimtxsty_handle)
+                                {
+                                    entity.as_object_mut().expect("entity JSON object").insert(
+                                        "dimensionStyleSubstitution".into(),
+                                        json!(format!("Reference text style {} is unavailable; dimensions use the native Standard text style. Other DIMSTYLE settings are preserved.", effective.dimtxsty)),
+                                    );
+                                }
+                                effective.dimtxsty = resolved.dimtxsty;
+                            },
+                            Err(reason) => {
+                                entity.as_object_mut().expect("entity JSON object").insert(
+                                    "dimensionStyleResourceError".into(), json!(reason),
+                                );
+                            }
+                        }
+                        entity.as_object_mut().expect("entity JSON object").insert(
+                            "effectiveDimensionStyle".into(),
+                            serde_json::to_value(effective).expect("dimension style JSON"),
+                        );
+                    } else {
+                        entity.as_object_mut().expect("entity JSON object").insert(
+                            "dimensionStyleResourceError".into(),
+                            json!(format!("Reference dimension style {} is missing from this drawing", dimension.base().style_name)),
+                        );
+                    }
+                }
+                let color = match e.common().color {
+                    codec::types::Color::ByLayer => tab
+                        .scene
+                        .document
+                        .layers
+                        .get(&e.common().layer)
+                        .map(|layer| layer.color),
+                    codec::types::Color::ByBlock | codec::types::Color::None => None,
+                    explicit => Some(explicit),
+                };
+                if let Some(color) = color {
+                    entity
+                        .as_object_mut()
+                        .expect("entity JSON object")
+                        .insert("resolvedColor".into(), color_json(color));
+                }
+            }
             if let Some(nearest) = nearest {
                 let object = entity.as_object_mut().expect("entity JSON object");
                 object.insert("distance".into(), json!(nearest.distance));
@@ -1576,6 +1750,129 @@ mod tests {
         assert_eq!(audit["ok"], false, "{audit}");
         assert_eq!(audit["orphaned_objects"], serde_json::json!(["23"]));
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn full_query_preserves_entity_presentation() {
+        use codec::{
+            entities::Line,
+            types::{Color, LineWeight, Vector3},
+            EntityType,
+        };
+        let mut line = Line::new();
+        line.end = Vector3::new(10.0, 0.0, 0.0);
+        line.common.color = Color::Index(6);
+        line.common.line_weight = LineWeight::Value(13);
+        line.common.linetype = "Continuous".into();
+        let full = super::entity_json(&EntityType::Line(line), "full");
+        assert_eq!(full["color"], 6);
+        assert_eq!(full["lineweight"], 0.13);
+        assert_eq!(full["linetype"], "Continuous");
+    }
+
+    #[test]
+    fn template_query_resolves_layer_colors_and_mtext_display_text() {
+        use codec::{entities::MText, types::Color, EntityType};
+        let mut app = OpenCADStudio::new_for_test();
+        app.automation_op(r#"{"op":"new"}"#);
+        let document = &mut app.tabs[app.active_tab].scene.document;
+        document.layers.get_mut("0").unwrap().color = Color::Index(6);
+        let mut text = MText::new();
+        text.value = r"{\fArial|b0;SECTION}".into();
+        text.common.layer = "0".into();
+        text.common.color = Color::ByLayer;
+        document.add_entity(EntityType::MText(text)).unwrap();
+        let result = app.automation_op(r#"{"op":"query","detail":"full"}"#);
+        let text = result["entities"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|e| e["type"] == "MText")
+            .unwrap();
+        assert_eq!(text["color"], "ByLayer");
+        assert_eq!(text["resolvedColor"], 6);
+        assert_eq!(text["plainText"], "SECTION");
+    }
+
+    #[test]
+    fn template_query_preserves_dimension_definition_and_style() {
+        use codec::{
+            entities::{Dimension, DimensionLinear},
+            tables::DimStyle,
+            types::Vector3,
+            EntityType,
+        };
+        let mut app = OpenCADStudio::new_for_test();
+        app.automation_op(r#"{"op":"new"}"#);
+        let document = &mut app.tabs[app.active_tab].scene.document;
+        let mut style = DimStyle::new("REFERENCE_DIM");
+        style.dimtxt = 2.5;
+        style.dimscale = 20.0;
+        style.dimdec = 0;
+        style.dimclrd = 1;
+        style.dimclrt = 3;
+        document.dim_styles.add(style).unwrap();
+        let mut dimension = DimensionLinear::horizontal(
+            Vector3::new(10.0, 30.0, 0.0),
+            Vector3::new(70.0, 50.0, 0.0),
+        );
+        dimension.definition_point = Vector3::new(70.0, 10.0, 0.0);
+        dimension.base.definition_point = dimension.definition_point;
+        dimension.base.style_name = "REFERENCE_DIM".into();
+        document
+            .add_entity(EntityType::Dimension(Dimension::Linear(dimension)))
+            .unwrap();
+        let result = app.automation_op(r#"{"op":"query","detail":"full"}"#);
+        let entity = &result["entities"][0];
+        assert_eq!(entity["firstPoint"], serde_json::json!([10.0, 30.0, 0.0]));
+        assert_eq!(
+            entity["definitionPoint"],
+            serde_json::json!([70.0, 10.0, 0.0])
+        );
+        assert_eq!(entity["effectiveDimensionStyle"]["dimscale"], 20.0);
+        assert_eq!(entity["effectiveDimensionStyle"]["dimclrt"], 3);
+        assert_eq!(entity["effectiveDimensionStyle"]["dimdec"], 0);
+        assert!(entity.get("dimensionStyleResourceError").is_none());
+        let document = &mut app.tabs[app.active_tab].scene.document;
+        let style = document.dim_styles.get_mut("REFERENCE_DIM").unwrap();
+        style.dimtxsty = "Gdim".into();
+        style.dimtxsty_handle = Default::default();
+        let result = app.automation_op(r#"{"op":"query","detail":"full"}"#);
+        assert!(result["entities"][0].get("dimensionStyleResourceError").is_none());
+        assert_eq!(result["entities"][0]["effectiveDimensionStyle"]["dimtxsty"], "Standard");
+        assert!(result["entities"][0]["dimensionStyleSubstitution"].as_str().unwrap().contains("Gdim"));
+    }
+
+    #[test]
+    fn full_query_preserves_legacy_polyline_world_vertices() {
+        use codec::{
+            entities::{Polyline2D, Polyline3D, Vertex2D},
+            types::Vector3,
+            EntityType,
+        };
+        let mut polyline = Polyline2D::new();
+        polyline.normal = Vector3::new(0.0, 1.0, 0.0);
+        polyline.elevation = 7.0;
+        polyline.add_vertex(Vertex2D::new(Vector3::new(2.0, 3.0, 0.0)).with_bulge(0.5));
+        polyline.add_vertex(Vertex2D::new(Vector3::new(4.0, 5.0, 0.0)));
+        let entity = EntityType::Polyline2D(polyline);
+        let full = super::entity_json(&entity, "full");
+        assert_eq!(
+            full["vertices"],
+            serde_json::json!([[-2.0, 7.0, 3.0], [-4.0, 7.0, 5.0]])
+        );
+        assert_eq!(full["bulges"], serde_json::json!([0.5, 0.0]));
+        assert!(super::entity_json(&entity, "summary")
+            .get("vertices")
+            .is_none());
+
+        let mut polyline = Polyline3D::new();
+        polyline.add_vertex(Vector3::new(1.0, 2.0, 3.0));
+        polyline.add_vertex(Vector3::new(4.0, 5.0, 6.0));
+        assert_eq!(
+            super::entity_json(&EntityType::Polyline3D(polyline), "full")["vertices"],
+            serde_json::json!([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])
+        );
     }
 
     #[test]

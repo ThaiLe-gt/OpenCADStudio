@@ -616,6 +616,16 @@ impl OpenCADStudio {
             }
             #[cfg(not(target_arch = "wasm32"))]
             Message::PollWebControl => Task::none(),
+            #[cfg(target_arch = "wasm32")]
+            Message::MetalBridgePoll => self.on_metal_bridge_poll(),
+            Message::MetalOverlayClicked(overlay_id) => {
+                self.publish_metal_overlay_event(&overlay_id, None);
+                Task::none()
+            }
+            Message::MetalOverlayAction(overlay_id, action_id) => {
+                self.publish_metal_overlay_event(&overlay_id, Some(&action_id));
+                Task::none()
+            }
             Message::ControlStep(id, message) => self.control_step(id, *message),
             Message::ControlTaskDone(id) => {
                 self.control_task_done(&id);
@@ -783,6 +793,7 @@ impl OpenCADStudio {
                         recovery_error: None,
                         recovery_read_stats: None,
                         recovery_bytes: None,
+                        metal_command_id: None,
                     });
                     Task::perform(crate::io::open_recent_web(path, state), move |outcome| {
                         Message::WebFileOpened(open_id, outcome)
@@ -1019,6 +1030,8 @@ impl OpenCADStudio {
                     recovery_read_stats: None,
                     #[cfg(target_arch = "wasm32")]
                     recovery_bytes: None,
+                    #[cfg(target_arch = "wasm32")]
+                    metal_command_id: None,
                     #[cfg(not(target_arch = "wasm32"))]
                     fingerprint: crate::io::edit_lock::FileFingerprint::capture(&path).ok(),
                 });
@@ -9444,6 +9457,25 @@ impl OpenCADStudio {
                 bounds,
                 screenshot,
             } => self.on_web_save_screenshot(tab_id, filename, ext, version, bounds, screenshot),
+
+            #[cfg(target_arch = "wasm32")]
+            Message::WebSaveCompleted {
+                tab_id,
+                revision,
+                epoch,
+                filename,
+                version,
+                close_after,
+                result,
+            } => self.on_web_save_completed(
+                tab_id,
+                revision,
+                epoch,
+                filename,
+                version,
+                close_after,
+                result,
+            ),
 
             #[cfg(not(target_arch = "wasm32"))]
             Message::SaveFileInUseRetry => self.on_save_file_in_use_retry(),

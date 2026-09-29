@@ -19,6 +19,36 @@ use codec::{EntityType as AcadEntityType, Handle};
 use iced::time::Instant;
 use iced::{mouse, Point, Task};
 
+// The host limits each model proposal to 24 components, then merges targets
+// into one atomic transaction. The native bound applies to that whole batch.
+fn validate_native_component_count(count: u32) -> Result<(), String> {
+    if count > 500 {
+        return Err("native transaction supports at most 500 component transforms".into());
+    }
+    Ok(())
+}
+
+// The host verifies these rectangles against its locked template evidence.
+// Keep the native copy path restricted to straight, closed scaffold geometry.
+fn is_native_scaffold_rectangle(entity: &AcadEntityType) -> bool {
+    let (closed, vertices): (bool, Vec<(f64, f64, f64)>) = match entity {
+        AcadEntityType::Polyline2D(p) => (p.is_closed(), p.vertices.iter()
+            .map(|v| (v.location.x, v.location.y, v.bulge)).collect()),
+        AcadEntityType::LwPolyline(p) => (p.is_closed, p.vertices.iter()
+            .map(|v| (v.location.x, v.location.y, v.bulge)).collect()),
+        _ => return false,
+    };
+    let points = if vertices.len() == 5 && vertices.first() == vertices.last() {
+        &vertices[..4]
+    } else { &vertices[..] };
+    closed && points.len() == 4 && points.iter().enumerate().all(|(i, &(x, y, bulge))| {
+        let (next_x, next_y, _) = points[(i + 1) % 4];
+        x.is_finite() && y.is_finite() && bulge == 0.0
+            && ((x == next_x) != (y == next_y))
+            && points.iter().filter(|&&(px, py, _)| px == x && py == y).count() == 1
+    })
+}
+
 pub(super) fn background_task<T, F, M>(work: F, map: M) -> Task<Message>
 where
     T: Send + 'static,
@@ -97,6 +127,7 @@ fn plot_dialog_orientation(
         Orientation::Portrait
     } else {
         Orientation::Landscape
+
     }
 }
 
@@ -324,6 +355,7 @@ fn plot_content_extents(content: &PlotContent) -> Option<(f64, f64, f64, f64)> {
                 hatch.world_origin[0] + x as f64,
                 hatch.world_origin[1] + y as f64,
             );
+
         }
     }
     for plot in images {
@@ -443,6 +475,7 @@ fn plot_scene_content(
             group_splits: splits,
         };
     }
+
     let (mut model_pattern_wires, model_hatches, model_wipeouts, model_images) =
         scene.viewport_plot_fills();
     model_pattern_wires.retain(|(wire, _)| wire.plot_visible);
@@ -493,6 +526,44 @@ fn plot_scene_content(
 }
 
 impl OpenCADStudio {
+    pub(super) fn publish_metal_overlay_event(&self, overlay_id: &str, action_id: Option<&str>) {
+        #[cfg(target_arch = "wasm32")]
+        {
+            use wasm_bindgen::JsValue;
+            let Some(item) = self.metal_model_overlays.iter().find(|item| item.id == overlay_id) else {
+                return;
+            };
+            let message = js_sys::Object::new();
+            let set = |key: &str, value: &JsValue| {
+                let _ = js_sys::Reflect::set(&message, &JsValue::from_str(key), value);
+            };
+            set("source", &JsValue::from_str("opencadstudio"));
+            set("type", &JsValue::from_str(if action_id.is_some() { "model_overlay_action" } else { "model_overlay_clicked" }));
+            set("overlayId", &JsValue::from_str(overlay_id));
+            let kind = match item.kind {
+                crate::app::MetalOverlayKind::Agent => "agent",
+                crate::app::MetalOverlayKind::Comment => "comment",
+                crate::app::MetalOverlayKind::Preview => "preview",
+                crate::app::MetalOverlayKind::ComponentReview => "component_review",
+                crate::app::MetalOverlayKind::Generic => "generic",
+            };
+            set("kind", &JsValue::from_str(kind));
+            set("selectedHandleCount", &JsValue::from_f64(item.entity_handles.len() as f64));
+            if let Some(action_id) = action_id {
+                set("actionId", &JsValue::from_str(action_id));
+            }
+            if let Some(window) = web_sys::window() {
+                if let Ok(Some(parent)) = window.parent() {
+                    let _ = parent.post_message(&message, "*");
+                }
+            }
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let _ = (overlay_id, action_id);
+        }
+    }
+
     /// Persist exact ACIS bodies and kernel-derived edge caches before saving.
     fn sync_solid_models_for_save(&mut self, i: usize) {
         use codec::EntityType;
@@ -583,10 +654,6 @@ impl OpenCADStudio {
     }
 
     /// Rebuild text geometry in every open drawing.
-    ///
-    /// `TEXTFILL` is a process-global, so a change to it invalidates the text
-    /// in every tab. Doing only the active one leaves the others rendering the
-    /// previous setting until some unrelated edit happens to rebuild them.
     pub(in crate::app) fn invalidate_text_everywhere(&mut self) {
         for tab in &mut self.tabs {
             tab.scene.invalidate_text_geometry_dependencies();
@@ -684,6 +751,7 @@ impl OpenCADStudio {
         self.zoom_factor = s.zoom_factor.clamp(3, 100);
         self.cursor_size = s.cursor_size.clamp(1, 100);
         self.pick_box = s.pick_box.clamp(0, 50);
+
         self.options_tab = s.options_tab;
         self.spacemouse_preferences = s.spacemouse;
         // These four drive real features with commands and status-bar pills,
@@ -713,9 +781,6 @@ impl OpenCADStudio {
         } else {
             0.0
         };
-        // The Options field edits a buffer rather than the value, so it has to
-        // be reseeded whenever the value is restored from behind it.
-        self.snap_angle_input = crate::app::settings::format_snap_angle(self.snap_angle_deg);
         // Ortho + running OSNAP are per-drawing (adopted from the header on
         // open / tab switch), not app-global, so they are not applied here.
         self.snapper.otrack_enabled = s.otrack;
@@ -724,7 +789,6 @@ impl OpenCADStudio {
         self.font_source_url = s.font_source_url.clone();
         self.font_source_input = s.font_source_url.clone();
         self.donation_prompt_version = s.donation_prompt_version.clone();
-        self.gpu_warning_silenced = s.gpu_warning_silenced.clone();
         self.disabled_plugins = s.disabled_plugins.iter().cloned().collect();
         self.plugin_repos = s.plugin_repos.clone();
         self.command_line.literal_spaces = s.literal_spaces;
@@ -742,10 +806,10 @@ impl OpenCADStudio {
         self.texteditmode = s.texteditmode;
         self.quick_dimension_snap_priority = s.quick_dimension_snap_priority.min(1);
         self.dimension_continue_mode = s.dimension_continue_mode.clamp(0, 1);
-        self.delete_objects = s.delete_objects.clamp(0, 3);
         crate::scene::text::sdf_atlas::set_textfill(s.textfill);
         self.backup_on_save = s.backup_on_save;
         self.file_assoc_enabled = s.file_assoc_enabled;
+
         self.show_constraint_values = s.show_constraint_values;
         self.auto_constrain_settings = s.auto_constrain.clone();
         self.auto_constrain_settings.sanitize();
@@ -764,6 +828,7 @@ impl OpenCADStudio {
         self.pick_add = s.pick_add;
         self.pick_drag_rect = s.pick_drag_rect;
         self.quick_properties = s.quick_properties;
+        // Legacy settings.bg_color / paper_bg_color are superseded by model_space config.
         if crate::i18n::set_language(s.language).is_ok() {
             self.language = s.language;
         }
@@ -774,6 +839,7 @@ impl OpenCADStudio {
             crate::app::settings::clamp_commandline_fade_ms(s.commandline_fade_ms);
         self.command_line
             .set_commandline_fade_ms(self.commandline_fade_ms.clamp(0, 60000) as u32);
+
         self.snapper.snap_spacing_x =
             crate::app::settings::sanitize_snap_spacing(s.snap_spacing_x);
         self.snapper.snap_spacing_y =
@@ -1215,6 +1281,7 @@ impl OpenCADStudio {
     }
 
     pub(super) fn on_open_file(&mut self) -> Task<Message> {
+
         // Native: pick a path, then load on a worker thread. Web: the
         // browser hands back bytes, so pick + parse in one step and feed
         // the shared `FileOpened` handler directly.
@@ -1224,6 +1291,7 @@ impl OpenCADStudio {
         }
         #[cfg(target_arch = "wasm32")]
         {
+
             // The browser picker + parse happen inside `pick_and_load_web`;
             // the real name is unknown until then, so show a generic label
             // meanwhile.
@@ -1234,8 +1302,3020 @@ impl OpenCADStudio {
         }
     }
 
-    /// Web: open a drawing from bytes the caller already holds, through the
-    /// same path as a file chosen in the browser picker.
+
+    #[cfg(target_arch = "wasm32")]
+    pub(super) fn on_metal_bridge_poll(&mut self) -> Task<Message> {
+        use wasm_bindgen::{JsCast, JsValue};
+
+        let Some(window) = web_sys::window() else {
+            return Task::none();
+        };
+        // Ingest the host overlay registry. Comments, agent presence and future
+        // collaboration items all share this one model-space bridge contract.
+        if let Ok(registry) = js_sys::Reflect::get(
+            window.as_ref(),
+            &JsValue::from_str("__METAL_MODEL_OVERLAY_REGISTRY"),
+        ) {
+            let items = js_sys::Reflect::get(&registry, &JsValue::from_str("items"))
+                .unwrap_or(JsValue::UNDEFINED);
+            if js_sys::Array::is_array(&items) {
+                let items = js_sys::Array::from(&items);
+                let mut parsed = Vec::with_capacity(items.length() as usize);
+                for item in items.iter() {
+                    let id = js_sys::Reflect::get(&item, &JsValue::from_str("id"))
+                        .ok()
+                        .and_then(|value| value.as_string())
+                        .unwrap_or_default();
+                    let world = js_sys::Reflect::get(&item, &JsValue::from_str("world")).ok();
+                    let coordinate = |name: &str| {
+                        world.as_ref().and_then(|value| {
+                            js_sys::Reflect::get(value, &JsValue::from_str(name))
+                                .ok()
+                                .and_then(|coordinate| coordinate.as_f64())
+                        })
+                    };
+                    let (Some(x), Some(y)) = (coordinate("x"), coordinate("y")) else {
+                        continue;
+                    };
+                    let z = coordinate("z").unwrap_or(0.0);
+                    let mut entity_handles = Vec::new();
+                    if let Ok(raw_handles) =
+                        js_sys::Reflect::get(&item, &JsValue::from_str("entityHandles"))
+                    {
+                        if js_sys::Array::is_array(&raw_handles) {
+                            for value in js_sys::Array::from(&raw_handles).iter() {
+                                let Some(raw) = value.as_string() else {
+                                    continue;
+                                };
+                                let normalized =
+                                    raw.trim().trim_start_matches("0x").trim_start_matches("0X");
+                                if let Ok(value) = u64::from_str_radix(normalized, 16) {
+                                    entity_handles.push(codec::Handle::new(value));
+                                }
+                            }
+                        }
+                    }
+                    let label = js_sys::Reflect::get(&item, &JsValue::from_str("label"))
+                        .ok()
+                        .and_then(|value| value.as_string())
+                        .filter(|value| !value.trim().is_empty())
+                        .unwrap_or_else(|| "Overlay".to_string());
+                    let detail = js_sys::Reflect::get(&item, &JsValue::from_str("detail"))
+                        .ok()
+                        .and_then(|value| value.as_string())
+                        .unwrap_or_default();
+                    let state = js_sys::Reflect::get(&item, &JsValue::from_str("state"))
+                        .ok()
+                        .and_then(|value| value.as_string())
+                        .unwrap_or_else(|| "open".to_string());
+                    let kind = match js_sys::Reflect::get(&item, &JsValue::from_str("kind"))
+                        .ok()
+                        .and_then(|value| value.as_string())
+                        .as_deref()
+                    {
+                        Some("agent") => crate::app::MetalOverlayKind::Agent,
+                        Some("comment") => crate::app::MetalOverlayKind::Comment,
+                        Some("preview") => crate::app::MetalOverlayKind::Preview,
+                        Some("component_review") => crate::app::MetalOverlayKind::ComponentReview,
+                        _ => crate::app::MetalOverlayKind::Generic,
+                    };
+                    let active = js_sys::Reflect::get(&item, &JsValue::from_str("active"))
+                        .ok()
+                        .and_then(|value| value.as_bool())
+                        .unwrap_or(false);
+                    let draggable = js_sys::Reflect::get(&item, &JsValue::from_str("draggable"))
+                        .ok()
+                        .and_then(|value| value.as_bool())
+                        .unwrap_or(false);
+                    let mut actions = Vec::new();
+                    if let Ok(raw_actions) =
+                        js_sys::Reflect::get(&item, &JsValue::from_str("actions"))
+                    {
+                        if js_sys::Array::is_array(&raw_actions) {
+                            for action in js_sys::Array::from(&raw_actions).iter().take(4) {
+                                let id = js_sys::Reflect::get(&action, &JsValue::from_str("id"))
+                                    .ok()
+                                    .and_then(|value| value.as_string())
+                                    .unwrap_or_default();
+                                let label =
+                                    js_sys::Reflect::get(&action, &JsValue::from_str("label"))
+                                        .ok()
+                                        .and_then(|value| value.as_string())
+                                        .unwrap_or_default();
+                                let tone =
+                                    js_sys::Reflect::get(&action, &JsValue::from_str("tone"))
+                                        .ok()
+                                        .and_then(|value| value.as_string())
+                                        .unwrap_or_else(|| "neutral".to_string());
+                                if !id.is_empty() && !label.is_empty() {
+                                    actions.push(crate::app::MetalModelOverlayAction {
+                                        id,
+                                        label,
+                                        tone,
+                                    });
+                                }
+                            }
+                        }
+                    }
+                    if !id.is_empty() {
+                        parsed.push(crate::app::MetalModelOverlayItem {
+                            id,
+                            kind,
+                            label,
+                            detail,
+                            state,
+                            world: glam::DVec3::new(x, y, z),
+                            entity_handles,
+                            active,
+                            draggable,
+                            actions,
+                        });
+                    }
+                }
+                if let Some(drag_id) = self.metal_overlay_drag.as_ref() {
+                    if let Some(current) = self
+                        .metal_model_overlays
+                        .iter()
+                        .find(|item| &item.id == drag_id)
+                    {
+                        if let Some(incoming) = parsed.iter_mut().find(|item| &item.id == drag_id) {
+                            incoming.world = current.world;
+                        }
+                    }
+                }
+                if self.metal_model_overlays != parsed {
+                    let handle_count: usize =
+                        parsed.iter().map(|item| item.entity_handles.len()).sum();
+                    eprintln!(
+                        "[metal:overlay] registry.synced items={} entityHandles={}",
+                        parsed.len(),
+                        handle_count
+                    );
+                    self.metal_model_overlays = parsed;
+                }
+            }
+        }
+        // Publish only identity-level selection context to the Metal parent.
+        // Geometry and style facts still come from the native OpenCAD adapter.
+        let tab = &self.tabs[self.active_tab];
+        let mut handles = tab
+            .scene
+            .selected
+            .iter()
+            .map(|handle| format!("{handle:X}"))
+            .collect::<Vec<_>>();
+        handles.sort();
+        let document_name = tab.tab_display_name();
+        let layout = tab.scene.current_layout.clone();
+        let revision = tab.scene.geometry_epoch.to_string();
+        let _ = js_sys::Reflect::set(
+            &window,
+            &JsValue::from_str("__METAL_DRAWING_NAME"),
+            &JsValue::from_str(&document_name),
+        );
+        let _ = js_sys::Reflect::set(
+            &window,
+            &JsValue::from_str("__METAL_DRAWING_REVISION"),
+            &JsValue::from_str(&revision),
+        );
+        let selection_bounds: Option<(glam::DVec3, glam::DVec3)> = tab
+            .selected_grips
+            .iter()
+            .map(|grip| grip.world)
+            .fold(None, |bounds, world| {
+                Some(match bounds {
+                    None => (world, world),
+                    Some((min, max)) => (min.min(world), max.max(world)),
+                })
+            });
+        // Some native entities (notably INSERT/block references and a few
+        // proxy types) do not expose a useful direct bounding_box(). Their
+        // grips are already evaluated in world space, however. Preserve a
+        // per-entity fallback AABB so Metal's local component clusterer does
+        // not assign the same overall selection bounds to every such handle.
+        let detailed_selection = js_sys::Reflect::get(
+            window.as_ref(),
+            &JsValue::from_str("__METAL_SELECTION_DETAILS_REQUESTED"),
+        )
+        .ok()
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false);
+        let mut grip_bounds_by_handle =
+            std::collections::HashMap::<codec::Handle, [f64; 6]>::new();
+        if detailed_selection {
+            for (handle, grip) in tab
+                .selected_grip_handles
+                .iter()
+                .copied()
+                .zip(tab.selected_grips.iter())
+            {
+                grip_bounds_by_handle
+                    .entry(handle)
+                    .and_modify(|bounds| {
+                        bounds[0] = bounds[0].min(grip.world.x);
+                        bounds[1] = bounds[1].min(grip.world.y);
+                        bounds[2] = bounds[2].min(grip.world.z);
+                        bounds[3] = bounds[3].max(grip.world.x);
+                        bounds[4] = bounds[4].max(grip.world.y);
+                        bounds[5] = bounds[5].max(grip.world.z);
+                    })
+                    .or_insert([
+                        grip.world.x,
+                        grip.world.y,
+                        grip.world.z,
+                        grip.world.x,
+                        grip.world.y,
+                        grip.world.z,
+                    ]);
+            }
+        }
+        let state_key = format!(
+            "{}|{}|{}|{}|{}",
+            document_name,
+            layout,
+            revision,
+            handles.join(","),
+            detailed_selection
+        );
+        let last_key = js_sys::Reflect::get(
+            window.as_ref(),
+            &JsValue::from_str("__METAL_LAST_SELECTION_STATE"),
+        )
+        .ok()
+        .and_then(|value| value.as_string());
+        if last_key.as_deref() != Some(state_key.as_str()) {
+            let _ = js_sys::Reflect::set(
+                window.as_ref(),
+                &JsValue::from_str("__METAL_LAST_SELECTION_STATE"),
+                &JsValue::from_str(&state_key),
+            );
+            let message = js_sys::Object::new();
+            let _ = js_sys::Reflect::set(
+                &message,
+                &JsValue::from_str("source"),
+                &JsValue::from_str("opencadstudio"),
+            );
+            let _ = js_sys::Reflect::set(
+                &message,
+                &JsValue::from_str("type"),
+                &JsValue::from_str("selection_changed"),
+            );
+            let _ = js_sys::Reflect::set(
+                &message,
+                &JsValue::from_str("documentName"),
+                &JsValue::from_str(&document_name),
+            );
+            let _ = js_sys::Reflect::set(
+                &message,
+                &JsValue::from_str("layout"),
+                &JsValue::from_str(&layout),
+            );
+            let _ = js_sys::Reflect::set(
+                &message,
+                &JsValue::from_str("revision"),
+                &JsValue::from_str(&revision),
+            );
+            let units = match tab.scene.document.header.insertion_units {
+                1 => "in",
+                2 => "ft",
+                4 => "mm",
+                5 => "cm",
+                6 => "m",
+                _ => "unknown",
+            };
+            let _ = js_sys::Reflect::set(
+                &message,
+                &JsValue::from_str("units"),
+                &JsValue::from_str(units),
+            );
+            // The current camera basis lets Metal compare native 3-D shapes
+            // with the exact 2-D appearance the user sees, without confusing
+            // that projected evidence with WCS coordinates used by MOVE.
+            let view_frame = js_sys::Object::new();
+            {
+                let camera = tab.scene.camera.borrow();
+                let set_vec3 = |object: &js_sys::Object, key: &str, value: glam::DVec3| {
+                    let array = js_sys::Array::new();
+                    array.push(&JsValue::from_f64(value.x));
+                    array.push(&JsValue::from_f64(value.y));
+                    array.push(&JsValue::from_f64(value.z));
+                    let _ = js_sys::Reflect::set(object, &JsValue::from_str(key), &array);
+                };
+                set_vec3(
+                    &view_frame,
+                    "right",
+                    (camera.rotation * glam::Vec3::X).as_dvec3(),
+                );
+                set_vec3(
+                    &view_frame,
+                    "up",
+                    (camera.rotation * glam::Vec3::Y).as_dvec3(),
+                );
+                set_vec3(
+                    &view_frame,
+                    "forward",
+                    (camera.rotation * glam::Vec3::NEG_Z).as_dvec3(),
+                );
+                set_vec3(&view_frame, "origin", camera.target);
+                let _ = js_sys::Reflect::set(
+                    &view_frame,
+                    &JsValue::from_str("projection"),
+                    &JsValue::from_str(&format!("{:?}", camera.projection).to_lowercase()),
+                );
+            }
+            let _ = js_sys::Reflect::set(&message, &JsValue::from_str("viewFrame"), &view_frame);
+            let handle_array = js_sys::Array::new();
+            let entity_array = js_sys::Array::new();
+            // Identity must be published even when detailed geometry is deferred.
+            for handle in &handles {
+                handle_array.push(&JsValue::from_str(&handle));
+            }
+            if detailed_selection {
+                for handle in &handles {
+                    let normalized = handle
+                        .trim()
+                        .trim_start_matches("0x")
+                        .trim_start_matches("0X");
+                    let Ok(value) = u64::from_str_radix(normalized, 16) else {
+                        continue;
+                    };
+                    let Some(entity) = tab.scene.document.get_entity(codec::Handle::new(value))
+                    else {
+                        continue;
+                    };
+                    let Some(entity_world_bounds) = crate::scene::entity_world_aabb_3d_f64(entity)
+                        .or_else(|| {
+                            grip_bounds_by_handle
+                                .get(&codec::Handle::new(value))
+                                .copied()
+                        })
+                    else {
+                        continue;
+                    };
+                    let descriptor = js_sys::Object::new();
+                    let _ = js_sys::Reflect::set(
+                        &descriptor,
+                        &JsValue::from_str("handle"),
+                        &JsValue::from_str(handle),
+                    );
+                    let _ = js_sys::Reflect::set(
+                        &descriptor,
+                        &JsValue::from_str("type"),
+                        &JsValue::from_str(crate::entities::names::dxf_name(entity)),
+                    );
+                    let _ = js_sys::Reflect::set(
+                        &descriptor,
+                        &JsValue::from_str("layer"),
+                        &JsValue::from_str(entity.as_entity().layer()),
+                    );
+                    let common = entity.common();
+                    let layer = tab.scene.document.layers.get(&common.layer);
+                    let linetype = if common.linetype.eq_ignore_ascii_case("ByLayer") {
+                        layer
+                            .map(|layer| layer.line_type.as_str())
+                            .unwrap_or(&common.linetype)
+                    } else {
+                        &common.linetype
+                    };
+                    let lineweight = if common.line_weight.value() == -1 {
+                        layer.map(|layer| layer.line_weight.value()).unwrap_or(-1)
+                    } else {
+                        common.line_weight.value()
+                    };
+                    let color = if common.color.index() == Some(256) {
+                        layer.and_then(|layer| layer.color.index())
+                    } else {
+                        common.color.index()
+                    };
+                    let mut presentation =
+                        serde_json::json!({ "linetype": linetype, "lineweight": lineweight });
+                    if let Some(color) = color {
+                        presentation["color"] = serde_json::json!(color);
+                    }
+                    match entity {
+                        codec::EntityType::Text(text) => {
+                            presentation["height"] = serde_json::json!(text.height);
+                            presentation["style"] = serde_json::json!(text.style);
+                        }
+                        codec::EntityType::MText(text) => {
+                            presentation["height"] = serde_json::json!(text.height);
+                            presentation["style"] = serde_json::json!(text.style);
+                        }
+                        codec::EntityType::Dimension(dimension) => {
+                            let name = dimension.base().style_name.trim();
+                            let name = if name.is_empty() { "Standard" } else { name };
+                            presentation["dimension_style"] = serde_json::json!(name);
+                            if let Some(style) = tab.scene.document.dim_styles.get(name) {
+                                for (key, value) in [
+                                    ("dimtxt", style.dimtxt),
+                                    ("dimasz", style.dimasz),
+                                    ("dimgap", style.dimgap),
+                                    ("dimscale", style.dimscale),
+                                    ("dimexo", style.dimexo),
+                                    ("dimexe", style.dimexe),
+                                ] {
+                                    presentation[key] = serde_json::json!(value);
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                    if let Ok(properties) = js_sys::JSON::parse(&presentation.to_string()) {
+                        let _ = js_sys::Reflect::set(
+                            &descriptor,
+                            &JsValue::from_str("styleProperties"),
+                            &properties,
+                        );
+                    }
+                    let descriptor_bounds = js_sys::Array::new();
+                    for coordinate in [
+                        entity_world_bounds[0],
+                        entity_world_bounds[1],
+                        entity_world_bounds[3],
+                        entity_world_bounds[4],
+                    ] {
+                        descriptor_bounds.push(&JsValue::from_f64(coordinate));
+                    }
+                    let _ = js_sys::Reflect::set(
+                        &descriptor,
+                        &JsValue::from_str("bounds"),
+                        &descriptor_bounds,
+                    );
+                    let descriptor_world_bounds = js_sys::Array::new();
+                    for coordinate in entity_world_bounds {
+                        descriptor_world_bounds.push(&JsValue::from_f64(coordinate));
+                    }
+                    let _ = js_sys::Reflect::set(
+                        &descriptor,
+                        &JsValue::from_str("worldBounds"),
+                        &descriptor_world_bounds,
+                    );
+                    // Bounding boxes are sufficient for viewport hints, but not
+                    // for native component ownership or associative dimensions.
+                    // Keep a compact, bounded topology signature local to Metal
+                    // so the CAD runtime can choose real endpoints/vertices.
+                    let topology = js_sys::Object::new();
+                    let points = js_sys::Array::new();
+                    let push_point = |points: &js_sys::Array, x: f64, y: f64, z: f64| {
+                        let point = js_sys::Array::new();
+                        point.push(&JsValue::from_f64(x));
+                        point.push(&JsValue::from_f64(y));
+                        point.push(&JsValue::from_f64(z));
+                        points.push(&point);
+                    };
+                    let set_normal =
+                        |topology: &js_sys::Object, normal: codec::types::Vector3| {
+                            let value = js_sys::Array::new();
+                            value.push(&JsValue::from_f64(normal.x));
+                            value.push(&JsValue::from_f64(normal.y));
+                            value.push(&JsValue::from_f64(normal.z));
+                            let _ = js_sys::Reflect::set(
+                                topology,
+                                &JsValue::from_str("normal"),
+                                &value,
+                            );
+                        };
+                    match entity {
+                        codec::EntityType::Line(line) => {
+                            push_point(&points, line.start.x, line.start.y, line.start.z);
+                            push_point(&points, line.end.x, line.end.y, line.end.z);
+                            set_normal(&topology, line.normal);
+                        }
+                        codec::EntityType::Polyline2D(polyline) => {
+                            let ocs = codec::types::Matrix3::arbitrary_axis(polyline.normal);
+                            for vertex in polyline.vertices.iter().take(512) {
+                                let world = ocs
+                                    * codec::types::Vector3::new(
+                                        vertex.location.x,
+                                        vertex.location.y,
+                                        polyline.elevation,
+                                    );
+                                push_point(&points, world.x, world.y, world.z);
+                            }
+                            set_normal(&topology, polyline.normal);
+                        }
+                        codec::EntityType::LwPolyline(polyline) => {
+                            let ocs = codec::types::Matrix3::arbitrary_axis(polyline.normal);
+                            for vertex in polyline.vertices.iter().take(512) {
+                                let world = ocs
+                                    * codec::types::Vector3::new(
+                                        vertex.location.x,
+                                        vertex.location.y,
+                                        polyline.elevation,
+                                    );
+                                push_point(&points, world.x, world.y, world.z);
+                            }
+                            set_normal(&topology, polyline.normal);
+                        }
+                        codec::EntityType::Polyline3D(polyline) => {
+                            for vertex in polyline.vertices.iter().take(512) {
+                                push_point(
+                                    &points,
+                                    vertex.position.x,
+                                    vertex.position.y,
+                                    vertex.position.z,
+                                );
+                            }
+                            set_normal(&topology, polyline.normal);
+                        }
+                        codec::EntityType::Solid(solid) => {
+                            for corner in [
+                                solid.first_corner,
+                                solid.second_corner,
+                                solid.third_corner,
+                                solid.fourth_corner,
+                            ] {
+                                push_point(&points, corner.x, corner.y, corner.z);
+                            }
+                        }
+                        codec::EntityType::Face3D(face) => {
+                            for corner in [
+                                face.first_corner,
+                                face.second_corner,
+                                face.third_corner,
+                                face.fourth_corner,
+                            ] {
+                                push_point(&points, corner.x, corner.y, corner.z);
+                            }
+                        }
+                        codec::EntityType::Insert(insert) => {
+                            let world = codec::types::Matrix3::arbitrary_axis(insert.normal)
+                                * insert.insert_point;
+                            push_point(&points, world.x, world.y, world.z);
+                        }
+                        codec::EntityType::Point(point) => {
+                            push_point(
+                                &points,
+                                point.location.x,
+                                point.location.y,
+                                point.location.z,
+                            );
+                        }
+                        codec::EntityType::Spline(spline) => {
+                            // Shape evidence must describe the rendered curve;
+                            // two snap endpoints cannot describe a closed loop
+                            // or a bent NURBS. Keep samples separate from snap
+                            // points so Metal never treats them as native anchors.
+                            let samples = crate::entities::curve::spline_curve(spline)
+                                .map(|curve| crate::entities::curve::curve_points(&curve))
+                                .unwrap_or_else(|| {
+                                    crate::entities::spline::measurement_polyline(spline)
+                                });
+                            let shape_points = js_sys::Array::new();
+                            let sample_count = samples.len().min(256);
+                            for i in 0..sample_count {
+                                let point =
+                                    samples[i * (samples.len() - 1) / (sample_count - 1).max(1)];
+                                push_point(&shape_points, point[0], point[1], point[2]);
+                            }
+                            if sample_count > 1 {
+                                let _ = js_sys::Reflect::set(
+                                    &topology,
+                                    &JsValue::from_str("shapePoints"),
+                                    &shape_points,
+                                );
+                            }
+                            // For clamped NURBS and fit-point splines the first
+                            // and last stored points are stable native endpoints.
+                            // Internal control points are not guaranteed to lie
+                            // on the rendered curve, so do not expose them.
+                            let source = if spline.fit_points.len() >= 2 {
+                                &spline.fit_points
+                            } else {
+                                &spline.control_points
+                            };
+                            if let (Some(first), Some(last)) = (source.first(), source.last()) {
+                                push_point(&points, first.x, first.y, first.z);
+                                push_point(&points, last.x, last.y, last.z);
+                            }
+                            set_normal(&topology, spline.normal);
+                        }
+                        codec::EntityType::Circle(circle) => {
+                            let ocs = codec::types::Matrix3::arbitrary_axis(circle.normal);
+                            let world = ocs * circle.center;
+                            let center = js_sys::Array::new();
+                            center.push(&JsValue::from_f64(world.x));
+                            center.push(&JsValue::from_f64(world.y));
+                            center.push(&JsValue::from_f64(world.z));
+                            let _ = js_sys::Reflect::set(
+                                &topology,
+                                &JsValue::from_str("center"),
+                                &center,
+                            );
+                            let _ = js_sys::Reflect::set(
+                                &topology,
+                                &JsValue::from_str("radius"),
+                                &JsValue::from_f64(circle.radius),
+                            );
+                            set_normal(&topology, circle.normal);
+                        }
+                        codec::EntityType::Arc(arc) => {
+                            let ocs = codec::types::Matrix3::arbitrary_axis(arc.normal);
+                            let start = ocs * arc.start_point();
+                            let end = ocs * arc.end_point();
+                            let world = ocs * arc.center;
+                            push_point(&points, start.x, start.y, start.z);
+                            push_point(&points, end.x, end.y, end.z);
+                            let center = js_sys::Array::new();
+                            center.push(&JsValue::from_f64(world.x));
+                            center.push(&JsValue::from_f64(world.y));
+                            center.push(&JsValue::from_f64(world.z));
+                            let _ = js_sys::Reflect::set(
+                                &topology,
+                                &JsValue::from_str("center"),
+                                &center,
+                            );
+                            let _ = js_sys::Reflect::set(
+                                &topology,
+                                &JsValue::from_str("radius"),
+                                &JsValue::from_f64(arc.radius),
+                            );
+                            set_normal(&topology, arc.normal);
+                        }
+                        _ => {}
+                    }
+                    if points.length() > 0 {
+                        let _ =
+                            js_sys::Reflect::set(&topology, &JsValue::from_str("points"), &points);
+                    }
+                    if points.length() > 0
+                        || js_sys::Reflect::has(&topology, &JsValue::from_str("center"))
+                            .unwrap_or(false)
+                    {
+                        let _ = js_sys::Reflect::set(
+                            &descriptor,
+                            &JsValue::from_str("topology"),
+                            &topology,
+                        );
+                    }
+                    entity_array.push(&descriptor);
+                }
+            }
+            let _ = js_sys::Reflect::set(&message, &JsValue::from_str("handles"), &handle_array);
+            if detailed_selection {
+                let _ =
+                    js_sys::Reflect::set(&message, &JsValue::from_str("entities"), &entity_array);
+                let _ = js_sys::Reflect::set(
+                    window.as_ref(),
+                    &JsValue::from_str("__METAL_SELECTION_DETAILS_REQUESTED"),
+                    &JsValue::FALSE,
+                );
+            }
+            if let Some((min, max)) = selection_bounds {
+                let bounds = js_sys::Array::new();
+                bounds.push(&JsValue::from_f64(min.x));
+                bounds.push(&JsValue::from_f64(min.y));
+                bounds.push(&JsValue::from_f64(max.x));
+                bounds.push(&JsValue::from_f64(max.y));
+                let _ = js_sys::Reflect::set(&message, &JsValue::from_str("bounds"), &bounds);
+                let center = (min + max) * 0.5;
+                let world_point = js_sys::Array::new();
+                world_point.push(&JsValue::from_f64(center.x));
+                world_point.push(&JsValue::from_f64(center.y));
+                world_point.push(&JsValue::from_f64(center.z));
+                let _ =
+                    js_sys::Reflect::set(&message, &JsValue::from_str("worldPoint"), &world_point);
+            }
+            if let Ok(Some(parent)) = window.parent() {
+                let _ = parent.post_message(&message, "*");
+            }
+        }
+        let Ok(queue_value) = js_sys::Reflect::get(
+            window.as_ref(),
+            &JsValue::from_str("__METAL_OPENCAD_COMMANDS"),
+        ) else {
+            return Task::none();
+        };
+        let Ok(queue) = queue_value.dyn_into::<js_sys::Array>() else {
+            return Task::none();
+        };
+        if queue.length() == 0 || self.opening.is_some() {
+            return Task::none();
+        }
+        let command = queue.shift();
+        let kind = js_sys::Reflect::get(&command, &JsValue::from_str("type"))
+            .ok()
+            .and_then(|value| value.as_string())
+            .unwrap_or_default();
+        if kind == "qa_focus" || kind == "qa_restore" {
+            let request_id = js_sys::Reflect::get(&command, &JsValue::from_str("requestId"))
+                .ok()
+                .and_then(|value| value.as_string())
+                .unwrap_or_default();
+            let result = if kind == "qa_focus" {
+                let bounds = js_sys::Reflect::get(&command, &JsValue::from_str("bounds"))
+                    .ok()
+                    .and_then(|value| value.dyn_into::<js_sys::Array>().ok());
+                let values = bounds
+                    .filter(|value| value.length() == 4)
+                    .and_then(|value| {
+                        let coordinates = (0..4)
+                            .map(|index| value.get(index).as_f64())
+                            .collect::<Option<Vec<_>>>()?;
+                        coordinates
+                            .iter()
+                            .all(|coordinate| coordinate.is_finite() && coordinate.abs() <= 1.0e9)
+                            .then_some(coordinates)
+                    });
+                match values {
+                    Some(bounds)
+                        if bounds[0] < bounds[2]
+                            && bounds[1] < bounds[3]
+                            && self.metal_qa_camera.is_none()
+                            && self.tabs[self.active_tab].scene.active_viewport.is_none() =>
+                    {
+                        let tab = &mut self.tabs[self.active_tab];
+                        let camera = tab.scene.navigation_camera();
+                        let revision = tab.scene.geometry_epoch;
+                        tab.scene.zoom_to_window(
+                            glam::Vec3::new(bounds[0] as f32, bounds[1] as f32, 0.0),
+                            glam::Vec3::new(bounds[2] as f32, bounds[3] as f32, 0.0),
+                        );
+                        let focus = js_sys::Array::new();
+                        focus.push(&JsValue::from_str(&request_id));
+                        focus.push(&JsValue::from_f64(revision as f64));
+                        focus.push(&JsValue::from_f64(tab.scene.camera_generation as f64));
+                        let _ = js_sys::Reflect::set(&window, &JsValue::from_str("__METAL_QA_FOCUS"), &focus);
+                        self.metal_qa_camera =
+                            Some((self.active_tab, request_id.clone(), revision, camera));
+                        Ok(())
+                    }
+                    _ => Err("Invalid QA focus bounds or another capture is active"),
+                }
+            } else {
+                match self.metal_qa_camera.take() {
+                    Some((tab_index, saved_id, revision, camera))
+                        if saved_id == request_id && tab_index == self.active_tab
+                            && self.tabs[tab_index].scene.geometry_epoch == revision =>
+                    {
+                        if self.tabs[tab_index].scene.apply_navigation_camera(camera) {
+                            let _ = js_sys::Reflect::set(&window, &JsValue::from_str("__METAL_QA_FOCUS"), &JsValue::NULL);
+                            Ok(())
+                        } else {
+                            Err("QA camera restore was rejected")
+                        }
+                    }
+                    Some(saved) => {
+                        self.metal_qa_camera = Some(saved);
+                        Err("QA camera could not be restored to the same drawing revision")
+                    }
+                    _ => Err("QA camera could not be restored to the same drawing revision"),
+                }
+            };
+            let message = js_sys::Object::new();
+            let _ = js_sys::Reflect::set(
+                &message,
+                &JsValue::from_str("source"),
+                &JsValue::from_str("opencadstudio"),
+            );
+            let _ = js_sys::Reflect::set(
+                &message,
+                &JsValue::from_str("requestId"),
+                &JsValue::from_str(&request_id),
+            );
+            let response_type = if result.is_err() {
+                "qa_camera_failed"
+            } else if kind == "qa_focus" {
+                "qa_focus_ready"
+            } else {
+                "qa_restore_ready"
+            };
+            let _ = js_sys::Reflect::set(
+                &message,
+                &JsValue::from_str("type"),
+                &JsValue::from_str(response_type),
+            );
+            if let Err(error) = result {
+                let _ = js_sys::Reflect::set(
+                    &message,
+                    &JsValue::from_str("error"),
+                    &JsValue::from_str(error),
+                );
+            }
+            if let Ok(Some(parent)) = window.parent() {
+                let _ = parent.post_message(&message, "*");
+            }
+            return Task::none();
+        }
+        if kind == "clear_selection" {
+            let i = self.active_tab;
+            self.tabs[i].scene.deselect_all();
+            self.tabs[i].active_grip = None;
+            self.grip_hover = None;
+            self.grip_popup = None;
+            self.refresh_properties();
+            self.sync_dyn_fields();
+            return Task::none();
+        }
+        if kind == "close_document" {
+            let name = js_sys::Reflect::get(&command, &JsValue::from_str("name"))
+                .ok()
+                .and_then(|value| value.as_string())
+                .unwrap_or_default();
+            if let Some(index) = self
+                .tabs
+                .iter()
+                .position(|tab| !tab.is_start && tab.tab_display_name() == name)
+            {
+                return Task::done(Message::TabClose(index));
+            }
+            return Task::none();
+        }
+        if kind == "replace" {
+            let previous_name = js_sys::Reflect::get(&command, &JsValue::from_str("previousName"))
+                .ok()
+                .and_then(|value| value.as_string())
+                .unwrap_or_default();
+            let replace_agent_previews = previous_name.contains("-preview-");
+            let mut stale = self
+                .tabs
+                .iter()
+                .enumerate()
+                .filter_map(|(index, tab)| {
+                    let display_name = tab.tab_display_name();
+                    (!tab.is_start
+                        && (display_name == previous_name
+                            || (replace_agent_previews && display_name.contains("-preview-"))))
+                    .then_some(index)
+                })
+                .collect::<Vec<_>>();
+            let removed_count = stale.len();
+            stale.sort_unstable_by(|left, right| right.cmp(left));
+            for index in stale {
+                // METAL previews are temporary review artifacts. Replacing one
+                // is an explicit discard operation and must not open the normal
+                // unsaved-document modal or leave the old preview tab behind.
+                self.tabs[index].dirty = false;
+                let _ = self.on_tab_close(index);
+            }
+            let message = js_sys::Object::new();
+            let _ = js_sys::Reflect::set(
+                &message,
+                &JsValue::from_str("source"),
+                &JsValue::from_str("opencadstudio"),
+            );
+            let _ = js_sys::Reflect::set(
+                &message,
+                &JsValue::from_str("type"),
+                &JsValue::from_str("preview_tabs_pruned"),
+            );
+            let _ = js_sys::Reflect::set(
+                &message,
+                &JsValue::from_str("previousName"),
+                &JsValue::from_str(&previous_name),
+            );
+            let _ = js_sys::Reflect::set(
+                &message,
+                &JsValue::from_str("removedCount"),
+                &JsValue::from_f64(removed_count as f64),
+            );
+            if let Ok(Some(parent)) = window.parent() {
+                let _ = parent.post_message(&message, "*");
+            }
+        }
+        if kind == "apply_native_operations" {
+            let request = js_sys::Reflect::get(&command, &JsValue::from_str("request"))
+                .unwrap_or(JsValue::UNDEFINED);
+            let string_field = |value: &JsValue, field: &str| {
+                js_sys::Reflect::get(value, &JsValue::from_str(field))
+                    .ok()
+                    .and_then(|value| value.as_string())
+            };
+            let number_field = |value: &JsValue, field: &str| {
+                js_sys::Reflect::get(value, &JsValue::from_str(field))
+                    .ok()
+                    .and_then(|value| value.as_f64())
+                    .filter(|value| value.is_finite())
+            };
+            let point_field =
+                |value: &JsValue, field: &str| -> Result<codec::types::Vector3, String> {
+                    let raw = js_sys::Reflect::get(value, &JsValue::from_str(field))
+                        .map_err(|_| format!("{field} is required"))?;
+                    let array = raw
+                        .dyn_into::<js_sys::Array>()
+                        .map_err(|_| format!("{field} must be a 2D point"))?;
+                    let x = array
+                        .get(0)
+                        .as_f64()
+                        .filter(|value| value.is_finite())
+                        .ok_or_else(|| format!("{field}.x must be finite"))?;
+                    let y = array
+                        .get(1)
+                        .as_f64()
+                        .filter(|value| value.is_finite())
+                        .ok_or_else(|| format!("{field}.y must be finite"))?;
+                    if x.abs() > 1.0e9 || y.abs() > 1.0e9 {
+                        return Err(format!("{field} exceeds the supported coordinate range"));
+                    }
+                    Ok(codec::types::Vector3::new(x, y, 0.0))
+                };
+            let operation_id = string_field(&request, "operationId").unwrap_or_default();
+            let name = string_field(&request, "name")
+                .filter(|value| !value.trim().is_empty())
+                .unwrap_or_else(|| "Metal Native Drawing".into());
+            let mode = string_field(&request, "mode").unwrap_or_else(|| "current_document".into());
+            let units = string_field(&request, "units").unwrap_or_else(|| "unitless".into());
+            let progressive = js_sys::Reflect::get(&request, &JsValue::from_str("progressive"))
+                .ok()
+                .filter(|value| !value.is_null() && !value.is_undefined());
+            let progressive_phase = progressive
+                .as_ref()
+                .and_then(|value| string_field(value, "phase"));
+            let progressive_transaction_id = progressive
+                .as_ref()
+                .and_then(|value| string_field(value, "transactionId"))
+                .unwrap_or_default();
+            let progressive_label = (!progressive_transaction_id.is_empty())
+                .then(|| format!("METAL PROGRESSIVE {}", progressive_transaction_id));
+            let operations = js_sys::Reflect::get(&request, &JsValue::from_str("operations"))
+                .ok()
+                .and_then(|value| value.dyn_into::<js_sys::Array>().ok())
+                .unwrap_or_default();
+            #[derive(Clone)]
+            struct NativeLayerStyle {
+                color: Option<i16>,
+                linetype: Option<String>,
+                lineweight: Option<codec::types::LineWeight>,
+            }
+            let sanitize_layer_name = |value: String| {
+                value
+                    .chars()
+                    .map(|character| {
+                        if "<>/\\\":;?*|=,".contains(character) {
+                            '_'
+                        } else {
+                            character
+                        }
+                    })
+                    .take(255)
+                    .collect::<String>()
+            };
+            let raw_layer_styles =
+                js_sys::Reflect::get(&request, &JsValue::from_str("layerStyles"))
+                    .ok()
+                    .and_then(|value| value.dyn_into::<js_sys::Array>().ok())
+                    .unwrap_or_default();
+            let parse_native_style = |value: &JsValue| {
+                let color = string_field(value, "color").and_then(|name| match name.as_str() {
+                    "red" => Some(1_i16),
+                    "yellow" => Some(2),
+                    "green" => Some(3),
+                    "cyan" => Some(4),
+                    "blue" => Some(5),
+                    "magenta" => Some(6),
+                    "white" => Some(7),
+                    _ => None,
+                });
+                let linetype = string_field(value, "linetype").filter(|name| name == "Continuous");
+                let lineweight = number_field(value, "lineweightMm")
+                    .filter(|value| (0.0..=2.11).contains(value))
+                    .map(|value| {
+                        codec::types::LineWeight::from_value((value * 100.0).round() as i16)
+                    });
+                (color.is_some() || linetype.is_some() || lineweight.is_some()).then_some(
+                    NativeLayerStyle {
+                        color,
+                        linetype,
+                        lineweight,
+                    },
+                )
+            };
+            let mut layer_styles = std::collections::HashMap::<String, NativeLayerStyle>::new();
+            for value in raw_layer_styles.iter().take(32) {
+                let Some(layer) = string_field(&value, "layer")
+                    .filter(|name| !name.trim().is_empty())
+                    .map(&sanitize_layer_name)
+                else {
+                    continue;
+                };
+                if let Some(style) = parse_native_style(&value) {
+                    layer_styles.insert(layer, style);
+                }
+            }
+            #[derive(Clone)]
+            struct NativeDimensionStyle {
+                text_height: f64,
+                arrow_size: f64,
+                text_gap: f64,
+                overall_scale: f64,
+                extension_offset: f64,
+                extension_beyond: f64,
+            }
+            let raw_dimension_style =
+                js_sys::Reflect::get(&request, &JsValue::from_str("dimensionStyle"))
+                    .unwrap_or(JsValue::UNDEFINED);
+            let read_dimension_style_number = |field: &str, allow_zero: bool| {
+                js_sys::Reflect::get(&raw_dimension_style, &JsValue::from_str(field))
+                    .ok()
+                    .and_then(|value| value.as_f64())
+                    .filter(|value| {
+                        value.is_finite()
+                            && *value <= 10_000.0
+                            && if allow_zero {
+                                *value >= 0.0
+                            } else {
+                                *value > 0.0
+                            }
+                    })
+            };
+            let native_dimension_style =
+                read_dimension_style_number("textHeight", false).map(|text_height| {
+                    NativeDimensionStyle {
+                        text_height,
+                        arrow_size: read_dimension_style_number("arrowSize", false)
+                            .unwrap_or(text_height * 0.75),
+                        text_gap: read_dimension_style_number("textGap", true)
+                            .unwrap_or(text_height * 0.35),
+                        overall_scale: read_dimension_style_number("overallScale", false)
+                            .unwrap_or(1.0),
+                        extension_offset: read_dimension_style_number("extensionOffset", true)
+                            .unwrap_or(text_height * 0.5),
+                        extension_beyond: read_dimension_style_number("extensionBeyond", true)
+                            .unwrap_or(text_height * 0.6),
+                    }
+                });
+            let dimension_style_key = if progressive_transaction_id.is_empty() {
+                operation_id.as_str()
+            } else {
+                progressive_transaction_id.as_str()
+            };
+            let native_dimension_style_name = sanitize_layer_name(format!(
+                "METAL-AUTO-{}",
+                dimension_style_key.chars().take(24).collect::<String>()
+            ));
+            let reference_dimension_style =
+                (|| -> Result<Option<codec::tables::DimStyle>, String> {
+                    let raw = js_sys::Reflect::get(
+                        &request,
+                        &JsValue::from_str("referenceDimensionStyle"),
+                    )
+                    .unwrap_or(JsValue::UNDEFINED);
+                    if raw.is_undefined() || raw.is_null() {
+                        return Ok(None);
+                    }
+                    let json = js_sys::JSON::stringify(&raw)
+                        .ok()
+                        .and_then(|value| value.as_string())
+                        .ok_or_else(|| "Invalid reference DIMSTYLE JSON".to_string())?;
+                    let reference: codec::tables::DimStyle = serde_json::from_str(&json)
+                        .map_err(|error| format!("Invalid reference DIMSTYLE: {error}"))?;
+                    crate::app::reference_dimension_style::copy_style(
+                        &self.tabs[self.active_tab].scene.document,
+                        &reference,
+                        &native_dimension_style_name,
+                    )
+                    .map(Some)
+                })();
+            struct NativeComponentTransform {
+                component_ref: String,
+                handles: Vec<Handle>,
+                translation: glam::DVec3,
+                rotation: Option<(glam::DVec3, f64)>,
+                style: Option<NativeLayerStyle>,
+            }
+            let raw_component_transforms =
+                js_sys::Reflect::get(&request, &JsValue::from_str("componentTransforms"))
+                    .ok()
+                    .and_then(|value| value.dyn_into::<js_sys::Array>().ok())
+                    .unwrap_or_default();
+            let component_transforms = (|| -> Result<Vec<NativeComponentTransform>, String> {
+                validate_native_component_count(raw_component_transforms.length())?;
+                let mut result = Vec::with_capacity(raw_component_transforms.length() as usize);
+                let mut all_handles = std::collections::HashSet::new();
+                for (index, value) in raw_component_transforms.iter().enumerate() {
+                    let component_ref = string_field(&value, "componentRef")
+                        .filter(|value| !value.trim().is_empty())
+                        .ok_or_else(|| {
+                            format!("component transform {index} requires componentRef")
+                        })?;
+                    let raw_handles =
+                        js_sys::Reflect::get(&value, &JsValue::from_str("entityHandles"))
+                            .map_err(|_| {
+                                format!("component transform {index} requires entityHandles")
+                            })?
+                            .dyn_into::<js_sys::Array>()
+                            .map_err(|_| {
+                                format!(
+                                    "component transform {index} entityHandles must be an array"
+                                )
+                            })?;
+                    if raw_handles.length() == 0 || raw_handles.length() > 5000 {
+                        return Err(format!(
+                            "component transform {index} requires 1..5000 entityHandles"
+                        ));
+                    }
+                    let mut handles = Vec::with_capacity(raw_handles.length() as usize);
+                    for raw in raw_handles.iter() {
+                        let text = raw.as_string().ok_or_else(|| {
+                            format!("component transform {index} contains an invalid entity handle")
+                        })?;
+                        let normalized = text
+                            .trim()
+                            .trim_start_matches("0x")
+                            .trim_start_matches("0X");
+                        let handle =
+                            Handle::new(u64::from_str_radix(normalized, 16).map_err(|_| {
+                                format!(
+                                    "component transform {index} has invalid entity handle {text}"
+                                )
+                            })?);
+                        if !all_handles.insert(handle) {
+                            return Err(format!(
+                                "component transform {index} overlaps another component"
+                            ));
+                        }
+                        handles.push(handle);
+                    }
+                    let translation = point_field(&value, "translation")
+                        .map_err(|error| format!("component transform {index}: {error}"))?;
+                    let style_value = js_sys::Reflect::get(&value, &JsValue::from_str("style"))
+                        .unwrap_or(JsValue::UNDEFINED);
+                    let raw_rotation = js_sys::Reflect::get(&value, &JsValue::from_str("rotation"))
+                        .unwrap_or(JsValue::UNDEFINED);
+                    let rotation = if raw_rotation.is_undefined() || raw_rotation.is_null() { None } else {
+                        let center = point_field(&raw_rotation, "center")?;
+                        let angle = js_sys::Reflect::get(&raw_rotation, &JsValue::from_str("angleDeg"))
+                            .ok().and_then(|v| v.as_f64()).filter(|a| a.is_finite() && a.abs() <= 180.0)
+                            .ok_or_else(|| format!("component transform {index} has invalid rotation"))?;
+                        Some((glam::DVec3::new(center.x, center.y, 0.0), angle.to_radians()))
+                    };
+                    result.push(NativeComponentTransform {
+                        rotation,
+                        component_ref,
+                        handles,
+                        translation: glam::DVec3::new(translation.x, translation.y, 0.0),
+                        style: parse_native_style(&style_value),
+                    });
+                }
+                Ok(result)
+            })();
+            let native_edits =
+                (|| -> Result<(Vec<Handle>, Vec<(codec::EntityType, glam::DVec3)>, Vec<Handle>), String> {
+                    let parse_handle = |raw: &str| -> Result<Handle, String> {
+                        u64::from_str_radix(
+                            raw.trim().trim_start_matches("0x").trim_start_matches("0X"),
+                            16,
+                        )
+                        .map(Handle::new)
+                        .map_err(|_| format!("Invalid native edit handle {raw}"))
+                    };
+                    let raw_deleted =
+                        js_sys::Reflect::get(&request, &JsValue::from_str("deletedEntityHandles"))
+                            .ok()
+                            .and_then(|v| v.dyn_into::<js_sys::Array>().ok())
+                            .unwrap_or_default();
+                    let raw_copies =
+                        js_sys::Reflect::get(&request, &JsValue::from_str("referenceCopies"))
+                            .ok()
+                            .and_then(|v| v.dyn_into::<js_sys::Array>().ok())
+                            .unwrap_or_default();
+                    let raw_variants =
+                        js_sys::Reflect::get(&request, &JsValue::from_str("outputVariants"))
+                            .ok()
+                            .and_then(|v| v.dyn_into::<js_sys::Array>().ok())
+                            .unwrap_or_default();
+                    if raw_deleted.length() > 200 || raw_copies.length() > 200 {
+                        return Err("Too many native edits".into());
+                    }
+                    if mode != "current_document"
+                        && (raw_deleted.length() > 0 || raw_copies.length() > 0 || raw_variants.length() > 0)
+                    {
+                        return Err("Native edits require current_document mode".into());
+                    }
+                    let scene = &self.tabs[self.active_tab].scene;
+                    let mut deleted = Vec::new();
+                    for raw in raw_deleted.iter() {
+                        let handle = parse_handle(
+                            &raw.as_string()
+                                .ok_or("Deletion requires an entity handle")?,
+                        )?;
+                        if scene.document.get_entity(handle).is_none()
+                            || scene.is_layer_locked(handle)
+                        {
+                            return Err(format!(
+                                "Cannot delete missing or locked entity {handle:X}"
+                            ));
+                        }
+                        if !deleted.contains(&handle) {
+                            deleted.push(handle);
+                        }
+                    }
+                    let mut copies = Vec::new();
+                    for raw in raw_copies.iter() {
+                        let handle = parse_handle(
+                            &string_field(&raw, "entityHandle")
+                                .ok_or("Copy requires entityHandle")?,
+                        )?;
+                        if deleted.contains(&handle) {
+                            return Err("Cannot copy an entity scheduled for deletion".into());
+                        }
+                        let mut entity = scene
+                            .document
+                            .get_entity(handle)
+                            .cloned()
+                            .ok_or("Reference entity is missing")?;
+                        // Template copies preserve native text style, alignment and
+                        // width factors. A selected INSERT is also allowed so a
+                        // compound section marker keeps its arrows and labels.
+                        let scaffold = is_native_scaffold_rectangle(&entity);
+                        match &mut entity {
+                        codec::EntityType::Text(t) => { if let Some(value) = string_field(&raw, "text") { t.value = value; } },
+                        codec::EntityType::MText(t) => { if let Some(value) = string_field(&raw, "text") { t.value = value; } },
+                        codec::EntityType::Insert(_) if string_field(&raw, "text").is_none() => {},
+                        _ if scaffold && string_field(&raw, "text").is_none() => {},
+                        _ => return Err("Reference template copies must be native text, block-reference or measured rectangle entities".into()),
+                    }
+                        let d = point_field(&raw, "translation")?;
+                        copies.push((entity, glam::DVec3::new(d.x, d.y, 0.0)));
+                    }
+                    let mut variant_sources = Vec::new();
+                    let mut seen = std::collections::HashSet::new();
+                    for variant in raw_variants.iter() {
+                        let handles = js_sys::Reflect::get(&variant, &JsValue::from_str("sourceEntityHandles"))
+                            .ok()
+                            .and_then(|v| v.dyn_into::<js_sys::Array>().ok())
+                            .ok_or("Output variant requires sourceEntityHandles")?;
+                        for raw in handles.iter() {
+                            let handle = parse_handle(&raw.as_string().ok_or("Variant source requires an entity handle")?)?;
+                            if !seen.insert(handle) || scene.document.get_entity(handle).is_none()
+                                || scene.is_layer_locked(handle) {
+                                return Err(format!("Invalid, duplicate or locked variant source {handle:X}"));
+                            }
+                            variant_sources.push(handle);
+                        }
+                    }
+                    if variant_sources.is_empty() && raw_variants.length() > 0 || variant_sources.len() > 25_000 {
+                        return Err("Output variant has empty or oversized native ownership".into());
+                    }
+                    Ok((deleted, copies, variant_sources))
+                })();
+            let native_style_matches =
+                (|| -> Result<Vec<(Handle, codec::EntityType)>, String> {
+                    let raw =
+                        js_sys::Reflect::get(&request, &JsValue::from_str("entityStyleMatches"))
+                            .ok()
+                            .and_then(|v| v.dyn_into::<js_sys::Array>().ok())
+                            .unwrap_or_default();
+                    if raw.length() > 5000 {
+                        return Err("Too many entity style matches".into());
+                    }
+                    let scene = &self.tabs[self.active_tab].scene;
+                    let mut seen = std::collections::HashSet::new();
+                    let mut result = Vec::new();
+                    for value in raw.iter() {
+                        let parse = |key: &str| -> Result<Handle, String> {
+                            let raw = string_field(&value, key)
+                                .ok_or_else(|| format!("Style match requires {key}"))?;
+                            u64::from_str_radix(
+                                raw.trim().trim_start_matches("0x").trim_start_matches("0X"),
+                                16,
+                            )
+                            .map(Handle::new)
+                            .map_err(|_| format!("Invalid style handle {raw}"))
+                        };
+                        let target = parse("entityHandle")?;
+                        if !seen.insert(target)
+                            || scene.document.get_entity(target).is_none()
+                            || scene.is_layer_locked(target)
+                        {
+                            return Err(format!(
+                                "Invalid, duplicate or locked style target {target:X}"
+                            ));
+                        }
+                        let source = scene
+                            .document
+                            .get_entity(parse("referenceEntityHandle")?)
+                            .cloned()
+                            .ok_or("Style reference is missing")?;
+                        result.push((target, source));
+                    }
+                    Ok(result)
+                })();
+            #[derive(Clone)]
+            struct NativeAnchor {
+                operation_ref: Option<String>,
+                entity_handle: Option<String>,
+                snap: String,
+                marker: i32,
+                point: codec::types::Vector3,
+            }
+            struct NativeBuilt {
+                id: Option<String>,
+                entity_type: String,
+                entity: codec::EntityType,
+                anchors: Vec<NativeAnchor>,
+            }
+            let build = (|| -> Result<Vec<NativeBuilt>, String> {
+                reference_dimension_style.as_ref().map_err(Clone::clone)?;
+                native_edits.as_ref().map_err(Clone::clone)?;
+                native_style_matches.as_ref().map_err(Clone::clone)?;
+                if (operations.length() == 0
+                    && raw_component_transforms.length() == 0
+                    && progressive_phase.as_deref() != Some("rollback"))
+                    || operations.length() > 500
+                {
+                    return Err("native transaction requires between 1 and 500 operations".into());
+                }
+                let mut entities = Vec::with_capacity(operations.length() as usize);
+                let mut ids = std::collections::HashSet::new();
+                for (index, operation) in operations.iter().enumerate() {
+                    let entity_type = string_field(&operation, "type")
+                        .ok_or_else(|| format!("operation {index} has no type"))?;
+                    let id =
+                        string_field(&operation, "id").filter(|value| !value.trim().is_empty());
+                    if let Some(value) = &id {
+                        if !ids.insert(value.clone()) {
+                            return Err(format!("operation {index} id {value} is duplicated"));
+                        }
+                    }
+                    let default_layer = if entity_type == "dimension" {
+                        "METAL-DIMENSION"
+                    } else {
+                        "METAL-DRAFT"
+                    };
+                    let layer = sanitize_layer_name(
+                        string_field(&operation, "layer")
+                            .filter(|value| !value.trim().is_empty() && value.trim() != "0")
+                            .unwrap_or_else(|| default_layer.into()),
+                    );
+                    let mut dimension_points = None;
+                    let mut entity = match entity_type.as_str() {
+                        "line" => {
+                            codec::EntityType::Line(codec::entities::Line::from_points(
+                                point_field(&operation, "start")
+                                    .map_err(|error| format!("operation {index} line: {error}"))?,
+                                point_field(&operation, "end")
+                                    .map_err(|error| format!("operation {index} line: {error}"))?,
+                            ))
+                        }
+                        "polyline" => {
+                            let raw =
+                                js_sys::Reflect::get(&operation, &JsValue::from_str("points"))
+                                    .map_err(|_| {
+                                        format!("operation {index} points are required")
+                                    })?;
+                            let points = raw.dyn_into::<js_sys::Array>().map_err(|_| {
+                                format!("operation {index} points must be an array")
+                            })?;
+                            if points.length() < 2 || points.length() > 5000 {
+                                return Err(format!(
+                                    "operation {index} polyline requires 2..5000 points"
+                                ));
+                            }
+                            let mut polyline = codec::entities::Polyline2D::new();
+                            for point in points.iter() {
+                                let array = point.dyn_into::<js_sys::Array>().map_err(|_| {
+                                    format!("operation {index} contains an invalid point")
+                                })?;
+                                let x = array
+                                    .get(0)
+                                    .as_f64()
+                                    .filter(|value| value.is_finite())
+                                    .ok_or_else(|| {
+                                        format!("operation {index} contains an invalid X")
+                                    })?;
+                                let y = array
+                                    .get(1)
+                                    .as_f64()
+                                    .filter(|value| value.is_finite())
+                                    .ok_or_else(|| {
+                                        format!("operation {index} contains an invalid Y")
+                                    })?;
+                                polyline.add_vertex(codec::entities::Vertex2D::new(
+                                    codec::types::Vector3::new(x, y, 0.0),
+                                ));
+                            }
+                            if js_sys::Reflect::get(&operation, &JsValue::from_str("closed"))
+                                .ok()
+                                .and_then(|value| value.as_bool())
+                                .unwrap_or(false)
+                            {
+                                polyline.close();
+                            }
+                            codec::EntityType::Polyline2D(polyline)
+                        }
+                        "rectangle" => {
+                            let start = point_field(&operation, "start")
+                                .map_err(|error| format!("operation {index} rectangle: {error}"))?;
+                            let end = point_field(&operation, "end")
+                                .map_err(|error| format!("operation {index} rectangle: {error}"))?;
+                            if (start.x - end.x).abs() <= f64::EPSILON
+                                || (start.y - end.y).abs() <= f64::EPSILON
+                            {
+                                return Err(format!("operation {index} rectangle must have non-zero width and height"));
+                            }
+                            let mut polyline = codec::entities::Polyline2D::new();
+                            for point in [
+                                start,
+                                codec::types::Vector3::new(end.x, start.y, 0.0),
+                                end,
+                                codec::types::Vector3::new(start.x, end.y, 0.0),
+                            ] {
+                                polyline.add_vertex(codec::entities::Vertex2D::new(point));
+                            }
+                            polyline.close();
+                            codec::EntityType::Polyline2D(polyline)
+                        }
+                        "circle" => {
+                            let radius = number_field(&operation, "radius")
+                                .filter(|value| *value > 0.0)
+                                .ok_or_else(|| {
+                                    format!("operation {index} circle radius must be positive")
+                                })?;
+                            codec::EntityType::Circle(
+                                codec::entities::Circle::from_center_radius(
+                                    point_field(&operation, "center")?,
+                                    radius,
+                                ),
+                            )
+                        }
+                        "arc" => {
+                            let radius = number_field(&operation, "radius")
+                                .filter(|value| *value > 0.0)
+                                .ok_or_else(|| {
+                                    format!("operation {index} arc radius must be positive")
+                                })?;
+                            let start =
+                                number_field(&operation, "startAngleDeg").ok_or_else(|| {
+                                    format!("operation {index} arc startAngleDeg is required")
+                                })?;
+                            let end = number_field(&operation, "endAngleDeg").ok_or_else(|| {
+                                format!("operation {index} arc endAngleDeg is required")
+                            })?;
+                            codec::EntityType::Arc(
+                                codec::entities::Arc::from_center_radius_angles(
+                                    point_field(&operation, "center")?,
+                                    radius,
+                                    start.to_radians(),
+                                    end.to_radians(),
+                                ),
+                            )
+                        }
+                        "text" => {
+                            let value = string_field(&operation, "text")
+                                .ok_or_else(|| format!("operation {index} text is required"))?;
+                            let mut text = codec::entities::Text::with_value(
+                                value,
+                                point_field(&operation, "position")?,
+                            );
+                            text.height = number_field(&operation, "height")
+                                .filter(|value| *value > 0.0)
+                                .unwrap_or(2.5);
+                            text.rotation = number_field(&operation, "rotationDeg")
+                                .unwrap_or(0.0)
+                                .to_radians();
+                            codec::EntityType::Text(text)
+                        }
+                        "dimension" => {
+                            let first = point_field(&operation, "start")
+                                .map_err(|error| format!("operation {index} dimension: {error}"))?;
+                            let second = point_field(&operation, "end")
+                                .map_err(|error| format!("operation {index} dimension: {error}"))?;
+                            dimension_points = Some([first, second]);
+                            if first.distance(&second) <= f64::EPSILON {
+                                return Err(format!(
+                                    "operation {index} dimension points must be distinct"
+                                ));
+                            }
+                            let offset = number_field(&operation, "offset").unwrap_or(10.0);
+                            let axis = string_field(&operation, "axis")
+                                .unwrap_or_else(|| "aligned".into());
+                            match axis.as_str() {
+                                "aligned" => {
+                                    let mut dimension =
+                                        codec::entities::DimensionAligned::new(first, second);
+                                    dimension.set_offset(offset);
+                                    dimension.base.definition_point = dimension.definition_point;
+                                    // A zero text point is the native automatic-placement
+                                    // sentinel. The copied DIMSTYLE then controls DIMTAD,
+                                    // DIMGAP and fit instead of this builder pinning text to
+                                    // the dimension line.
+                                    dimension.base.text_middle_point = Default::default();
+                                    dimension.base.insertion_point = Default::default();
+                                    codec::EntityType::Dimension(
+                                        codec::entities::Dimension::Aligned(dimension),
+                                    )
+                                }
+                                "horizontal" | "vertical" => {
+                                    let mut dimension = if axis == "vertical" {
+                                        codec::entities::DimensionLinear::vertical(first, second)
+                                    } else {
+                                        codec::entities::DimensionLinear::horizontal(
+                                            first, second,
+                                        )
+                                    };
+                                    let definition = if axis == "vertical" {
+                                        let x = if offset >= 0.0 {
+                                            first.x.max(second.x) + offset
+                                        } else {
+                                            first.x.min(second.x) + offset
+                                        };
+                                        codec::types::Vector3::new(x, second.y, 0.0)
+                                    } else {
+                                        let y = if offset >= 0.0 {
+                                            first.y.max(second.y) + offset
+                                        } else {
+                                            first.y.min(second.y) + offset
+                                        };
+                                        codec::types::Vector3::new(second.x, y, 0.0)
+                                    };
+                                    dimension.definition_point = definition;
+                                    dimension.base.definition_point = definition;
+                                    dimension.base.actual_measurement = if axis == "vertical" {
+                                        (second.y - first.y).abs()
+                                    } else {
+                                        (second.x - first.x).abs()
+                                    };
+                                    dimension.base.text_middle_point = Default::default();
+                                    dimension.base.insertion_point = Default::default();
+                                    codec::EntityType::Dimension(
+                                        codec::entities::Dimension::Linear(dimension),
+                                    )
+                                }
+                                _ => {
+                                    return Err(format!(
+                                        "operation {index} dimension axis is unsupported"
+                                    ))
+                                }
+                            }
+                        }
+                        _ => {
+                            return Err(format!(
+                                "operation {index} type {entity_type} is unsupported"
+                            ))
+                        }
+                    };
+                    if entity_type == "dimension"
+                        && (native_dimension_style.is_some()
+                            || reference_dimension_style
+                                .as_ref()
+                                .is_ok_and(|style| style.is_some()))
+                    {
+                        if let codec::EntityType::Dimension(dimension) = &mut entity {
+                            dimension.base_mut().style_name = native_dimension_style_name.clone();
+                        }
+                    }
+                    entity.common_mut().layer = layer;
+                    let anchors = if entity_type == "dimension" {
+                        let raw = js_sys::Reflect::get(&operation, &JsValue::from_str("anchors"))
+                            .map_err(|_| {
+                            format!("operation {index} dimension anchors are required")
+                        })?;
+                        let values = raw.dyn_into::<js_sys::Array>().map_err(|_| {
+                            format!("operation {index} dimension anchors must be an array")
+                        })?;
+                        if values.length() != 2 {
+                            return Err(format!(
+                                "operation {index} dimension requires exactly two associative anchors"
+                            ));
+                        }
+                        let points = dimension_points.expect("dimension points were parsed");
+                        values
+                            .iter()
+                            .enumerate()
+                            .map(|(anchor_index, value)| {
+                                let operation_ref = string_field(&value, "operationRef")
+                                    .filter(|candidate| !candidate.trim().is_empty());
+                                let entity_handle = string_field(&value, "entityHandle")
+                                    .filter(|candidate| !candidate.trim().is_empty());
+                                if operation_ref.is_some() == entity_handle.is_some() {
+                                    return Err(format!(
+                                        "operation {index} anchor {anchor_index} requires exactly one of operationRef or entityHandle"
+                                    ));
+                                }
+                                let snap = string_field(&value, "snap")
+                                    .ok_or_else(|| format!("operation {index} anchor {anchor_index} snap is required"))?;
+                                if !matches!(snap.as_str(), "endpoint" | "vertex" | "midpoint" | "center" | "quadrant") {
+                                    return Err(format!("operation {index} anchor {anchor_index} snap is unsupported"));
+                                }
+                                let marker = if snap == "quadrant" {
+                                    match string_field(&value, "quadrant").as_deref() {
+                                        Some("east") => 0,
+                                        Some("north") => 1,
+                                        Some("west") => 2,
+                                        Some("south") => 3,
+                                        _ => return Err(format!("operation {index} anchor {anchor_index} quadrant is required")),
+                                    }
+                                } else {
+                                    number_field(&value, "vertexIndex")
+                                        .unwrap_or(if anchor_index == 0 { 0.0 } else { 1.0 })
+                                        .round() as i32
+                                };
+                                Ok(NativeAnchor {
+                                    operation_ref,
+                                    entity_handle,
+                                    snap,
+                                    marker,
+                                    point: points[anchor_index],
+                                })
+                            })
+                            .collect::<Result<Vec<_>, String>>()?
+                    } else {
+                        Vec::new()
+                    };
+                    entities.push(NativeBuilt {
+                        id,
+                        entity_type,
+                        entity,
+                        anchors,
+                    });
+                }
+                let valid_ids = entities
+                    .iter()
+                    .filter_map(|entity| entity.id.as_deref())
+                    .collect::<std::collections::HashSet<_>>();
+                for (index, entity) in entities.iter().enumerate() {
+                    for anchor in &entity.anchors {
+                        if let Some(reference) = anchor.operation_ref.as_deref() {
+                            if !valid_ids.contains(reference) {
+                                return Err(format!("operation {index} anchor references unknown operation id {reference}"));
+                            }
+                        }
+                    }
+                }
+                Ok(entities)
+            })();
+
+            let result = component_transforms.and_then(|component_transforms| build.map(|entities| (component_transforms, entities))).and_then(|(component_transforms, entities)| {
+                if progressive_phase.as_deref() == Some("rollback") {
+                    let i = self.active_tab;
+                    let Some(label) = progressive_label.as_deref() else {
+                        return Err("progressive rollback requires transactionId".into());
+                    };
+                    self.rollback_native_transaction(i, label)?;
+                    self.sync_ribbon_layers();
+                    self.sync_ribbon_from_selection();
+                    self.refresh_properties();
+                    return Ok((
+                        i,
+                        Vec::<Handle>::new(),
+                        std::collections::BTreeMap::<String, usize>::new(),
+                        0_usize,
+                        0_usize,
+                        0_usize,
+                        Vec::<(Handle, Handle)>::new(),
+                    ));
+                }
+                let supports_anchor = |entity: &codec::EntityType, snap: &str| match entity {
+                    codec::EntityType::Line(_) => matches!(snap, "endpoint" | "vertex" | "midpoint"),
+                    codec::EntityType::Polyline2D(_) | codec::EntityType::LwPolyline(_) => {
+                        matches!(snap, "endpoint" | "vertex" | "midpoint")
+                    }
+                    codec::EntityType::Circle(_) => matches!(snap, "center" | "quadrant"),
+                    codec::EntityType::Arc(_) => {
+                        matches!(snap, "endpoint" | "vertex" | "center" | "quadrant")
+                    }
+                    codec::EntityType::Polyline3D(_)
+                    | codec::EntityType::Solid(_)
+                    | codec::EntityType::Face3D(_) => {
+                        matches!(snap, "endpoint" | "vertex")
+                    }
+                    codec::EntityType::Insert(_) | codec::EntityType::Point(_) => {
+                        matches!(snap, "endpoint" | "vertex")
+                    }
+                    codec::EntityType::Spline(_) => matches!(snap, "endpoint"),
+                    _ => false,
+                };
+                let new_document = mode == "new_document";
+                let operation_sources = entities
+                    .iter()
+                    .filter_map(|entity| entity.id.as_deref().map(|id| (id, &entity.entity)))
+                    .collect::<std::collections::HashMap<_, _>>();
+                for (index, entity) in entities.iter().enumerate() {
+                    for anchor in &entity.anchors {
+                        if let Some(reference) = anchor.operation_ref.as_deref() {
+                            let source = operation_sources.get(reference).ok_or_else(|| {
+                                format!("operation {index} references missing operation {reference}")
+                            })?;
+                            if !supports_anchor(source, &anchor.snap) {
+                                return Err(format!(
+                                    "operation {index} cannot use {} snap on operation {reference}",
+                                    anchor.snap
+                                ));
+                            }
+                        }
+                        if let Some(raw) = anchor.entity_handle.as_deref() {
+                            if new_document {
+                                return Err(format!("operation {index} cannot reference entityHandle in a new document"));
+                            }
+                            let normalized = raw.trim().trim_start_matches("0x").trim_start_matches("0X");
+                            let value = u64::from_str_radix(normalized, 16)
+                                .map_err(|_| format!("operation {index} has invalid entityHandle {raw}"))?;
+                            let source = self.tabs[self.active_tab]
+                                .scene
+                                .document
+                                .get_entity(Handle::new(value))
+                                .ok_or_else(|| format!("operation {index} references missing entityHandle {raw}"))?;
+                            if !supports_anchor(source, &anchor.snap) {
+                                return Err(format!(
+                                    "operation {index} cannot use {} snap on entityHandle {raw}",
+                                    anchor.snap
+                                ));
+                            }
+                        }
+                    }
+                }
+                if new_document {
+                    let previous_name =
+                        string_field(&request, "replaceDocumentName").unwrap_or_default();
+                    let mut stale = self
+                        .tabs
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(index, tab)| {
+                            (!tab.is_start
+                                && !previous_name.is_empty()
+                                && tab.tab_display_name() == previous_name)
+                                .then_some(index)
+                        })
+                        .collect::<Vec<_>>();
+                    stale.sort_unstable_by(|left, right| right.cmp(left));
+                    for index in stale {
+                        self.tabs[index].dirty = false;
+                        let _ = self.on_tab_close(index);
+                    }
+                    let reusable = self.tabs.iter().position(|tab| {
+                        !tab.is_start
+                            && tab.current_path.is_none()
+                            && !tab.dirty
+                            && tab.scene.document.entities().count() == 0
+                    });
+                    let index = reusable.unwrap_or_else(|| {
+                        self.tab_counter += 1;
+                        self.tabs
+                            .push(crate::app::document::DocumentTab::new_drawing(
+                                self.tab_counter,
+                            ));
+                        self.tabs.len() - 1
+                    });
+                    self.active_tab = index;
+                    self.tabs[index].tab_title = name.clone();
+                    self.apply_display_defaults(index);
+                }
+                let i = self.active_tab;
+                match progressive_phase.as_deref() {
+                    Some("begin") => {
+                        let Some(label) = progressive_label.clone() else {
+                            return Err("progressive begin requires transactionId".into());
+                        };
+                        self.begin_multi_message_history(i, label);
+                    }
+                    Some("append" | "commit") => {
+                        let Some(label) = progressive_label.as_deref() else {
+                            return Err("progressive chunk requires transactionId".into());
+                        };
+                        let matches = self.tabs[i]
+                            .history
+                            .pending
+                            .as_ref()
+                            .is_some_and(|pending| pending.label == label);
+                        if !matches {
+                            return Err("progressive transaction was interrupted by another document edit".into());
+                        }
+                    }
+                    Some(other) => return Err(format!("unsupported progressive phase {other}")),
+                    // Atomic previews use the same operation-bound identity as
+                    // progressive previews so Discard can undo exactly this write.
+                    None => self.push_undo_snapshot(i, format!("METAL PROGRESSIVE {}", operation_id)),
+                }
+                let variant_sources = native_edits.as_ref().map_err(Clone::clone)?.2.clone();
+                let variant_set = variant_sources.iter().copied().collect::<std::collections::HashSet<_>>();
+                if !variant_set.is_empty() {
+                    for transform in &component_transforms {
+                        if transform.handles.iter().any(|handle| !variant_set.contains(handle)) {
+                            return Err(format!("component {} escapes the output variant", transform.component_ref));
+                        }
+                    }
+                    if native_edits.as_ref().map_err(Clone::clone)?.0.iter().any(|handle| !variant_set.contains(handle))
+                        || native_style_matches.as_ref().map_err(Clone::clone)?.iter().any(|(handle, _)| !variant_set.contains(handle)) {
+                        return Err("Native edit escapes the output variant".into());
+                    }
+                    if (reference_dimension_style.as_ref().map_err(Clone::clone)?.is_some()
+                        || native_dimension_style.is_some())
+                        && self.tabs[i]
+                            .scene
+                            .document
+                            .dim_styles
+                            .get(&native_dimension_style_name)
+                            .is_some()
+                    {
+                        return Err("Comparison variant cannot overwrite a DIMSTYLE used by the original drawing".to_string());
+                    }
+                }
+                let mut variant_map = std::collections::HashMap::<Handle, Handle>::new();
+                let mut variant_created = Vec::with_capacity(variant_sources.len());
+                let mut created = Vec::with_capacity(entities.len() + variant_sources.len());
+                let mut counts = std::collections::BTreeMap::<String, usize>::new();
+                for source_handle in &variant_sources {
+                    let entity = self.tabs[i].scene.document.get_entity(*source_handle)
+                        .cloned().ok_or_else(|| format!("Variant source {source_handle:X} is missing"))?;
+                    let entity_type = crate::entities::traits::entity_type_name(&entity).to_string();
+                    let output_handle = self.tabs[i].scene.add_entity_clone(entity);
+                    if output_handle.is_null() { return Err(format!("Could not clone variant source {source_handle:X}")); }
+                    variant_map.insert(*source_handle, output_handle);
+                    variant_created.push(output_handle);
+                    *counts.entry(entity_type).or_default() += 1;
+                }
+                if let Some(mut style) = reference_dimension_style.clone()? {
+                    let document = &mut self.tabs[i].scene.document;
+                    if let Some(existing) = document.dim_styles.get_mut(&native_dimension_style_name) {
+                        style.handle = existing.handle;
+                        *existing = style;
+                    } else {
+                        style.handle = document.allocate_handle();
+                        document.dim_styles.add(style).map_err(|error| format!("Cannot create reference DIMSTYLE: {error}"))?;
+                    }
+                    self.tabs[i].scene.invalidate_dim_style_dependencies(&native_dimension_style_name);
+                } else if let Some(config) = &native_dimension_style {
+                    use codec::tables::DimStyle;
+                    if let Some(style) = self.tabs[i]
+                        .scene
+                        .document
+                        .dim_styles
+                        .get_mut(&native_dimension_style_name)
+                    {
+                        style.dimtxt = config.text_height;
+                        style.dimasz = config.arrow_size;
+                        style.dimgap = config.text_gap;
+                        style.dimscale = config.overall_scale;
+                        style.dimexo = config.extension_offset;
+                        style.dimexe = config.extension_beyond;
+                        style.dimclrd = 256;
+                        style.dimclre = 256;
+                        style.dimclrt = 256;
+                    } else {
+                        let current_name = self.tabs[i]
+                            .scene
+                            .document
+                            .header
+                            .current_dimstyle_name
+                            .clone();
+                        let mut style = self.tabs[i]
+                            .scene
+                            .document
+                            .dim_styles
+                            .get(&current_name)
+                            .cloned()
+                            .or_else(|| self.tabs[i].scene.document.dim_styles.get("Standard").cloned())
+                            .unwrap_or_else(|| DimStyle::new(&native_dimension_style_name));
+                        style.name = native_dimension_style_name.clone();
+                        style.handle = self.tabs[i].scene.document.allocate_handle();
+                        style.dimtxt = config.text_height;
+                        style.dimasz = config.arrow_size;
+                        style.dimgap = config.text_gap;
+                        style.dimscale = config.overall_scale;
+                        style.dimexo = config.extension_offset;
+                        style.dimexe = config.extension_beyond;
+                        // The transaction's layer palette is authoritative.
+                        // Cloning the active DIMSTYLE must not carry colours
+                        // from the previously processed drawing into this one.
+                        style.dimclrd = 256;
+                        style.dimclre = 256;
+                        style.dimclrt = 256;
+                        let _ = self.tabs[i].scene.document.dim_styles.add(style);
+                    }
+                    self.tabs[i]
+                        .scene
+                        .invalidate_dim_style_dependencies(&native_dimension_style_name);
+                }
+                let mut transformed_count = 0_usize;
+                let mut styled_component_handles = Vec::<Handle>::new();
+                for transform in &component_transforms {
+                        let output_handles = transform.handles.iter()
+                            .map(|handle| variant_map.get(handle).copied().unwrap_or(*handle))
+                            .collect::<Vec<_>>();
+                        for handle in &output_handles {
+                            if self.tabs[i].scene.document.get_entity(*handle).is_none() {
+                                return Err(format!(
+                                    "component {} references missing entity handle {handle:X}",
+                                    transform.component_ref
+                                ));
+                            }
+                            if self.tabs[i].scene.is_layer_locked(*handle) {
+                                return Err(format!(
+                                    "component {} contains an entity on a locked layer",
+                                    transform.component_ref
+                                ));
+                            }
+                        }
+                        if let Some((center, angle_rad)) = transform.rotation {
+                            self.tabs[i].scene.transform_entities(&output_handles,
+                                &crate::command::EntityTransform::Rotate { center, axis: glam::DVec3::Z, angle_rad });
+                        }
+                        self.tabs[i].scene.transform_entities(
+                            &output_handles,
+                            &crate::command::EntityTransform::Translate(transform.translation),
+                        );
+                        if let Some(style) = &transform.style {
+                            for handle in &output_handles {
+                                let Some(entity) = self.tabs[i].scene.document.get_entity_mut(*handle) else {
+                                    continue;
+                                };
+                                if let Some(index) = style.color {
+                                    crate::scene::view::dispatch::apply_color(
+                                        entity,
+                                        codec::types::Color::from_index(index),
+                                    );
+                                }
+                                if let Some(value) = &style.linetype {
+                                    crate::scene::view::dispatch::apply_common_prop(entity, "linetype", value);
+                                }
+                                if let Some(value) = style.lineweight {
+                                    crate::scene::view::dispatch::apply_line_weight(entity, value);
+                                }
+                                styled_component_handles.push(*handle);
+                            }
+                        }
+                        transformed_count += transform.handles.len();
+                }
+                if !styled_component_handles.is_empty() {
+                    styled_component_handles.sort_unstable();
+                    styled_component_handles.dedup();
+                    self.tabs[i].scene.document.header.lineweight_display = true;
+                    self.tabs[i].dirty = true;
+                    self.invalidate_property_targets(i, &styled_component_handles);
+                    self.refresh_properties();
+                }
+                // Coordinates sent to an existing drawing are already in that
+                // document's model units. A provider may omit the optional
+                // client metadata and Metal will use `unitless`; never let that
+                // erase the INSUNITS value of an opened DWG.
+                if new_document {
+                    self.tabs[i].scene.document.header.insertion_units = match units.as_str() {
+                        "in" => 1,
+                        "ft" => 2,
+                        "mm" => 4,
+                        "cm" => 5,
+                        "m" => 6,
+                        _ => 0,
+                    };
+                }
+                let mut created_records = Vec::with_capacity(entities.len());
+                let mut operation_handles = std::collections::HashMap::<String, Handle>::new();
+                for built in entities {
+                    let handle = self.tabs[i].scene.add_entity(built.entity);
+                    if handle.is_null() {
+                        return Err(format!("OpenCAD rejected native {} entity", built.entity_type));
+                    }
+                    created.push(handle);
+                    if let Some(id) = built.id {
+                        operation_handles.insert(id, handle);
+                    }
+                    *counts.entry(built.entity_type).or_default() += 1;
+                    created_records.push((handle, built.anchors));
+                }
+                let mut styled_layers = Vec::new();
+                for handle in &created {
+                    let layer_name = self.tabs[i]
+                        .scene
+                        .document
+                        .get_entity(*handle)
+                        .map(|entity| entity.common().layer.clone())
+                        .unwrap_or_default();
+                    let Some(style) = layer_styles.get(&layer_name) else {
+                        continue;
+                    };
+                    if let Some(entity) = self.tabs[i].scene.document.get_entity_mut(*handle) {
+                        if let Some(index) = style.color {
+                            entity.common_mut().color = codec::types::Color::from_index(index);
+                        }
+                        if let Some(value) = &style.linetype {
+                            entity.common_mut().linetype = value.clone();
+                        }
+                        if let Some(value) = style.lineweight {
+                            entity.common_mut().line_weight = value;
+                        }
+                    }
+                    styled_layers.push(layer_name);
+                }
+                styled_layers.sort();
+                styled_layers.dedup();
+                // New entities already carry explicit presentation above. Do not mutate
+                // shared layer records: unselected ByLayer entities must remain unchanged.
+                let mut association_count = 0_usize;
+                for (dimension_handle, anchors) in created_records.iter().filter(|(_, anchors)| !anchors.is_empty()) {
+                    let mut references: [Vec<codec::objects::AssocDimensionReference>; 4] = Default::default();
+                    let mut source_handles = Vec::with_capacity(2);
+                    for (slot, anchor) in anchors.iter().enumerate() {
+                        let source_handle = if let Some(reference) = anchor.operation_ref.as_deref() {
+                            *operation_handles.get(reference).ok_or_else(|| {
+                                format!("associative anchor lost operationRef {reference}")
+                            })?
+                        } else {
+                            let raw = anchor.entity_handle.as_deref().expect("anchor source validated");
+                            let normalized = raw.trim().trim_start_matches("0x").trim_start_matches("0X");
+                            let source = Handle::new(u64::from_str_radix(normalized, 16).map_err(|_| {
+                                format!("invalid associative entityHandle {raw}")
+                            })?);
+                            variant_map.get(&source).copied().unwrap_or(source)
+                        };
+                        source_handles.push(source_handle);
+                        let osnap_type = match anchor.snap.as_str() {
+                            "midpoint" => 2,
+                            "center" => 3,
+                            "quadrant" => 5,
+                            _ => 1,
+                        };
+                        references[slot].push(codec::objects::AssocDimensionReference {
+                            class_name: "AcDbOsnapPointRef".into(),
+                            osnap_type,
+                            xrefs: vec![source_handle],
+                            main_subent_type: 1,
+                            main_gs_marker: anchor.marker,
+                            osnap_point: anchor.point,
+                            ..Default::default()
+                        });
+                    }
+                    let association_handle = self.tabs[i].scene.document.allocate_handle();
+                    let mut association = codec::objects::AssociativeObject::new("DIMASSOC", "AcDbDimAssoc");
+                    association.handle = association_handle;
+                    association.data = codec::objects::AssociativeData::DimensionAssociation(
+                        codec::objects::AssocDimensionAssociation {
+                            associativity: 3,
+                            dimension: *dimension_handle,
+                            references,
+                            ..Default::default()
+                        },
+                    );
+                    self.tabs[i].scene.document.objects.insert(
+                        association_handle,
+                        codec::objects::ObjectType::Associative(association),
+                    );
+                    if let Some(entity) = self.tabs[i].scene.document.get_entity_mut(*dimension_handle) {
+                        entity.common_mut().reactors.push(association_handle);
+                    }
+                    for source_handle in source_handles {
+                        if let Some(entity) = self.tabs[i].scene.document.get_entity_mut(source_handle) {
+                            if !entity.common().reactors.contains(&association_handle) {
+                                entity.common_mut().reactors.push(association_handle);
+                            }
+                        }
+                    }
+                    association_count += 1;
+                }
+                let mut style_targets = Vec::new();
+                for (handle, source) in native_style_matches? {
+                    let handle = variant_map.get(&handle).copied().unwrap_or(handle);
+                    if let Some(entity) = self.tabs[i].scene.document.get_entity_mut(handle) {
+                        let from = source.common();
+                        let to = entity.common_mut();
+                        to.layer = from.layer.clone();
+                        to.color = from.color;
+                        to.linetype = from.linetype.clone();
+                        to.line_weight = from.line_weight;
+                        to.linetype_scale = from.linetype_scale;
+                        style_targets.push(handle);
+                    }
+                }
+                if !style_targets.is_empty() {
+                    self.tabs[i].dirty = true;
+                    self.invalidate_property_targets(i, &style_targets);
+                }
+                let (deleted, copies, _) = native_edits.map_err(|e| e.to_string())?;
+                for (entity, translation) in copies {
+                    let copied_type = match &entity {
+                        codec::EntityType::Insert(_) => "block_reference",
+                        codec::EntityType::Polyline2D(_) | codec::EntityType::LwPolyline(_) => "polyline",
+                        _ => "text",
+                    };
+                    let handle = self.tabs[i].scene.add_entity_clone(entity);
+                    if handle.is_null() { return Err("Could not copy native reference template entity".into()); }
+                    self.tabs[i].scene.transform_entities(&[handle], &crate::command::EntityTransform::Translate(translation));
+                    created.push(handle);
+                    *counts.entry(copied_type.into()).or_default() += 1;
+                }
+                created.extend(variant_created);
+                let output_deleted = deleted.iter().map(|handle| variant_map.get(handle).copied().unwrap_or(*handle)).collect::<Vec<_>>();
+                self.tabs[i].scene.erase_entities(&output_deleted);
+                self.tabs[i].scene.document.header.dimension_associativity = 2;
+                // A native batch can create several dimensions and then copy
+                // template text in the same synchronous bridge turn.  The
+                // resident-wire fast path sees every individual Add, but the
+                // web SDF text pass may have cached the pre-batch glyph set
+                // before the asynchronously requested font is ready.  Mark all
+                // text-bearing render handles dirty once, after the document is
+                // complete, so the first post-transaction frame contains the
+                // generated dimension labels without requiring a later TEXT
+                // edit to refresh them.
+                if created.iter().any(|handle| {
+                    self.tabs[i]
+                        .scene
+                        .document
+                        .get_entity(*handle)
+                        .is_some_and(|entity| matches!(entity, codec::EntityType::Dimension(_)))
+                }) {
+                    self.tabs[i].scene.invalidate_text_geometry_dependencies();
+                }
+                if !styled_layers.is_empty() {
+                    self.tabs[i].scene.document.header.lineweight_display = true;
+                    self.tabs[i].scene.invalidate_layer_dependencies(&styled_layers);
+                }
+                self.tabs[i].dirty = true;
+                // Preserve the user's camera when editing an existing drawing.
+                // Fitting all after a component move made the canvas appear to
+                // jump focus even though the native transaction was valid.
+                // A brand-new document still needs an initial fit-to-extents.
+                if progressive_phase.is_none() && new_document {
+                    self.tabs[i].scene.fit_all();
+                }
+                if progressive_phase.as_deref() == Some("commit") {
+                    self.finish_pending_history(i);
+                }
+                self.sync_ribbon_layers();
+                self.sync_ribbon_from_selection();
+                self.refresh_properties();
+                let variant_mappings = variant_sources.iter().filter_map(|source| variant_map.get(source)
+                    .map(|output| (*source, *output))).collect::<Vec<_>>();
+                Ok((i, created, counts, association_count, styled_layers.len(), transformed_count, variant_mappings))
+            });
+
+            let message = js_sys::Object::new();
+            let _ = js_sys::Reflect::set(
+                &message,
+                &JsValue::from_str("source"),
+                &JsValue::from_str("opencadstudio"),
+            );
+            let _ = js_sys::Reflect::set(
+                &message,
+                &JsValue::from_str("operationId"),
+                &JsValue::from_str(&operation_id),
+            );
+            match result {
+                Ok((
+                    i,
+                    handles,
+                    counts,
+                    association_count,
+                    styled_layer_count,
+                    transformed_count,
+                    variant_mappings,
+                )) => {
+                    let _ = js_sys::Reflect::set(
+                        &message,
+                        &JsValue::from_str("type"),
+                        &JsValue::from_str("native_operations_applied"),
+                    );
+                    let handle_array = js_sys::Array::new();
+                    for handle in handles {
+                        handle_array.push(&JsValue::from_str(&format!("{handle:X}")));
+                    }
+                    let _ = js_sys::Reflect::set(
+                        &message,
+                        &JsValue::from_str("createdHandles"),
+                        &handle_array,
+                    );
+                    let mapping_array = js_sys::Array::new();
+                    for (source, output) in variant_mappings {
+                        let mapping = js_sys::Object::new();
+                        let _ = js_sys::Reflect::set(&mapping, &JsValue::from_str("sourceHandle"), &JsValue::from_str(&format!("{source:X}")));
+                        let _ = js_sys::Reflect::set(&mapping, &JsValue::from_str("outputHandle"), &JsValue::from_str(&format!("{output:X}")));
+                        mapping_array.push(&mapping);
+                    }
+                    let _ = js_sys::Reflect::set(&message, &JsValue::from_str("variantMappings"), &mapping_array);
+                    let type_counts = js_sys::Object::new();
+                    for (entity_type, count) in counts {
+                        let _ = js_sys::Reflect::set(
+                            &type_counts,
+                            &JsValue::from_str(&entity_type),
+                            &JsValue::from_f64(count as f64),
+                        );
+                    }
+                    let _ = js_sys::Reflect::set(
+                        &message,
+                        &JsValue::from_str("entityTypes"),
+                        &type_counts,
+                    );
+                    let _ = js_sys::Reflect::set(
+                        &message,
+                        &JsValue::from_str("associationCount"),
+                        &JsValue::from_f64(association_count as f64),
+                    );
+                    let _ = js_sys::Reflect::set(
+                        &message,
+                        &JsValue::from_str("styledLayerCount"),
+                        &JsValue::from_f64(styled_layer_count as f64),
+                    );
+                    let _ = js_sys::Reflect::set(
+                        &message,
+                        &JsValue::from_str("transformedEntityCount"),
+                        &JsValue::from_f64(transformed_count as f64),
+                    );
+                    let _ = js_sys::Reflect::set(
+                        &message,
+                        &JsValue::from_str("documentName"),
+                        &JsValue::from_str(&self.tabs[i].tab_display_name()),
+                    );
+                    let _ = js_sys::Reflect::set(
+                        &message,
+                        &JsValue::from_str("revision"),
+                        &JsValue::from_str(&self.tabs[i].scene.geometry_epoch.to_string()),
+                    );
+                }
+                Err(error) => {
+                    let _ = js_sys::Reflect::set(
+                        &message,
+                        &JsValue::from_str("type"),
+                        &JsValue::from_str("native_operations_failed"),
+                    );
+                    let _ = js_sys::Reflect::set(
+                        &message,
+                        &JsValue::from_str("error"),
+                        &JsValue::from_str(&error),
+                    );
+                }
+            }
+            if let Ok(Some(parent)) = window.parent() {
+                let _ = parent.post_message(&message, "*");
+            }
+            return Task::none();
+        }
+        if kind == "apply_style" {
+            let request = js_sys::Reflect::get(&command, &JsValue::from_str("request"))
+                .unwrap_or(JsValue::UNDEFINED);
+            let operation_id = js_sys::Reflect::get(&request, &JsValue::from_str("operationId"))
+                .ok()
+                .and_then(|value| value.as_string())
+                .unwrap_or_default();
+            // METAL_NOW_STYLE_SCOPE: enforce revision/identity before any mutation.
+            let fail_style = |error: &str| {
+                let message = js_sys::Object::new();
+                for (key, value) in [
+                    ("source", "opencadstudio"),
+                    ("type", "style_apply_failed"),
+                    ("operationId", operation_id.as_str()),
+                    ("error", error),
+                ] {
+                    let _ = js_sys::Reflect::set(
+                        &message,
+                        &JsValue::from_str(key),
+                        &JsValue::from_str(value),
+                    );
+                }
+                if let Ok(Some(parent)) = window.parent() {
+                    let _ = parent.post_message(&message, "*");
+                }
+            };
+            if let Some(expected) =
+                js_sys::Reflect::get(&request, &JsValue::from_str("expectedDocumentName"))
+                    .ok()
+                    .and_then(|value| value.as_string())
+            {
+                if expected != self.tabs[self.active_tab].tab_display_name() {
+                    fail_style("Active drawing changed after the style preview.");
+                    return Task::none();
+                }
+            }
+            if let Some(expected) =
+                js_sys::Reflect::get(&request, &JsValue::from_str("expectedRevision"))
+                    .ok()
+                    .and_then(|value| value.as_string())
+            {
+                if expected != self.tabs[self.active_tab].scene.geometry_epoch.to_string() {
+                    fail_style("Drawing changed after the style preview. Create a new preview.");
+                    return Task::none();
+                }
+            }
+            let read_layers = |field: &str| -> Vec<String> {
+                js_sys::Reflect::get(&request, &JsValue::from_str(field))
+                    .ok()
+                    .and_then(|value| value.dyn_into::<js_sys::Array>().ok())
+                    .map(|array| array.iter().filter_map(|value| value.as_string()).collect())
+                    .unwrap_or_default()
+            };
+            let geometry_layers = read_layers("geometryLayers");
+            let dimension_layers = read_layers("dimensionLayers");
+            let target_entity_handles = read_layers("targetEntityHandles")
+                .into_iter()
+                .filter_map(|raw| {
+                    let normalized = raw.trim().trim_start_matches("0x").trim_start_matches("0X");
+                    u64::from_str_radix(normalized, 16).ok().map(Handle::new)
+                })
+                .filter(|handle| {
+                    self.tabs[self.active_tab]
+                        .scene
+                        .document
+                        .get_entity(*handle)
+                        .is_some()
+                })
+                .collect::<Vec<_>>();
+            let requested_handles = read_layers("targetEntityHandles");
+            if !requested_handles.is_empty()
+                && target_entity_handles.len() != requested_handles.len()
+            {
+                fail_style("Style target handles are stale or invalid; drawing unchanged.");
+                return Task::none();
+            }
+            // Validate the entire property patch before creating the single undo entry.
+            let raw_changes = js_sys::Reflect::get(&request, &JsValue::from_str("propertyChanges"))
+                .ok()
+                .filter(|value| !value.is_undefined());
+            let mut property_changes: Vec<(Handle, String, String)> = Vec::new();
+            if let Some(raw) = raw_changes {
+                let Ok(array) = raw.dyn_into::<js_sys::Array>() else {
+                    fail_style("Invalid style patch");
+                    return Task::none();
+                };
+                for item in array.iter() {
+                    let field = |name: &str| {
+                        js_sys::Reflect::get(&item, &JsValue::from_str(name))
+                            .unwrap_or(JsValue::UNDEFINED)
+                    };
+                    let handle = field("entityHandle")
+                        .as_string()
+                        .and_then(|value| {
+                            u64::from_str_radix(value.trim_start_matches("0x"), 16).ok()
+                        })
+                        .map(Handle::new);
+                    let property = field("property").as_string().unwrap_or_default();
+                    let value = field("value");
+                    let Some(handle) =
+                        handle.filter(|handle| target_entity_handles.contains(handle))
+                    else {
+                        fail_style("Style patch escapes selected scope");
+                        return Task::none();
+                    };
+                    let document = &self.tabs[self.active_tab].scene.document;
+                    let entity = document.get_entity(handle).unwrap();
+                    let is_text = matches!(
+                        entity,
+                        codec::EntityType::Text(_) | codec::EntityType::MText(_)
+                    );
+                    let dimension_name = if let codec::EntityType::Dimension(dimension) = entity
+                    {
+                        Some(if dimension.base().style_name.trim().is_empty() {
+                            "Standard"
+                        } else {
+                            dimension.base().style_name.trim()
+                        })
+                    } else {
+                        None
+                    };
+                    let dimension_exists =
+                        dimension_name.is_some_and(|name| document.dim_styles.get(name).is_some());
+                    let valid = match property.as_str() {
+                        "color" => value.as_f64().is_some_and(|v| {
+                            v.is_finite() && v.fract() == 0.0 && (0.0..=256.0).contains(&v)
+                        }),
+                        "lineweight" => value.as_f64().is_some_and(|v| {
+                            v.is_finite() && v.fract() == 0.0 && (-3.0..=211.0).contains(&v)
+                        }),
+                        "textHeight" => {
+                            (is_text || dimension_exists)
+                                && value
+                                    .as_f64()
+                                    .is_some_and(|v| v.is_finite() && v > 0.0 && v <= 10000.0)
+                        }
+                        "arrowSize" | "overallScale" => {
+                            dimension_exists
+                                && value
+                                    .as_f64()
+                                    .is_some_and(|v| v.is_finite() && v > 0.0 && v <= 10000.0)
+                        }
+                        "textGap" | "extensionOffset" | "extensionBeyond" => {
+                            dimension_exists
+                                && value
+                                    .as_f64()
+                                    .is_some_and(|v| v.is_finite() && v >= 0.0 && v <= 10000.0)
+                        }
+                        "layer" => value
+                            .as_string()
+                            .is_some_and(|v| document.layers.get(&v).is_some()),
+                        "linetype" => value.as_string().is_some_and(|v| {
+                            ["Continuous", "ByLayer", "ByBlock"].contains(&v.as_str())
+                        }),
+                        "textStyle" => {
+                            is_text
+                                && value
+                                    .as_string()
+                                    .is_some_and(|v| document.text_styles.get(&v).is_some())
+                        }
+                        "dimensionStyle" => {
+                            matches!(entity, codec::EntityType::Dimension(_))
+                                && value
+                                    .as_string()
+                                    .is_some_and(|v| document.dim_styles.get(&v).is_some())
+                        }
+                        _ => false,
+                    };
+                    if !valid {
+                        fail_style(&format!(
+                            "Unsupported or unavailable target property: {}. No changes applied.",
+                            property
+                        ));
+                        return Task::none();
+                    }
+                    property_changes.push((
+                        handle,
+                        property,
+                        value
+                            .as_string()
+                            .unwrap_or_else(|| value.as_f64().unwrap().to_string()),
+                    ));
+                }
+            }
+            let entity_scoped = !target_entity_handles.is_empty();
+            let read_style = |field: &str| {
+                let value = js_sys::Reflect::get(&request, &JsValue::from_str(field)).ok()?;
+                if value.is_undefined() || value.is_null() {
+                    return None;
+                }
+                let color = js_sys::Reflect::get(&value, &JsValue::from_str("color"))
+                    .ok()
+                    .and_then(|value| value.as_string())
+                    .and_then(|name| match name.as_str() {
+                        "red" => Some(1_i16),
+                        "yellow" => Some(2),
+                        "green" => Some(3),
+                        "cyan" => Some(4),
+                        "blue" => Some(5),
+                        "magenta" => Some(6),
+                        "white" => Some(7),
+                        _ => None,
+                    });
+                let linetype = js_sys::Reflect::get(&value, &JsValue::from_str("linetype"))
+                    .ok()
+                    .and_then(|value| value.as_string())
+                    .filter(|value| value == "Continuous");
+                let lineweight = js_sys::Reflect::get(&value, &JsValue::from_str("lineweightMm"))
+                    .ok()
+                    .and_then(|value| value.as_f64())
+                    .filter(|value| (0.0..=2.11).contains(value))
+                    .map(|value| {
+                        codec::types::LineWeight::from_value((value * 100.0).round() as i16)
+                    });
+                (color.is_some() || linetype.is_some() || lineweight.is_some())
+                    .then_some((color, linetype, lineweight))
+            };
+            let geometry_style = read_style("geometry");
+            let dimension_layer_style = read_style("dimension");
+            let dimension_value = js_sys::Reflect::get(&request, &JsValue::from_str("dimension"))
+                .unwrap_or(JsValue::UNDEFINED);
+            let read_dimension_number = |field: &str, allow_zero: bool| {
+                js_sys::Reflect::get(&dimension_value, &JsValue::from_str(field))
+                    .ok()
+                    .and_then(|value| value.as_f64())
+                    .filter(|value| {
+                        value.is_finite()
+                            && *value <= 10_000.0
+                            && (if allow_zero {
+                                *value >= 0.0
+                            } else {
+                                *value > 0.0
+                            })
+                    })
+            };
+            let dimension_properties = [
+                ("textHeight", read_dimension_number("textHeight", false)),
+                ("arrowSize", read_dimension_number("arrowSize", false)),
+                ("textGap", read_dimension_number("textGap", true)),
+                ("overallScale", read_dimension_number("overallScale", false)),
+                (
+                    "extensionOffset",
+                    read_dimension_number("extensionOffset", true),
+                ),
+                (
+                    "extensionBeyond",
+                    read_dimension_number("extensionBeyond", true),
+                ),
+            ];
+            let has_dimension_properties = dimension_properties
+                .iter()
+                .any(|(_, value)| value.is_some());
+            let mut target_names = Vec::new();
+            if !entity_scoped && geometry_style.is_some() {
+                target_names.extend(geometry_layers.iter().cloned());
+            }
+            if !entity_scoped && dimension_layer_style.is_some() {
+                target_names.extend(dimension_layers.iter().cloned());
+            }
+            target_names.sort();
+            target_names.dedup();
+            let i = self.active_tab;
+            let undo = (!target_names.is_empty())
+                .then(|| self.begin_layer_undo(i, "METAL STYLE APPLY", &target_names));
+            let mut changed = Vec::new();
+            if !entity_scoped {
+                for (layers, style) in [
+                    (&geometry_layers, geometry_style.clone()),
+                    (&dimension_layers, dimension_layer_style.clone()),
+                ] {
+                    let Some((color, linetype, lineweight)) = style else {
+                        continue;
+                    };
+                    for name in layers {
+                        let Some(layer) = self.tabs[i].scene.document.layers.get_mut(name) else {
+                            continue;
+                        };
+                        if let Some(index) = color {
+                            layer.color = codec::types::Color::from_index(index);
+                        }
+                        if let Some(value) = &linetype {
+                            layer.line_type = value.clone();
+                        }
+                        if let Some(value) = lineweight {
+                            layer.line_weight = value;
+                        }
+                        changed.push(name.clone());
+                    }
+                }
+            }
+            changed.sort();
+            changed.dedup();
+            if !changed.is_empty() {
+                self.tabs[i].scene.document.header.lineweight_display = true;
+                self.tabs[i].dirty = true;
+                self.tabs[i].scene.invalidate_layer_dependencies(&changed);
+                if let Some(undo) = undo {
+                    self.commit_layer_undo(i, undo);
+                }
+                self.sync_ribbon_layers();
+            }
+            let mut changed_entity_handles = Vec::new();
+            if entity_scoped {
+                self.push_undo_snapshot(i, "METAL SCOPED STYLE APPLY");
+                let numeric_dimension_property = |property: &str| {
+                    [
+                        "textHeight",
+                        "arrowSize",
+                        "textGap",
+                        "overallScale",
+                        "extensionOffset",
+                        "extensionBeyond",
+                    ]
+                    .contains(&property)
+                };
+                let mut dimension_patches =
+                    std::collections::BTreeMap::<Handle, Vec<(String, f64)>>::new();
+                for (handle, property, value) in &property_changes {
+                    if numeric_dimension_property(property)
+                        && matches!(
+                            self.tabs[i].scene.document.get_entity(*handle),
+                            Some(codec::EntityType::Dimension(_))
+                        )
+                    {
+                        dimension_patches
+                            .entry(*handle)
+                            .or_default()
+                            .push((property.clone(), value.parse::<f64>().unwrap()));
+                    }
+                }
+                for (handle, properties) in &dimension_patches {
+                    let codec::EntityType::Dimension(dimension) =
+                        self.tabs[i].scene.document.get_entity(*handle).unwrap()
+                    else {
+                        unreachable!()
+                    };
+                    let old_name = dimension.base().style_name.trim();
+                    let old_name = if old_name.is_empty() {
+                        "Standard"
+                    } else {
+                        old_name
+                    };
+                    let mut isolated = self.tabs[i]
+                        .scene
+                        .document
+                        .dim_styles
+                        .get(old_name)
+                        .unwrap()
+                        .clone();
+                    let name = format!("METAL-PATCH-{}-{}", operation_id, handle);
+                    isolated.name = name.clone();
+                    isolated.handle = self.tabs[i].scene.document.allocate_handle();
+                    for (property, value) in properties {
+                        let target = match property.as_str() {
+                            "textHeight" => &mut isolated.dimtxt,
+                            "arrowSize" => &mut isolated.dimasz,
+                            "textGap" => &mut isolated.dimgap,
+                            "overallScale" => &mut isolated.dimscale,
+                            "extensionOffset" => &mut isolated.dimexo,
+                            "extensionBeyond" => &mut isolated.dimexe,
+                            _ => unreachable!(),
+                        };
+                        *target = *value;
+                    }
+                    self.tabs[i]
+                        .scene
+                        .document
+                        .dim_styles
+                        .add_or_replace(isolated);
+                    if let Some(codec::EntityType::Dimension(dimension)) =
+                        self.tabs[i].scene.document.get_entity_mut(*handle)
+                    {
+                        dimension.base_mut().style_name = name;
+                    }
+                    changed_entity_handles.push(*handle);
+                }
+                for (handle, property, value) in &property_changes {
+                    if dimension_patches.contains_key(handle)
+                        && (numeric_dimension_property(property) || property == "dimensionStyle")
+                    {
+                        continue;
+                    }
+                    let entity = self.tabs[i].scene.document.get_entity_mut(*handle).unwrap();
+                    match property.as_str() {
+                        "color" => crate::scene::view::dispatch::apply_color(
+                            entity,
+                            codec::types::Color::from_index(value.parse::<i16>().unwrap()),
+                        ),
+                        "lineweight" => crate::scene::view::dispatch::apply_line_weight(
+                            entity,
+                            codec::types::LineWeight::from_value(value.parse::<i16>().unwrap()),
+                        ),
+                        "textHeight" => {
+                            crate::scene::view::dispatch::apply_geom_prop(entity, "height", value)
+                        }
+                        "textStyle" => match entity {
+                            codec::EntityType::Text(text) => text.style = value.clone(),
+                            codec::EntityType::MText(text) => text.style = value.clone(),
+                            _ => {}
+                        },
+                        "dimensionStyle" => {
+                            if let codec::EntityType::Dimension(dimension) = entity {
+                                dimension.base_mut().style_name = value.clone();
+                            }
+                        }
+                        "layer" | "linetype" => {
+                            crate::scene::view::dispatch::apply_common_prop(entity, property, value)
+                        }
+                        _ => unreachable!(),
+                    }
+                    changed_entity_handles.push(*handle);
+                }
+                for handle in &target_entity_handles {
+                    let Some(entity) = self.tabs[i].scene.document.get_entity_mut(*handle) else {
+                        continue;
+                    };
+                    let is_dimension = matches!(entity, codec::EntityType::Dimension(_));
+                    let style = if is_dimension {
+                        dimension_layer_style.clone()
+                    } else {
+                        geometry_style.clone()
+                    };
+                    let Some((color, linetype, lineweight)) = style else {
+                        continue;
+                    };
+                    let before_color = entity.common().color.clone();
+                    let before_linetype = entity.common().linetype.clone();
+                    let before_lineweight = entity.common().line_weight;
+                    if let Some(index) = color {
+                        crate::scene::view::dispatch::apply_color(
+                            entity,
+                            codec::types::Color::from_index(index),
+                        );
+                    }
+                    if let Some(value) = &linetype {
+                        crate::scene::view::dispatch::apply_common_prop(entity, "linetype", value);
+                    }
+                    if let Some(value) = lineweight {
+                        crate::scene::view::dispatch::apply_line_weight(entity, value);
+                    }
+                    if entity.common().color != before_color
+                        || entity.common().linetype != before_linetype
+                        || entity.common().line_weight != before_lineweight
+                    {
+                        changed_entity_handles.push(*handle);
+                    }
+                }
+                if !changed_entity_handles.is_empty() {
+                    self.tabs[i].dirty = true;
+                    self.tabs[i].scene.document.header.lineweight_display = true;
+                    self.invalidate_property_targets(i, &changed_entity_handles);
+                    self.refresh_properties();
+                }
+            }
+            let dimension_layer_names = dimension_layers
+                .iter()
+                .map(|name| name.to_ascii_uppercase())
+                .collect::<std::collections::BTreeSet<_>>();
+            let target_dimension_handles = target_entity_handles
+                .iter()
+                .copied()
+                .filter(|handle| {
+                    matches!(
+                        self.tabs[i].scene.document.get_entity(*handle),
+                        Some(codec::EntityType::Dimension(_))
+                    )
+                })
+                .collect::<std::collections::BTreeSet<_>>();
+            let mut dimension_style_names = if has_dimension_properties {
+                self.tabs[i]
+                    .scene
+                    .document
+                    .entities()
+                    .filter_map(|entity| {
+                        let in_scope = if entity_scoped {
+                            target_dimension_handles.contains(&entity.common().handle)
+                        } else {
+                            dimension_layer_names
+                                .contains(&entity.common().layer.to_ascii_uppercase())
+                        };
+                        if !in_scope {
+                            return None;
+                        }
+                        match entity {
+                            codec::EntityType::Dimension(dimension) => {
+                                let name = dimension.base().style_name.trim();
+                                Some(if name.is_empty() {
+                                    "Standard".to_string()
+                                } else {
+                                    name.to_string()
+                                })
+                            }
+                            _ => None,
+                        }
+                    })
+                    .collect::<Vec<_>>()
+            } else {
+                Vec::new()
+            };
+            dimension_style_names.sort();
+            dimension_style_names.dedup();
+            // Isolate DIMSTYLE records before a scoped edit so other dimensions retain their style.
+            if entity_scoped && has_dimension_properties {
+                let mut isolated_names = Vec::new();
+                for (index, old_name) in dimension_style_names.iter().enumerate() {
+                    let Some(mut isolated) = self.tabs[i]
+                        .scene
+                        .document
+                        .dim_styles
+                        .get(old_name)
+                        .cloned()
+                    else {
+                        continue;
+                    };
+                    let name = format!("METAL-SCOPED-{}-{}", operation_id, index);
+                    isolated.name = name.clone();
+                    isolated.handle = self.tabs[i].scene.document.allocate_handle();
+                    self.tabs[i]
+                        .scene
+                        .document
+                        .dim_styles
+                        .add_or_replace(isolated);
+                    for handle in &target_dimension_handles {
+                        if let Some(codec::EntityType::Dimension(dimension)) =
+                            self.tabs[i].scene.document.get_entity_mut(*handle)
+                        {
+                            let current = dimension.base().style_name.trim();
+                            if current == old_name || (current.is_empty() && old_name == "Standard")
+                            {
+                                dimension.base_mut().style_name = name.clone();
+                                changed_entity_handles.push(*handle);
+                            }
+                        }
+                    }
+                    isolated_names.push(name);
+                }
+                if !isolated_names.is_empty() {
+                    self.tabs[i].dirty = true;
+                    let handles = target_dimension_handles.iter().copied().collect::<Vec<_>>();
+                    self.invalidate_property_targets(i, &handles);
+                }
+                dimension_style_names = isolated_names;
+            }
+            let dimension_undo = (!entity_scoped && !dimension_style_names.is_empty()).then(|| {
+                self.begin_dim_style_undo(i, "METAL DIMSTYLE APPLY", &dimension_style_names)
+            });
+            let mut changed_dimension_styles = Vec::new();
+            for name in &dimension_style_names {
+                let Some(style) = self.tabs[i].scene.document.dim_styles.get_mut(name) else {
+                    continue;
+                };
+                let mut style_changed = false;
+                for (property, value) in &dimension_properties {
+                    let Some(value) = value else { continue };
+                    let target = match *property {
+                        "textHeight" => &mut style.dimtxt,
+                        "arrowSize" => &mut style.dimasz,
+                        "textGap" => &mut style.dimgap,
+                        "overallScale" => &mut style.dimscale,
+                        "extensionOffset" => &mut style.dimexo,
+                        "extensionBeyond" => &mut style.dimexe,
+                        _ => continue,
+                    };
+                    if (*target - *value).abs() > f64::EPSILON {
+                        *target = *value;
+                        style_changed = true;
+                    }
+                }
+                if style_changed {
+                    changed_dimension_styles.push(name.clone());
+                }
+            }
+            if !changed_dimension_styles.is_empty() {
+                self.tabs[i].dirty = true;
+                self.tabs[i]
+                    .scene
+                    .invalidate_dim_style_dependencies_many(&changed_dimension_styles);
+                if let Some(undo) = dimension_undo {
+                    self.commit_dim_style_undo(i, undo);
+                }
+                self.sync_ribbon_styles();
+                self.refresh_properties();
+            }
+            let message = js_sys::Object::new();
+            let _ = js_sys::Reflect::set(
+                &message,
+                &JsValue::from_str("source"),
+                &JsValue::from_str("opencadstudio"),
+            );
+            let _ = js_sys::Reflect::set(
+                &message,
+                &JsValue::from_str("type"),
+                &JsValue::from_str(
+                    if changed.is_empty()
+                        && changed_entity_handles.is_empty()
+                        && changed_dimension_styles.is_empty()
+                    {
+                        "style_apply_failed"
+                    } else {
+                        "style_applied"
+                    },
+                ),
+            );
+            let _ = js_sys::Reflect::set(
+                &message,
+                &JsValue::from_str("operationId"),
+                &JsValue::from_str(&operation_id),
+            );
+            let changed_array = js_sys::Array::new();
+            for name in &changed {
+                changed_array.push(&JsValue::from_str(name));
+            }
+            let _ = js_sys::Reflect::set(
+                &message,
+                &JsValue::from_str("changedLayers"),
+                &changed_array,
+            );
+            let changed_entity_array = js_sys::Array::new();
+            for handle in &changed_entity_handles {
+                changed_entity_array.push(&JsValue::from_str(&format!("{:X}", handle.value())));
+            }
+            let _ = js_sys::Reflect::set(
+                &message,
+                &JsValue::from_str("changedEntityHandles"),
+                &changed_entity_array,
+            );
+            let changed_dim_styles_array = js_sys::Array::new();
+            for name in &changed_dimension_styles {
+                changed_dim_styles_array.push(&JsValue::from_str(name));
+            }
+            let _ = js_sys::Reflect::set(
+                &message,
+                &JsValue::from_str("changedDimStyles"),
+                &changed_dim_styles_array,
+            );
+            let applied_dimension_style = js_sys::Object::new();
+            if !changed_dimension_styles.is_empty() {
+                for (property, value) in &dimension_properties {
+                    if let Some(value) = value {
+                        let _ = js_sys::Reflect::set(
+                            &applied_dimension_style,
+                            &JsValue::from_str(property),
+                            &JsValue::from_f64(*value),
+                        );
+                    }
+                }
+            }
+            let _ = js_sys::Reflect::set(
+                &message,
+                &JsValue::from_str("dimensionStyle"),
+                &applied_dimension_style,
+            );
+            let _ = js_sys::Reflect::set(
+                &message,
+                &JsValue::from_str("revision"),
+                &JsValue::from_str(&self.tabs[i].scene.geometry_epoch.to_string()),
+            );
+            if changed.is_empty() && changed_dimension_styles.is_empty() {
+                let error = if has_dimension_properties && dimension_style_names.is_empty() {
+                    "No native DIMENSION entities matched; exploded LINE/TEXT annotations cannot be resized through DIMSTYLE"
+                } else {
+                    "No matching layer or DIMSTYLE property was changed"
+                };
+                let _ = js_sys::Reflect::set(
+                    &message,
+                    &JsValue::from_str("error"),
+                    &JsValue::from_str(error),
+                );
+            }
+            if let Ok(Some(parent)) = window.parent() {
+                let _ = parent.post_message(&message, "*");
+            }
+            return Task::none();
+        }
+        if kind == "snapshot" {
+            let request_id = js_sys::Reflect::get(&command, &JsValue::from_str("requestId"))
+                .ok()
+                .and_then(|value| value.as_string())
+                .unwrap_or_default();
+            let tab = &self.tabs[self.active_tab];
+            let message = js_sys::Object::new();
+            let _ = js_sys::Reflect::set(
+                &message,
+                &JsValue::from_str("source"),
+                &JsValue::from_str("opencadstudio"),
+            );
+            let _ = js_sys::Reflect::set(
+                &message,
+                &JsValue::from_str("requestId"),
+                &JsValue::from_str(&request_id),
+            );
+            let _ = js_sys::Reflect::set(
+                &message,
+                &JsValue::from_str("documentName"),
+                &JsValue::from_str(&tab.tab_display_name()),
+            );
+            let _ = js_sys::Reflect::set(
+                &message,
+                &JsValue::from_str("revision"),
+                &JsValue::from_str(&tab.scene.geometry_epoch.to_string()),
+            );
+            match crate::io::save_to_bytes(&tab.scene.document, "dwg", tab.scene.document.version) {
+                Ok(bytes) => {
+                    let _ = js_sys::Reflect::set(
+                        &message,
+                        &JsValue::from_str("type"),
+                        &JsValue::from_str("snapshot_ready"),
+                    );
+                    let payload = js_sys::Uint8Array::from(bytes.as_slice());
+                    let _ = js_sys::Reflect::set(&message, &JsValue::from_str("bytes"), &payload);
+                }
+                Err(error) => {
+                    let _ = js_sys::Reflect::set(
+                        &message,
+                        &JsValue::from_str("type"),
+                        &JsValue::from_str("snapshot_failed"),
+                    );
+                    let _ = js_sys::Reflect::set(
+                        &message,
+                        &JsValue::from_str("error"),
+                        &JsValue::from_str(&error),
+                    );
+                }
+            }
+            if let Ok(Some(parent)) = window.parent() {
+                let _ = parent.post_message(&message, "*");
+            }
+            return Task::none();
+        }
+        if kind == "new" {
+            return Task::done(Message::TabNew);
+        }
+        if kind != "open" && kind != "replace" {
+            return Task::none();
+        }
+
+        let name = js_sys::Reflect::get(&command, &JsValue::from_str("name"))
+            .ok()
+            .and_then(|value| value.as_string())
+            .unwrap_or_else(|| "Drawing.dwg".into());
+        let command_id = js_sys::Reflect::get(&command, &JsValue::from_str("commandId"))
+            .ok()
+            .and_then(|value| value.as_string())
+            .filter(|value| !value.is_empty());
+        let Ok(bytes_value) = js_sys::Reflect::get(&command, &JsValue::from_str("bytes")) else {
+            return Task::none();
+        };
+        let bytes_array = js_sys::Uint8Array::new(&bytes_value);
+        let byte_count = bytes_array.length() as usize;
+        let valid_name = matches!(
+            name.rsplit('.')
+                .next()
+                .unwrap_or("")
+                .to_ascii_lowercase()
+                .as_str(),
+            "dwg" | "dxf"
+        );
+        if !valid_name || byte_count == 0 || byte_count > 256 * 1024 * 1024 {
+            return Task::none();
+        }
+        let mut bytes = vec![0_u8; byte_count];
+        bytes_array.copy_to(&mut bytes);
+        let state = std::sync::Arc::new(crate::io::OpenProgressState::new(
+            crate::app::OPEN_PHASE_READING,
+        ));
+        let open_id = self.next_open_id();
+        self.opening = Some(crate::app::OpenProgress {
+            id: open_id,
+
+            name: name.clone(),
+            source_path: Some(std::path::PathBuf::from(&name)),
+            size_bytes: bytes.len() as u64,
+            state: state.clone(),
+            started: Instant::now(),
+            recovery_error: None,
+            recovery_read_stats: None,
+            recovery_bytes: None,
+
+            metal_command_id: command_id,
+        });
+        Task::perform(
+            crate::io::load_metal_web_bytes(name, bytes, state),
+            move |outcome| Message::WebFileOpened(open_id, outcome),
+        )
+    }
+
+    /// Web: open drawing bytes supplied by the standard OpenCAD control path.
     #[cfg(target_arch = "wasm32")]
     pub(in crate::app) fn open_web_bytes(&mut self, name: String, bytes: Vec<u8>) -> Task<Message> {
         let (open_id, state) = self.begin_web_open(name.clone(), bytes.len() as u64);
@@ -1245,8 +4325,9 @@ impl OpenCADStudio {
         )
     }
 
-    /// `FileOpened` only installs the result when an open is in progress, so
-    /// mark one.
+    /// Mark a browser-originated open as active so its completion can be
+    /// matched to the correct request. Metal bridge opens use their dedicated
+    /// command-aware path above.
     #[cfg(target_arch = "wasm32")]
     fn begin_web_open(
         &mut self,
@@ -1267,6 +4348,7 @@ impl OpenCADStudio {
             recovery_error: None,
             recovery_read_stats: None,
             recovery_bytes: None,
+            metal_command_id: None,
         });
         (open_id, state)
     }
@@ -1599,6 +4681,16 @@ impl OpenCADStudio {
         if self.opening.is_none() {
             return Task::none();
         }
+
+        #[cfg(target_arch = "wasm32")]
+        let metal_command_id = self
+            .opening
+            .as_ref()
+            .and_then(|opening| opening.metal_command_id.clone());
+        #[cfg(target_arch = "wasm32")]
+        let opened_from_metal = metal_command_id.is_some();
+        #[cfg(not(target_arch = "wasm32"))]
+        let opened_from_metal = false;
         let open_started = self.opening.as_ref().map(|p| p.started);
         let size_bytes = self
             .opening
@@ -1701,6 +4793,7 @@ impl OpenCADStudio {
             self.apply_display_defaults(idx);
             idx
         };
+
 
         // Missing-on-open: neutral command-line notice plus a flag
         // the Reference Manager reads. Never an auto-open modal.
@@ -1891,6 +4984,10 @@ impl OpenCADStudio {
         // selected — see #21.
         self.sync_ribbon_from_selection();
         self.tabs[i].scene.restore_saved_camera();
+
+        if name.contains("-preview-") || opened_from_metal {
+            self.tabs[i].scene.fit_all();
+        }
         // Grid/snap are per-drawing view settings — adopt the opened
         // file's active viewport state rather than a global preference.
         self.adopt_view_display(i);
@@ -1915,11 +5012,47 @@ impl OpenCADStudio {
                 .set(crate::app::OPEN_PHASE_FINALIZING, 10000, 1, 1);
         }
         self.opening.take();
+
+        #[cfg(target_arch = "wasm32")]
+        if let Some(command_id) = metal_command_id {
+            if let Some(window) = web_sys::window() {
+                let message = js_sys::Object::new();
+                let _ = js_sys::Reflect::set(
+                    &message,
+                    &wasm_bindgen::JsValue::from_str("source"),
+                    &wasm_bindgen::JsValue::from_str("opencadstudio"),
+                );
+                let _ = js_sys::Reflect::set(
+                    &message,
+                    &wasm_bindgen::JsValue::from_str("type"),
+                    &wasm_bindgen::JsValue::from_str("document_opened"),
+                );
+                let _ = js_sys::Reflect::set(
+                    &message,
+                    &wasm_bindgen::JsValue::from_str("commandId"),
+                    &wasm_bindgen::JsValue::from_str(&command_id),
+                );
+                let _ = js_sys::Reflect::set(
+                    &message,
+                    &wasm_bindgen::JsValue::from_str("documentName"),
+                    &wasm_bindgen::JsValue::from_str(&name),
+                );
+                let _ = js_sys::Reflect::set(
+                    &message,
+                    &wasm_bindgen::JsValue::from_str("entityCount"),
+                    &wasm_bindgen::JsValue::from_f64(entity_count as f64),
+                );
+                if let Ok(Some(parent)) = window.parent() {
+                    let _ = parent.post_message(&message, "*");
+                }
+            }
+        }
         let pending_open_task = if let Some(report) = recovery_report {
             self.recovery_report = Some(report);
             self.active_modal = Some(crate::app::ModalKind::Recovery);
             Task::none()
         } else {
+
             #[cfg(not(target_arch = "wasm32"))]
             {
                 // A drawing referencing fonts this machine lacks offers to
@@ -2047,6 +5180,7 @@ impl OpenCADStudio {
         self.stamp_header_sysvars(i);
         self.tabs[i].scene.document.header.user_real1 = self.tabs[i].scene.annotation_scale as f64;
         self.sync_solid_models_for_save(i);
+
         self.tabs[i].scene.sync_native_parametric_graph();
     }
 
@@ -2163,51 +5297,92 @@ impl OpenCADStudio {
             self.tabs[i].scene.document.preview = Some(preview);
         }
 
-        let mut recent_task = Task::none();
+        let revision = self.tabs[i].edit_revision;
+        let epoch = self.tabs[i].scene.geometry_epoch;
+        let close_after = self.save_dialog_for_unsaved;
         let document = self.tabs[i].scene.document_for_save();
-        let saved = match crate::io::save_to_bytes(&document, &ext, version) {
-            Ok(bytes) => {
-                crate::sys::download_bytes(&filename, &bytes);
-                let cache_name = std::path::Path::new(&filename)
-                    .file_name()
-                    .map(|name| name.to_string_lossy().into_owned())
-                    .unwrap_or_else(|| filename.clone());
-                let path = std::path::PathBuf::from(cache_name);
-                self.tabs[i].current_path = Some(path.clone());
-                self.tabs[i].scene.document.version = version;
-                self.tabs[i].dirty = false;
-                self.tabs[i].recovery_save_as_required = false;
-                recent_task = Task::perform(
-                    async move {
-                        crate::io::web_recent::store(&path.to_string_lossy(), &bytes)
-                            .await
-                            .map(|_| path)
-                    },
-                    Message::WebRecentStored,
-                );
-                self.command_line
-                    .push_output(crate::tf!("Saved: {filename}").as_ref());
-                true
-            }
+        let bytes = match crate::io::save_to_bytes(&document, &ext, version) {
+            Ok(bytes) => bytes,
             Err(error) => {
-                self.command_line
-                    .push_error(crate::tf!("Save failed: {error}").as_ref());
-                false
+                return self.on_web_save_completed(
+                    tab_id,
+                    revision,
+                    epoch,
+                    filename,
+                    version,
+                    close_after,
+                    Err(error.to_string()),
+                )
             }
         };
-        if self.save_dialog_for_unsaved {
-            if saved {
-                if let Some(crate::app::PendingClose::Tab(index)) = self.pending_close.take() {
-                    let continuation = self.update(Message::TabClose(index));
-                    let rest = self.continue_tab_close_queue();
-                    return Task::batch([recent_task, continuation, rest]);
+        self.active_save_jobs.insert(tab_id, revision);
+        Task::perform(
+            async move {
+                let result = crate::sys::save_drawing_download(&filename, &bytes).await;
+                if matches!(result, Ok(true)) {
+                    // Recent-cache failure must not invalidate a successful disk write.
+                    let _ = crate::io::web_recent::store(&filename, &bytes).await;
                 }
-            } else if self.pending_close.is_some() {
-                let retry = self.open_unsaved_dialog_window();
-                return Task::batch([recent_task, retry]);
+                Message::WebSaveCompleted {
+                    tab_id,
+                    revision,
+                    epoch,
+                    filename,
+                    version,
+                    close_after,
+                    result,
+                }
+            },
+            |message| message,
+        )
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    pub(super) fn on_web_save_completed(
+        &mut self,
+        tab_id: u64,
+        revision: u64,
+        epoch: u64,
+        filename: String,
+        version: codec::DxfVersion,
+        close_after: bool,
+        result: Result<bool, String>,
+    ) -> Task<Message> {
+        self.active_save_jobs.remove(&tab_id);
+        let Some(i) = self.tabs.iter().position(|tab| tab.id == tab_id) else {
+            return Task::none();
+        };
+        let unchanged =
+            self.tabs[i].edit_revision == revision && self.tabs[i].scene.geometry_epoch == epoch;
+        let saved = matches!(result, Ok(true));
+        match result {
+            Ok(true) => {
+                self.tabs[i].current_path = Some(std::path::PathBuf::from(&filename));
+                self.tabs[i].scene.document.version = version;
+                if unchanged {
+                    self.tabs[i].dirty = false;
+                }
+                self.tabs[i].recovery_save_as_required = false;
+                self.command_line
+                    .push_output(crate::tf!("Saved: {filename}").as_ref());
             }
+            Ok(false) => self.command_line.push_info("Save cancelled."),
+            Err(error) => self
+                .command_line
+                .push_error(crate::tf!("Save failed: {error}").as_ref()),
         }
-        recent_task
+        if close_after
+            && matches!(self.pending_close, Some(crate::app::PendingClose::Tab(index)) if index == i)
+        {
+            if saved && unchanged {
+                self.pending_close.take();
+                let continuation = self.update(Message::TabClose(i));
+                let rest = self.continue_tab_close_queue();
+                return Task::batch([continuation, rest]);
+            }
+            return self.open_unsaved_dialog_window();
+        }
+        Task::none()
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -2967,6 +6142,7 @@ impl OpenCADStudio {
     }
 
     pub(super) fn on_save_dialog_confirm(&mut self) -> Task<Message> {
+
         let (ext, version) = crate::io::parse_save_format(&self.save_dialog_format);
         // Warn before a lossy Save-As that would drop unsupported
         // (AEC / application) objects kept only as verbatim
@@ -2990,6 +6166,7 @@ impl OpenCADStudio {
         let name = self.save_dialog_filename.trim();
         let filename = if name.is_empty() {
             format!("drawing.{ext}")
+
         } else if std::path::Path::new(name).extension().is_none() {
             format!("{name}.{ext}")
         } else {
@@ -3038,6 +6215,7 @@ impl OpenCADStudio {
             sync_annotation_scale_header(&mut self.tabs[i].scene);
             self.stamp_header_sysvars(i);
             self.sync_solid_models_for_save(i);
+
             self.tabs[i].scene.sync_native_parametric_graph();
             let tab_id = self.tabs[i].id;
             let bounds =
@@ -3263,6 +6441,7 @@ impl OpenCADStudio {
             else {
                 return;
             };
+
             let d = &mut self.plot_dialog;
             d.paper = default.canonical.to_string();
             (d.paper_width_mm, d.paper_height_mm) = default.sheet_mm(plot_dialog_orientation(d));
@@ -3516,6 +6695,7 @@ impl OpenCADStudio {
             }
         }
 
+
         self.tabs[i].dirty = true;
         self.tabs[i].scene.bump_geometry_no_blocks();
         self.command_line.push_info(
@@ -3550,6 +6730,7 @@ impl OpenCADStudio {
             self.plot_dialog.printer = kept_printer;
             self.plot_dialog.to_file = kept_to_file;
         }
+
         let Some(page) = self.direct_plot_page()
         else {
             self.command_line.push_error(
@@ -3559,6 +6740,7 @@ impl OpenCADStudio {
         };
         let worker_path = path.clone();
         let work = move || {
+
             crate::io::pdf_export::export_pdf(&page, &worker_path)
                 .map(|_| crate::tf!("Exported: {}", worker_path.display()).into_owned())
                 .map_err(|e| crate::tf!("Export failed: {e}").into_owned())
@@ -3577,6 +6759,7 @@ impl OpenCADStudio {
             "Extents" => self.extents_plot_job(),
             _ => self.window_plot_job(),
         };
+
         let Some(page) = job
         else {
             self.command_line
@@ -3586,6 +6769,7 @@ impl OpenCADStudio {
         let worker_path = path.clone();
         self.close_active_modal();
         let work = move || {
+
             crate::io::pdf_export::export_pdf(&page, &worker_path)
                 .map(|_| {
                     crate::tf!(
@@ -3630,32 +6814,15 @@ impl OpenCADStudio {
         let previous = self.plot_dialog.clone();
         let previous_style = self.active_plot_style.clone();
         let previous_window = self.plot_window;
-
-        // Once Print All has an explicit override, reopening Options must keep
-        // those settings instead of replacing them with the active layout's
-        // page setup.
-        let keep_print_all_override = self.print_all_settings_override;
-
-        // Refresh runtime data such as printers, paper sizes, plot styles and
-        // named page setups.
+        let previous_setup = self.plot_setup_template.clone();
         let task = self.on_plot_dialog_open();
-
-        if keep_print_all_override {
-            // Restore only the user-editable plot settings. Runtime lists populated
-            // above remain intact.
-            self.plot_dialog.copy_settings_from(&previous);
-            self.active_plot_style = previous_style.clone();
-            self.plot_window = previous_window;
-        }
-
         self.print_all_options_prev = Some(previous);
         self.print_all_plot_style_prev = Some(previous_style);
         self.print_all_plot_window_prev = Some(previous_window);
-
+        self.print_all_plot_setup_prev = Some(previous_setup);
         self.print_all_options = true;
         self.plot_dialog.paper_space = true;
         self.plot_dialog.area = "Layout".into();
-
         task
     }
 
@@ -3739,6 +6906,7 @@ impl OpenCADStudio {
                 let page = if dialog.area == "Layout" {
                     self.layout_plot_page_for("Layout")
                 } else {
+
                     area_page.ok_or_else(|| {
                         crate::tf!("Layout '{name}' plot area is empty.").into_owned()
                     })?
@@ -3880,6 +7048,7 @@ impl OpenCADStudio {
         let scene = &self.tabs[i].scene;
         let paper_space = scene.current_layout != "Model";
         let selected_sheet = plot_dialog_sheet_mm(&self.plot_dialog);
+
         let mut content = plot_scene_content(
             scene,
             self.plot_dialog.paperspace_last,
@@ -3914,6 +7083,7 @@ impl OpenCADStudio {
             // Only the explicit upside-down choice rotates layout content here.
             let rotation = dialog_rotation;
             let centered = self.plot_dialog.center;
+
             let (origin_x, origin_y) = self.dialog_plot_origin_mm();
 
             let (scale, offset_x, offset_y) = if plot_extents {
@@ -4059,6 +7229,7 @@ impl OpenCADStudio {
     }
 
     pub(super) fn on_print_to_printer(&mut self) -> Task<Message> {
+
         let Some(page) = self.direct_plot_page()
         else {
             self.command_line.push_error(
@@ -4066,11 +7237,13 @@ impl OpenCADStudio {
             );
             return Task::none();
         };
+
         let options = self.plot_print_options(&self.plot_dialog);
         self.command_line
             .push_info(crate::t!("Sending to system printer…").as_ref());
         background_task(
             move || {
+
                 iced::futures::executor::block_on(
                     crate::io::print_to_printer::print_wires_with(page, options),
                 )
@@ -4540,6 +7713,7 @@ impl OpenCADStudio {
                 }
                 Task::none()
             }
+
             M::CustomPaper(msg) => {
                 self.on_custom_paper_msg(msg);
                 Task::none()
@@ -4968,6 +8142,7 @@ impl OpenCADStudio {
             let a4 = crate::io::paper_catalog::default_paper();
             d.paper = a4.canonical.to_string();
             d.orientation = "Landscape".into();
+
             (d.paper_width_mm, d.paper_height_mm) =
                 a4.sheet_mm(crate::io::paper_catalog::Orientation::Landscape);
             d.area = if is_model {
@@ -5020,11 +8195,13 @@ impl OpenCADStudio {
     /// page setup).
     /// The dialog's values as a named page setup.
     fn dialog_to_plotsettings(&self) -> codec::objects::PlotSettings {
+
         self.plot_settings_from_dialog(self.dialog_base_settings())
     }
 
     /// Load a `PlotSettings` into the dialog editor fields.
     pub(in crate::app) fn load_plotsettings_into_dialog(&mut self, ps: &codec::objects::PlotSettings) {
+
         use crate::io::paper_catalog::PaperUnits;
         use codec::objects::{PlotType, ShadePlotMode, ShadePlotResolutionLevel};
         self.plot_setup_template = Some(ps.clone());
@@ -5044,6 +8221,7 @@ impl OpenCADStudio {
                 .as_ref()
                 .is_none_or(|table| !table.name.eq_ignore_ascii_case(&ps.current_style_sheet))
         {
+
             match crate::io::plot_style::PlotStyleTable::load_named(&ps.current_style_sheet) {
                 Ok(table) => {
                     self.report_plot_style_warnings(&table);
@@ -5070,6 +8248,7 @@ impl OpenCADStudio {
             && active_style_name
                 .as_deref()
                 .is_some_and(|name| name.eq_ignore_ascii_case(&style_name));
+
         // The stored media name wins (it is what the source application wrote); a drawing
         // without a usable name is matched by size, and an unknown size keeps
         // its own dimensions as a custom sheet. The sheet's orientation is the
@@ -5220,6 +8399,7 @@ impl OpenCADStudio {
     /// Copy transient paper/scale choices out of the dialog without changing
     /// the active layout.
     fn sync_dialog_plot_runtime(&mut self) {
+
         let d = &self.plot_dialog;
         self.plot_paper = plot_dialog_paper(d);
         self.plot_orientation = plot_dialog_orientation(d);
@@ -5227,6 +8407,7 @@ impl OpenCADStudio {
 
     fn apply_dialog_to_layout(&mut self) {
         self.sync_dialog_plot_runtime();
+
         self.apply_plot_page_settings();
     }
 
@@ -5278,6 +8459,7 @@ impl OpenCADStudio {
             if preview {
                 let tmp = crate::io::print_to_printer::temp_pdf_path("preview");
                 let work = move || {
+
                     crate::io::pdf_export::export_pdf(&page, &tmp)
                         .and_then(|_| crate::io::print_to_printer::open_in_viewer(&tmp))
                         .map(|_| crate::t!("Opened plot preview.").into_owned())
@@ -5292,6 +8474,7 @@ impl OpenCADStudio {
             let tmp = crate::io::print_to_printer::temp_pdf_path("print");
             let opts = self.plot_print_options(&d);
             let work = move || {
+
                 crate::io::pdf_export::export_pdf(&page, &tmp)
                     .and_then(|_| {
                         crate::io::print_to_printer::print_existing_pdf(&tmp, &opts)
@@ -5307,6 +8490,7 @@ impl OpenCADStudio {
         if preview {
             let tmp = crate::io::print_to_printer::temp_pdf_path("preview");
             let work = move || {
+
                 crate::io::pdf_export::export_pdf(&page, &tmp)
                     .and_then(|_| crate::io::print_to_printer::open_in_viewer(&tmp))
                     .map(|_| crate::t!("Opened plot preview.").into_owned())
@@ -5320,11 +8504,13 @@ impl OpenCADStudio {
             return Task::done(Message::PlotExport);
         }
 
+
         let opts = self.plot_print_options(&d);
         self.command_line
             .push_info(crate::t!("Sending to system printer…").as_ref());
         let work = move || {
             iced::futures::executor::block_on(crate::io::print_to_printer::print_wires_with(
+
                 page, opts,
             ))
                 .map(|printer| crate::tf!("Sent to printer: {printer}").into_owned())
@@ -5390,6 +8576,7 @@ impl OpenCADStudio {
         self.area_plot_job(self.display_plot_window()?)
     }
 
+
     pub(in crate::app) fn limits_plot_job(&self) -> Option<PdfPageInput> {
         let (min, max) = self.tabs[self.active_tab].scene.current_drawing_limits()?;
         self.area_plot_job((min.x, min.y, max.x, max.y))
@@ -5423,11 +8610,13 @@ impl OpenCADStudio {
             let (min, max) = scene.model_space_extents()?;
             return self.area_plot_job((min.x as f64, min.y as f64, max.x as f64, max.y as f64));
         }
+
         let content = plot_scene_content(
             scene,
             self.plot_dialog.paperspace_last,
             plot_render_mode_override(&self.plot_dialog),
         );
+
         let extents = plot_content_extents(&content)?;
         self.area_plot_job(extents)
     }
@@ -5525,11 +8714,13 @@ impl OpenCADStudio {
         };
         let scene = &self.tabs[i].scene;
         let (wx0, wy0, wx1, wy1) = (x0 as f32, y0 as f32, x1 as f32, y1 as f32);
+
         let mut content = plot_scene_content(
             scene,
             self.plot_dialog.paperspace_last,
             plot_render_mode_override(&self.plot_dialog),
         );
+
         let in_window = |wire: &crate::io::pdf_export::PlotWire| {
             wire.name != "paper_printable_area"
                 && wire.aabb[0] <= wx1 && wire.aabb[2] >= wx0
@@ -5645,6 +8836,25 @@ impl OpenCADStudio {
             },
             Message::PlotStylePanelSavePath,
         )
+
+    }
+}
+
+#[cfg(test)]
+mod native_component_limit_tests {
+    use super::validate_native_component_count;
+
+    #[test]
+    fn accepts_merged_batches_beyond_the_model_proposal_limit() {
+        for count in [0, 24, 27, 500] {
+            assert!(validate_native_component_count(count).is_ok());
+        }
+    }
+
+    #[test]
+    fn rejects_oversized_transactions_before_building_transforms() {
+        assert_eq!(validate_native_component_count(501).unwrap_err(),
+            "native transaction supports at most 500 component transforms");
     }
 }
 
@@ -6571,5 +9781,28 @@ mod plot_device_persistence_tests {
         app.load_plotsettings_into_dialog(&ps);
         assert!(app.plot_dialog.to_file);
         assert!(app.plot_dialog.printer.is_none());
+    }
+}
+
+
+#[cfg(test)]
+mod native_scaffold_tests {
+    use super::is_native_scaffold_rectangle;
+    use codec::{EntityType, entities::{Polyline2D, Vertex2D}, types::Vector3};
+
+    #[test]
+    fn only_closed_straight_rectangles_can_be_copied_as_scaffolding() {
+        let mut p = Polyline2D::new();
+        for (x, y) in [(0., 0.), (100., 0.), (100., 80.), (0., 80.)] {
+            p.add_vertex(Vertex2D::new(Vector3::new(x, y, 0.)));
+        }
+        assert!(!is_native_scaffold_rectangle(&EntityType::Polyline2D(p.clone())));
+        p.close();
+        assert!(is_native_scaffold_rectangle(&EntityType::Polyline2D(p.clone())));
+        p.vertices[0].bulge = 0.5;
+        assert!(!is_native_scaffold_rectangle(&EntityType::Polyline2D(p.clone())));
+        p.vertices[0].bulge = 0.;
+        p.vertices[1].location.y = 1.;
+        assert!(!is_native_scaffold_rectangle(&EntityType::Polyline2D(p)));
     }
 }

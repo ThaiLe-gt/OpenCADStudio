@@ -10,6 +10,7 @@
 #[cfg(not(target_arch = "wasm32"))]
 use crate::io::pdf_export;
 
+
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn temp_pdf_path(kind: &str) -> std::path::PathBuf {
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -1175,6 +1176,7 @@ fn dispatch_to_printer_opts(
 ) -> Result<String, String> {
     #[cfg(target_os = "windows")]
     {
+
         let default_printer = windows_default_printer().ok();
         let route = plan_print_route(
             opts.printer.as_deref(),

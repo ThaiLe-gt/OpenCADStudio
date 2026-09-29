@@ -1133,14 +1133,13 @@ impl ViewCubePipeline {
             &ring_idxs,
             wgpu::BufferUsages::INDEX,
         );
-        let ring_line_vertex_buffer =
-            super::gpu_upload::upload_buffer(
-                device,
-                queue,
-                "vc.ring_line_vb",
-                &ring_line_verts,
-                wgpu::BufferUsages::VERTEX,
-            );
+        let ring_line_vertex_buffer = super::gpu_upload::upload_buffer(
+            device,
+            queue,
+            "vc.ring_line_vb",
+            &ring_line_verts,
+            wgpu::BufferUsages::VERTEX,
+        );
         let uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("vc.ub"),
             size: std::mem::size_of::<CubeUniforms>() as u64,
@@ -1316,14 +1315,13 @@ impl ViewCubePipeline {
                     },
                 ],
             });
-        let composite_uniform_buffer =
-            super::gpu_upload::upload_buffer(
-                device,
-                queue,
-                "vc.composite_uniform",
-                &[1.0f32, 1.0, 0.0, 0.0],
-                wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            );
+        let composite_uniform_buffer = super::gpu_upload::upload_buffer(
+            device,
+            queue,
+            "vc.composite_uniform",
+            &[1.0f32, 1.0, 0.0, 0.0],
+            wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        );
         let composite_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("vc.composite_sampler"),
             mag_filter: wgpu::FilterMode::Nearest,

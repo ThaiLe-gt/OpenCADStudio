@@ -567,13 +567,7 @@ impl Snapper {
             None => {
                 // Leaving all geometry: capture the point we were dwelling on if
                 // it qualified, before the reset loses it.
-                self.acquire_on_leave(
-                    now,
-                    DWELL_MS,
-                    MIN_OBSERVATIONS,
-                    wires,
-                    endpoints_only,
-                );
+                self.acquire_on_leave(now, DWELL_MS, MIN_OBSERVATIONS, wires, endpoints_only);
                 self.last_snap_world = None;
                 self.dwell_since = None;
                 self.dwell_acquired = false;
@@ -625,13 +619,7 @@ impl Snapper {
                     // Moved to a different snap point: capture the previous one
                     // first if it was dwelt on long enough, so a pause-then-drag
                     // gesture reliably acquires it even without in-place events.
-                    self.acquire_on_leave(
-                        now,
-                        DWELL_MS,
-                        MIN_OBSERVATIONS,
-                        wires,
-                        endpoints_only,
-                    );
+                    self.acquire_on_leave(now, DWELL_MS, MIN_OBSERVATIONS, wires, endpoints_only);
                     self.last_snap_world = Some(p);
                     self.dwell_since = Some(now);
                     self.dwell_acquired = false;
@@ -648,11 +636,7 @@ impl Snapper {
     ///
     /// `wires` must be the frozen pre-drag geometry. It is used only here to
     /// capture directions; it is never added to normal OSNAP candidates.
-    pub fn acquire_grip_tracking_point<W: WireSource + ?Sized>(
-        &mut self,
-        p: DVec3,
-        wires: &W,
-    ) {
+    pub fn acquire_grip_tracking_point<W: WireSource + ?Sized>(&mut self, p: DVec3, wires: &W) {
         if !self.tracking_active() {
             return;
         }

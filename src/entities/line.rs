@@ -3,6 +3,7 @@ use crate::t;
 
 use crate::command::EntityTransform;
 use crate::entities::common::{
+
     center_grip, edit_prop as edit, format_direction, format_length, oriented_triangle_grip,
     parse_f64, ro_prop as ro, square_grip,
 };
@@ -28,8 +29,16 @@ fn to_render(line: &Line) -> RenderEntity {
                 key_vertices.push([point.x, point.y, point.z]);
             }
             tangent_geoms.push(TangentGeom::Line {
-                p1: [segment[0].x as f32, segment[0].y as f32, segment[0].z as f32],
-                p2: [segment[1].x as f32, segment[1].y as f32, segment[1].z as f32],
+                p1: [
+                    segment[0].x as f32,
+                    segment[0].y as f32,
+                    segment[0].z as f32,
+                ],
+                p2: [
+                    segment[1].x as f32,
+                    segment[1].y as f32,
+                    segment[1].z as f32,
+                ],
             });
         }
         let center = crate::scene::centermark::dvec(association.center);
@@ -116,7 +125,11 @@ fn grips(line: &Line) -> Vec<GripDef> {
                 + association.length_adjustments[index]
                 + association.overshoots[index])
                 .max(extension_start);
-            result.push(oriented_triangle_grip(index + 5, center + *direction * distance, *direction));
+            result.push(oriented_triangle_grip(
+                index + 5,
+                center + *direction * distance,
+                *direction,
+            ));
         }
         return result;
     }
@@ -152,11 +165,20 @@ fn properties(line: &Line) -> Vec<PropSection> {
                     label: "Show extension".to_owned(),
                     field: "centermark_show_extension",
                     value: PropValue::Choice {
-                        selected: if association.show_extensions { "Yes" } else { "No" }.to_owned(),
+                        selected: if association.show_extensions {
+                            "Yes"
+                        } else {
+                            "No"
+                        }
+                        .to_owned(),
                         options: vec!["Yes".to_owned(), "No".to_owned()],
                     },
                 },
-                edit("Cross size", "centermark_cross_size", association.cross_size),
+                edit(
+                    "Cross size",
+                    "centermark_cross_size",
+                    association.cross_size,
+                ),
                 edit("Cross gap", "centermark_cross_gap", association.cross_gap),
                 edit(
                     "Extension length",
@@ -187,6 +209,7 @@ fn properties(line: &Line) -> Vec<PropSection> {
                     "centerline_end_extension",
                     association.end_extension,
                 ),
+
                 ro(t!("Length").as_ref(), "length", format_length(line.length())),
                 ro(
                     "Associative",
@@ -233,8 +256,12 @@ fn apply_geom_prop(line: &mut Line, field: &str, value: &str) {
                 );
             }
             "centermark_cross_size" | "centermark_cross_gap" | "centermark_extension_length" => {
-                let Some(number) = parse_f64(value) else { return; };
-                if !number.is_finite() || number < 0.0 { return; }
+                let Some(number) = parse_f64(value) else {
+                    return;
+                };
+                if !number.is_finite() || number < 0.0 {
+                    return;
+                }
                 match field {
                     "centermark_cross_size" => association.cross_size = number,
                     "centermark_cross_gap" => association.cross_gap = number,
@@ -423,7 +450,9 @@ fn apply_plain_transform(line: &mut Line, t: &EntityTransform) {
             codec::Entity::apply_transform(
                 line,
                 &crate::scene::view::transform::reflection_about_working_line(
-                    *p1, *p2, *working_normal,
+                    *p1,
+                    *p2,
+                    *working_normal,
                 ),
             );
         }
@@ -479,7 +508,11 @@ fn apply_transform(line: &mut Line, t: &EntityTransform) {
         association.cross_size *= scale;
         association.cross_gap *= scale;
         association.extension_length *= scale;
-        for value in association.length_adjustments.iter_mut().chain(association.overshoots.iter_mut()) {
+        for value in association
+            .length_adjustments
+            .iter_mut()
+            .chain(association.overshoots.iter_mut())
+        {
             *value *= scale;
         }
         association.associated = false;

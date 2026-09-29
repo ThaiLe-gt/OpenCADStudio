@@ -368,9 +368,48 @@ pub fn download_bytes(name: &str, bytes: &[u8]) {
         let a: web_sys::HtmlAnchorElement = el.unchecked_into();
         a.set_href(&url);
         a.set_download(name);
+        if let Some(body) = document.body() {
+            let _ = body.append_child(&a);
+        }
         a.click();
+        a.remove();
     }
-    let _ = web_sys::Url::revoke_object_url(&url);
+    // WebKit consumes the URL asynchronously after the click.
+    let revoke = wasm_bindgen::closure::Closure::once_into_js(move || {
+        let _ = web_sys::Url::revoke_object_url(&url);
+    });
+    let _ = window
+        .set_timeout_with_callback_and_timeout_and_arguments_0(revoke.unchecked_ref(), 60_000);
+}
+
+/// The embedded desktop host confirms the actual disk write (or cancellation).
+#[cfg(target_arch = "wasm32")]
+pub async fn save_drawing_download(name: &str, bytes: &[u8]) -> Result<bool, String> {
+    use wasm_bindgen::{JsCast, JsValue};
+    let window = web_sys::window().ok_or("Browser window unavailable")?;
+    let parent = window
+        .parent()
+        .map_err(|e| format!("{e:?}"))?
+        .ok_or("Parent window unavailable")?;
+    let bridge = js_sys::Reflect::get(parent.as_ref(), &JsValue::from_str("__METAL_SAVE_CAD"))
+        .map_err(|e| format!("{e:?}"))?;
+    if let Some(bridge) = bridge.dyn_ref::<js_sys::Function>() {
+        let result = bridge
+            .call2(
+                parent.as_ref(),
+                &JsValue::from_str(name),
+                &js_sys::Uint8Array::from(bytes),
+            )
+            .map_err(|e| format!("{e:?}"))?;
+        let result = wasm_bindgen_futures::JsFuture::from(js_sys::Promise::resolve(&result))
+            .await
+            .map_err(|e| e.as_string().unwrap_or_else(|| format!("{e:?}")))?;
+        return result
+            .as_bool()
+            .ok_or_else(|| "Invalid desktop save response".into());
+    }
+    download_bytes(name, bytes);
+    Ok(true)
 }
 
 /// Short platform string for bug reports: OS + architecture on the desktop,
@@ -483,7 +522,10 @@ pub mod web_diag {
                 );
                 let _ = body.append_child(&overlay);
                 for (id, label) in [
-                    ("ocs-err-title", crate::t!("OpenCADStudio renderer error — copy this into a bug report:")),
+                    (
+                        "ocs-err-title",
+                        crate::t!("OpenCADStudio renderer error — copy this into a bug report:"),
+                    ),
                     ("ocs-err-copy", crate::t!("Copy")),
                     ("ocs-err-dismiss", crate::t!("Dismiss")),
                 ] {

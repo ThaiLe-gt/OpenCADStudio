@@ -52,6 +52,90 @@
       <div class="sub">Loading…</div>
     </div>
     <script>
+      // Metal embeds this exact WebAssembly application in its desktop workbench.
+      // Commands remain inside OpenCADStudio's own document/tab runtime; this
+      // small same-origin queue only transports user-approved file bytes and NEW.
+      window.__METAL_OPENCAD_COMMANDS = [];
+      window.__METAL_OPENCAD_COMMAND_IDS = new Set();
+      window.__METAL_ENQUEUE_COMMAND = (command, replyOrigin = "*") => {
+        if (!command || command.source !== "metal") return;
+        if (command.type === "model_overlay_registry") {
+          window.__METAL_MODEL_OVERLAY_REGISTRY = command.registry;
+          return;
+        }
+        if (command.type === "selection_snapshot") {
+          // Force the Rust/WASM bridge to republish the current selection even
+          // when its handles and document revision have not changed. Metal uses
+          // this fresh native descriptor set immediately before a large agent run.
+          window.__METAL_LAST_SELECTION_STATE = null;
+          window.__METAL_SELECTION_DETAILS_REQUESTED = true;
+          return;
+        }
+        if (command.type === "capture") {
+          if (window.__METAL_CAPTURE_PENDING) {
+            window.parent?.postMessage({ source: "opencadstudio", type: "capture_failed", requestId: command.requestId, error: "Capture already pending" }, replyOrigin);
+            return;
+          }
+          window.__METAL_CAPTURE_PENDING = true;
+          requestAnimationFrame(async () => {
+            try {
+              const documentName = window.__METAL_DRAWING_NAME;
+              const revision = window.__METAL_DRAWING_REVISION;
+              if (command.expected && (command.expected.documentName !== documentName || command.expected.revision !== revision)) throw new Error("Drawing revision does not match requested capture");
+              const canvas = document.querySelector("canvas");
+              if (!(canvas instanceof HTMLCanvasElement)) throw new Error("OpenCAD canvas is unavailable");
+              // Bound readback/encoding cost. Do not synchronously encode the full CAD framebuffer.
+              const scale = Math.min(1, 1600 / Math.max(canvas.width, canvas.height));
+              const copy = document.createElement("canvas");
+              copy.width = Math.max(1, Math.round(canvas.width * scale));
+              copy.height = Math.max(1, Math.round(canvas.height * scale));
+              const context = copy.getContext("2d");
+              if (!context) throw new Error("Capture context unavailable");
+              context.drawImage(canvas, 0, 0, copy.width, copy.height);
+              const blob = await new Promise((resolve, reject) => copy.toBlob(value => value ? resolve(value) : reject(new Error("Capture encoding failed")), "image/png"));
+              const dataUrl = await new Promise((resolve, reject) => {
+                const reader = new FileReader();
+                reader.onload = () => resolve(reader.result);
+                reader.onerror = () => reject(reader.error);
+                reader.readAsDataURL(blob);
+              });
+              if (documentName !== window.__METAL_DRAWING_NAME || revision !== window.__METAL_DRAWING_REVISION) throw new Error("Drawing changed during capture encoding");
+              window.parent?.postMessage({
+                source: "opencadstudio", type: "capture_ready",
+                requestId: command.requestId, dataUrl, documentName, revision
+              }, replyOrigin);
+            } catch (error) {
+              window.parent?.postMessage({
+                source: "opencadstudio", type: "capture_failed",
+                requestId: command.requestId, error: String(error)
+              }, replyOrigin);
+            } finally {
+              window.__METAL_CAPTURE_PENDING = false;
+            }
+          });
+          return;
+        }
+        if (!["new", "open", "replace", "snapshot", "qa_focus", "qa_restore", "clear_selection", "apply_style", "apply_native_operations"].includes(command.type)) return;
+        const commandId = typeof command.commandId === "string" ? command.commandId : "";
+        const duplicate = commandId.length > 0 && window.__METAL_OPENCAD_COMMAND_IDS.has(commandId);
+        if (!duplicate) {
+          window.__METAL_OPENCAD_COMMANDS.push(command);
+          if (commandId.length > 0) window.__METAL_OPENCAD_COMMAND_IDS.add(commandId);
+        }
+        window.parent?.postMessage({
+          source: "opencadstudio", type: "command_received", commandId,
+          commandType: command.type, duplicate,
+          byteLength: command.bytes?.byteLength ?? command.bytes?.length ?? 0
+        }, "*");
+      };
+      window.addEventListener("message", (event) => {
+        // Tauri/WebKit may serialize custom-protocol origins as `null` even
+        // though the parent and this relative iframe are the same document
+        // origin. Source identity is the authoritative boundary here.
+        if (event.source !== window.parent) return;
+        const replyOrigin = event.origin === "null" ? "*" : event.origin;
+        window.__METAL_ENQUEUE_COMMAND(event.data, replyOrigin);
+      });
       (() => {
         const splash = document.getElementById("loading");
         fetch("locale-labels.json").then(response => response.json()).then(labels => {
@@ -82,6 +166,7 @@
         const done = () => {
           if (!splash) return;
           splash.classList.add("hide");
+          window.parent?.postMessage({ source: "opencadstudio", type: "ready" }, "*");
           setTimeout(() => splash.remove(), 450);
         };
         if (document.querySelector("canvas")) return done();

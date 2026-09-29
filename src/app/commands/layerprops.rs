@@ -903,8 +903,11 @@ impl OpenCADStudio {
                             .map(|s| {
                                 crate::tf!(
                                     "{}  (h_margin:{:.2} v_margin:{:.2})",
-                                    s.name, s.horizontal_margin, s.vertical_margin
-                                ).into_owned()
+                                    s.name,
+                                    s.horizontal_margin,
+                                    s.vertical_margin
+                                )
+                                .into_owned()
                             })
                             .collect();
                         if styles.is_empty() {
@@ -1104,7 +1107,10 @@ impl OpenCADStudio {
                             .document
                             .dim_styles
                             .iter()
-                            .map(|s| crate::tf!("{}(txt:{:.2} asz:{:.2})", s.name, s.dimtxt, s.dimasz).into_owned())
+                            .map(|s| {
+                                crate::tf!("{}(txt:{:.2} asz:{:.2})", s.name, s.dimtxt, s.dimasz)
+                                    .into_owned()
+                            })
                             .collect();
                         if styles.is_empty() {
                             self.command_line.push_output(crate::t!("No dim styles defined.").as_ref());
@@ -1214,7 +1220,10 @@ impl OpenCADStudio {
                     }
                     _ => {
                         self.command_line.push_info(
-                            crate::t!("Usage: DIMSTYLE LIST | NEW <name> | SET <name> <prop> <val>").as_ref(),
+                            crate::t!(
+                                "Usage: DIMSTYLE LIST | NEW <name> | SET <name> <prop> <val>"
+                            )
+                            .as_ref(),
                         );
                     }
                 }
@@ -1238,10 +1247,15 @@ impl OpenCADStudio {
                             .values()
                             .filter_map(|o| {
                                 if let ObjectType::MultiLeaderStyle(s) = o {
-                                    Some(crate::tf!(
-                                        "{}(txt:{:.2} asz:{:.2})",
-                                        s.name, s.text_height, s.arrowhead_size
-                                    ).into_owned())
+                                    Some(
+                                        crate::tf!(
+                                            "{}(txt:{:.2} asz:{:.2})",
+                                            s.name,
+                                            s.text_height,
+                                            s.arrowhead_size
+                                        )
+                                        .into_owned(),
+                                    )
                                 } else {
                                     None
                                 }
@@ -1407,7 +1421,8 @@ impl OpenCADStudio {
                                     s.font_file,
                                     s.width_factor,
                                     s.oblique_angle.to_degrees()
-                                ).into_owned()
+                                )
+                                .into_owned()
                             })
                             .collect();
                         if styles.is_empty() {

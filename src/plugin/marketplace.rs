@@ -221,6 +221,7 @@ pub fn fetch_release_info(repo: &str) -> Result<Vec<ReleaseInfo>, String> {
                 .ok_or_else(|| format!("release {} plugin.toml is missing an id", release.tag))?;
             let acadrust_source = manifest.acadrust_source.clone();
             let acadrust_declared = manifest.acadrust_declared;
+
             let acadrust_compatible = external::acadrust_source_compatible(
                 manifest.api_version,
                 acadrust_declared,
@@ -228,19 +229,18 @@ pub fn fetch_release_info(repo: &str) -> Result<Vec<ReleaseInfo>, String> {
             );
             let rustc_version = manifest.rustc_version.clone();
             let rustc_declared = manifest.rustc_declared;
-            let rustc_compatible = if !ocs_plugin_api::version_info::uses_acadrust_gate(
-                manifest.api_version,
-            ) {
-                true
-            } else {
-                match rustc_version.as_deref() {
-                    None | Some("") => false,
-                    Some(version) => ocs_plugin_api::version_info::rustc_versions_compatible(
-                        version,
-                        ocs_plugin_api::version_info::host_rustc_version(),
-                    ),
-                }
-            };
+            let rustc_compatible =
+                if !ocs_plugin_api::version_info::uses_acadrust_gate(manifest.api_version) {
+                    true
+                } else {
+                    match rustc_version.as_deref() {
+                        None | Some("") => false,
+                        Some(version) => ocs_plugin_api::version_info::rustc_versions_compatible(
+                            version,
+                            ocs_plugin_api::version_info::host_rustc_version(),
+                        ),
+                    }
+                };
             Ok::<_, String>(ReleaseInfo {
                 tag: release.tag,
                 api_version: manifest.api_version,
@@ -341,10 +341,10 @@ pub fn install(release: &Release, repository: &str) -> Result<String, String> {
             ocs_plugin_api::version_info::host_acadrust_source(),
         ) {
             let host_src = ocs_plugin_api::version_info::host_acadrust_source();
-            let plugin_hash = ocs_plugin_api::version_info::acadrust_source_hash(source)
-                .unwrap_or("unknown");
-            let host_hash = ocs_plugin_api::version_info::acadrust_source_hash(host_src)
-                .unwrap_or("unknown");
+            let plugin_hash =
+                ocs_plugin_api::version_info::acadrust_source_hash(source).unwrap_or("unknown");
+            let host_hash =
+                ocs_plugin_api::version_info::acadrust_source_hash(host_src).unwrap_or("unknown");
             return Err(format!(
                 "Plugin built for opencadcodec @{plugin_hash}, but this host uses @{host_hash}"
             ));
@@ -353,10 +353,14 @@ pub fn install(release: &Release, repository: &str) -> Result<String, String> {
 
     if ocs_plugin_api::version_info::uses_acadrust_gate(manifest.api_version) {
         let Some(version) = manifest.rustc_version.as_deref() else {
-            return Err("Release has no rustc version; cannot verify ABI compatibility".to_string());
+            return Err(
+                "Release has no rustc version; cannot verify ABI compatibility".to_string(),
+            );
         };
         if version.is_empty() {
-            return Err("Release has no rustc version; cannot verify ABI compatibility".to_string());
+            return Err(
+                "Release has no rustc version; cannot verify ABI compatibility".to_string(),
+            );
         }
         if !ocs_plugin_api::version_info::rustc_versions_compatible(
             version,

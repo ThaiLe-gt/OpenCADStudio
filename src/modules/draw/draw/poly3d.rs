@@ -103,9 +103,9 @@ impl CadCommand for Poly3dCommand {
 
     fn on_text_input(&mut self, text: &str) -> Option<CmdResult> {
         match text.trim().to_uppercase().as_str() {
-            "C" | "CLOSE" if self.points.len() >= 3 => self
-                .build(true)
-                .map(CmdResult::CommitAndExit),
+            "C" | "CLOSE" if self.points.len() >= 3 => {
+                self.build(true).map(CmdResult::CommitAndExit)
+            }
             "C" | "CLOSE" => Some(CmdResult::NeedPoint),
             "U" | "UNDO" => {
                 self.points.pop();

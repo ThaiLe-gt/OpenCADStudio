@@ -7,11 +7,10 @@ use crate::command::{
 };
 use crate::entities::curve::entity_curve;
 use crate::entities::traits::EntityTypeOps;
-use crate::scene::model::wire_model::WireModel;
 use crate::modules::IconKind;
+use crate::scene::model::wire_model::WireModel;
 
-pub const ICON: IconKind =
-    IconKind::Svg(include_bytes!("../../../../assets/icons/area.svg"));
+pub const ICON: IconKind = IconKind::Svg(include_bytes!("../../../../assets/icons/area.svg"));
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum AreaMode {
     Single,

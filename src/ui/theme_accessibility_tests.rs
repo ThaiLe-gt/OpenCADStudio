@@ -204,12 +204,8 @@ fn test_command_line_contrast() {
         );
 
         // 1b. Prompt ("Command:") text (normal text: >= 4.5:1)
-        let prompt_color = accessible_accent_threshold(
-            p.success.base.color,
-            cli_bg,
-            p.background.base.text,
-            4.5,
-        );
+        let prompt_color =
+            accessible_accent_threshold(p.success.base.color, cli_bg, p.background.base.text, 4.5);
         let prompt_contrast = wcag_contrast(prompt_color, cli_bg);
         assert!(
             prompt_contrast >= 4.5,
@@ -463,6 +459,7 @@ fn test_viewport_controls_toggle_buttons_contrast() {
         );
     }
 }
+
 
 #[test]
 fn test_block_palette_contrast() {

@@ -144,7 +144,74 @@ pub(crate) fn fit_geometry_bounds(spline: &Spline) -> Option<kernel::brep::Aabb>
     let curve = fit_nurbs3(spline)?;
     kernel::brep::Aabb::around(curve.control_points().iter().copied())
 }
+/// Sub-precision splines still own a handle and a native position. Preserve
+/// them in the document, but never pass them to adaptive curve tessellation:
+/// a three-point circle fit on coincident samples cannot converge.
+pub(crate) fn collapsed_position(spline: &Spline) -> Option<[f64; 3]> {
+    let points = if uses_fit_method(spline) {
+        &spline.fit_points
+    } else {
+        &spline.control_points
+    };
+    if points.len() < 2 {
+        return None;
+    }
+    let first = points.first()?;
+    let (mut min, mut max) = ([f64::INFINITY; 3], [f64::NEG_INFINITY; 3]);
+    for point in points {
+        for (axis, value) in [point.x, point.y, point.z].into_iter().enumerate() {
+            if !value.is_finite() {
+                return None;
+            }
+            min[axis] = min[axis].min(value);
+            max[axis] = max[axis].max(value);
+        }
+    }
+    (0..3)
+        .all(|axis| max[axis] - min[axis] < 1.0e-6)
+        .then_some([first.x, first.y, first.z])
+}
+
+#[cfg(test)]
+mod collapsed_spline_tests {
+    use super::*;
+    use codec::types::Vector3;
+
+    #[test]
+    fn point_splines_render_and_measure_without_tessellation() {
+        for fit in [false, true] {
+            let mut spline =
+                Spline::from_control_points(3, vec![Vector3::new(83154.0, -268531.0, 0.0); 4]);
+            if fit {
+                spline.fit_points = std::mem::take(&mut spline.control_points);
+            }
+            assert_eq!(
+                measurement_polyline(&spline),
+                vec![[83154.0, -268531.0, 0.0]]
+            );
+            assert!(crate::entities::curve::spline_curve(&spline).is_none());
+            assert!(crate::modules::draw::modify::spline_ops::spline_to_nurbs(&spline).is_none());
+            let rendered = to_render(&spline);
+            assert!(matches!(rendered.object, RenderObject::Lines(points) if points.is_empty()));
+            assert_eq!(rendered.key_vertices, vec![[83154.0, -268531.0, 0.0]]);
+        }
+    }
+}
+
 fn to_render(spl: &Spline) -> RenderEntity {
+    if let Some(point) = collapsed_position(spl) {
+        return RenderEntity {
+            object: RenderObject::Lines(Vec::new()),
+            pick_tris: Vec::new(),
+            snap_pts: vec![(
+                glam::DVec3::from_array(point),
+                crate::scene::model::wire_model::SnapHint::Endpoint,
+            )],
+            tangent_geoms: Vec::new(),
+            key_vertices: vec![point],
+            fill_tris: Vec::new(),
+        };
+    }
     let n = spl.control_points.len();
     if n < 2 {
         // A fit-point spline (DWG scenario 2 / R2013+) stores only the points
@@ -290,6 +357,9 @@ fn to_render(spl: &Spline) -> RenderEntity {
 }
 
 pub(crate) fn measurement_polyline(spl: &Spline) -> Vec<[f64; 3]> {
+    if let Some(point) = collapsed_position(spl) {
+        return vec![point];
+    }
     if uses_fit_method(spl) {
         if spl.fit_points.len() < 2 {
             return spl.fit_points.iter().map(|p| [p.x, p.y, p.z]).collect();

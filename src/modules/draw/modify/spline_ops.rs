@@ -67,6 +67,9 @@ fn spline_to_nurbs_with(
     point: impl Fn(&Vector3) -> [f64; 2],
     vector: impl Fn(&Vector3) -> [f64; 2],
 ) -> Option<NurbsCurve> {
+    if crate::entities::spline::collapsed_position(spl).is_some() {
+        return None;
+    }
     let degree = (spl.degree.max(1)) as usize;
     let control_points: Vec<[f64; 2]> = spl.control_points.iter().map(&point).collect();
     let weights = (!spl.weights.is_empty()).then(|| spl.weights.clone());

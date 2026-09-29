@@ -192,8 +192,7 @@ fn apply_geom_prop(circle: &mut Circle, field: &str, value: &str) {
                 "center_z" => z = v,
                 _ => {}
             }
-            let (ox, oy, oz) =
-                crate::scene::view::transform::wcs_point_to_ocs((x, y, z), normal);
+            let (ox, oy, oz) = crate::scene::view::transform::wcs_point_to_ocs((x, y, z), normal);
             circle.center.x = ox;
             circle.center.y = oy;
             circle.center.z = oz;
@@ -436,9 +435,18 @@ mod tests {
         let seg_0_0001 = circle_segments(r, Some(0.0001));
 
         assert!(seg_0_1 >= 48, "seg_0_1 was {seg_0_1}");
-        assert!(seg_0_01 > seg_0_1, "seg_0_01 ({seg_0_01}) <= seg_0_1 ({seg_0_1})");
-        assert!(seg_0_001 > seg_0_01, "seg_0_001 ({seg_0_001}) <= seg_0_01 ({seg_0_01})");
-        assert!(seg_0_0001 > seg_0_001, "seg_0_0001 ({seg_0_0001}) <= seg_0_001 ({seg_0_001})");
+        assert!(
+            seg_0_01 > seg_0_1,
+            "seg_0_01 ({seg_0_01}) <= seg_0_1 ({seg_0_1})"
+        );
+        assert!(
+            seg_0_001 > seg_0_01,
+            "seg_0_001 ({seg_0_001}) <= seg_0_01 ({seg_0_01})"
+        );
+        assert!(
+            seg_0_0001 > seg_0_001,
+            "seg_0_0001 ({seg_0_0001}) <= seg_0_001 ({seg_0_001})"
+        );
 
         // Extreme zoom in hits maximum cap of 4096.
         assert_eq!(circle_segments(r, Some(1e-9)), 4096);
@@ -476,7 +484,10 @@ mod tests {
         };
 
         assert_eq!(far_count, 49); // 48 segments + 1 closing vertex
-        assert!(close_count > far_count, "close_count was {close_count} vs far_count {far_count}");
+        assert!(
+            close_count > far_count,
+            "close_count was {close_count} vs far_count {far_count}"
+        );
     }
 
     #[test]

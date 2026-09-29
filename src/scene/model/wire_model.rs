@@ -866,15 +866,12 @@ pub fn stretched_windows(
             let p1 = p1.as_dvec3();
             let normal = plane_normal.as_dvec3();
             marker.origin -= 2.0 * normal.dot(marker.origin - p1) * normal;
-            marker.normal =
-                (marker.normal - 2.0 * normal.dot(marker.normal) * normal)
-                    .normalize_or(glam::DVec3::Z);
-            marker.axis_x =
-                (marker.axis_x - 2.0 * normal.dot(marker.axis_x) * normal)
-                    .normalize_or(glam::DVec3::X);
-            marker.axis_y =
-                (marker.axis_y - 2.0 * normal.dot(marker.axis_y) * normal)
-                    .normalize_or(glam::DVec3::Y);
+            marker.normal = (marker.normal - 2.0 * normal.dot(marker.normal) * normal)
+                .normalize_or(glam::DVec3::Z);
+            marker.axis_x = (marker.axis_x - 2.0 * normal.dot(marker.axis_x) * normal)
+                .normalize_or(glam::DVec3::X);
+            marker.axis_y = (marker.axis_y - 2.0 * normal.dot(marker.axis_y) * normal)
+                .normalize_or(glam::DVec3::Y);
         }
         // Glyph quads reflect wholesale (true mirror) — the caller only routes
         // text through here for MIRRTEXT-on; MIRRTEXT-off relocates via

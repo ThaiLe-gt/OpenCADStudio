@@ -509,7 +509,11 @@ pub fn click_hits_all<'a, W: WireSource + ?Sized>(
             previous = Some(screen);
         }
     }
-    hits.extend(marker_hits.into_iter().map(|(name, distance)| (distance, name)));
+    hits.extend(
+        marker_hits
+            .into_iter()
+            .map(|(name, distance)| (distance, name)),
+    );
     if let Some(segments) = wires.segments() {
         let mut best_by_wire: HashMap<u32, f32> = HashMap::default();
         for segment in segments {
@@ -750,11 +754,7 @@ pub(crate) fn mesh_edge_click_hit<'a>(
     bounds: Rectangle,
     tolerance_px: f32,
 ) -> Option<Handle> {
-    if cursor.x < 0.0
-        || cursor.x > bounds.width
-        || cursor.y < 0.0
-        || cursor.y > bounds.height
-    {
+    if cursor.x < 0.0 || cursor.x > bounds.width || cursor.y < 0.0 || cursor.y > bounds.height {
         return None;
     }
     let tolerance = tolerance_px.max(1.0);
@@ -764,9 +764,7 @@ pub(crate) fn mesh_edge_click_hit<'a>(
             continue;
         }
         let model = transform.map(codec_transform_matrix);
-        if model.is_some_and(|matrix| {
-            !matrix.is_finite() || matrix.determinant().abs() <= 1e-18
-        }) {
+        if model.is_some_and(|matrix| !matrix.is_finite() || matrix.determinant().abs() <= 1e-18) {
             continue;
         }
         for pair_start in (0..edges.len() - 1).step_by(2) {
@@ -796,11 +794,8 @@ pub(crate) fn mesh_edge_click_hit<'a>(
                     (1.0 - point.y) * 0.5 * bounds.height,
                 )
             };
-            let distance = dist_point_to_segment(
-                cursor,
-                to_screen(first_ndc),
-                to_screen(second_ndc),
-            );
+            let distance =
+                dist_point_to_segment(cursor, to_screen(first_ndc), to_screen(second_ndc));
             if distance > tolerance {
                 continue;
             }

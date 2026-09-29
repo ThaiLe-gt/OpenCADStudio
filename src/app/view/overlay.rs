@@ -930,6 +930,7 @@ fn position_canvas_overlay_clamped<'a>(
         bottom_inset: bottom_inset.max(0.0),
         gap: 0.0,
         offset,
+        centered: false,
     })
 }
 
@@ -946,6 +947,25 @@ pub(super) fn position_canvas_overlay_near_cursor<'a>(
         bottom_inset: bottom_inset.max(0.0),
         gap: 12.0,
         offset: Vector::ZERO,
+        centered: false,
+    })
+}
+
+/// Centre a fixed-size model-space marker on its projected native anchor.
+/// Unlike cursor menus, model markers must not acquire a screen-space offset:
+/// that offset grows relative to geometry when the user zooms out.
+pub(super) fn position_canvas_overlay_centered<'a>(
+    anchor: iced::Point,
+    bottom_inset: f32,
+    panel: Element<'a, Message>,
+) -> Element<'a, Message> {
+    Element::new(ClampedPin {
+        content: iced::widget::opaque(panel),
+        anchor,
+        bottom_inset: bottom_inset.max(0.0),
+        gap: 0.0,
+        offset: Vector::ZERO,
+        centered: true,
     })
 }
 
@@ -956,6 +976,7 @@ struct ClampedPin<'a> {
     gap: f32,
     /// Preferred placement shift from the anchor (applied before fitting).
     offset: Vector,
+    centered: bool,
 }
 
 impl Widget<Message, Theme, iced::Renderer> for ClampedPin<'_> {
@@ -996,26 +1017,33 @@ impl Widget<Message, Theme, iced::Renderer> for ClampedPin<'_> {
         let content = node.size();
         let bottom_inset = self.bottom_inset;
 
-        let max_x = (max.width - MARGIN - content.width).max(MARGIN);
-        let right = self.anchor.x + self.gap + self.offset.x;
-        let left = self.anchor.x - self.gap - content.width;
-        let x = if right <= max_x {
-            right.max(MARGIN)
-        } else if left >= MARGIN {
-            left
-        } else {
-            max_x
-        };
-
         let max_y = (max.height - bottom_inset - MARGIN - content.height).max(MARGIN);
-        let below = self.anchor.y + self.gap + self.offset.y;
-        let above = self.anchor.y - self.gap - content.height;
-        let y = if below <= max_y {
-            below.max(MARGIN)
-        } else if above >= MARGIN {
-            above
+        let max_x = (max.width - MARGIN - content.width).max(MARGIN);
+        let (x, y) = if self.centered {
+            (
+                (self.anchor.x - content.width * 0.5).clamp(MARGIN, max_x),
+                (self.anchor.y - content.height * 0.5).clamp(MARGIN, max_y),
+            )
         } else {
-            max_y
+            let right = self.anchor.x + self.gap + self.offset.x;
+            let left = self.anchor.x - self.gap - content.width;
+            let x = if right <= max_x {
+                right.max(MARGIN)
+            } else if left >= MARGIN {
+                left
+            } else {
+                max_x
+            };
+            let below = self.anchor.y + self.gap + self.offset.y;
+            let above = self.anchor.y - self.gap - content.height;
+            let y = if below <= max_y {
+                below.max(MARGIN)
+            } else if above >= MARGIN {
+                above
+            } else {
+                max_y
+            };
+            (x, y)
         };
 
         node = node.move_to(iced::Point::new(x, y));

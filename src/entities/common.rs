@@ -632,8 +632,8 @@ pub fn lineweight_options() -> Vec<String> {
         "Default".to_string(),
     ];
     for value in [
-        0, 5, 9, 13, 15, 18, 20, 25, 30, 35, 40, 50, 53, 60, 70, 80, 90, 100, 106, 120,
-        140, 158, 200, 211,
+        0, 5, 9, 13, 15, 18, 20, 25, 30, 35, 40, 50, 53, 60, 70, 80, 90, 100, 106, 120, 140, 158,
+        200, 211,
     ] {
         options.push(format!("{:.2} mm", value as f64 / 100.0));
     }
@@ -1073,10 +1073,7 @@ pub(crate) fn extrude_wide_band_outline(
     point_segments.extend_from_slice(&base_segments);
 
     let mut emitted = HashSet::new();
-    for ((&point, &station), &segment) in base_points
-        .iter()
-        .zip(&base_stations)
-        .zip(&base_segments)
+    for ((&point, &station), &segment) in base_points.iter().zip(&base_stations).zip(&base_segments)
     {
         if !point[0].is_finite() {
             continue;
@@ -1256,8 +1253,9 @@ mod length_format_tests {
         for lunits in [3, 4, 5] {
             for value in [0.995f64, 5.995, 11.999, 23.999, 66.5, 9.25] {
                 let shown = with_units(lunits, if lunits == 3 { 4 } else { 4 }, value);
-                let read = parse_length(&shown)
-                    .unwrap_or_else(|| panic!("lunits {lunits} wrote {shown:?}, which does not read back"));
+                let read = parse_length(&shown).unwrap_or_else(|| {
+                    panic!("lunits {lunits} wrote {shown:?}, which does not read back")
+                });
                 assert!(
                     (read - value).abs() < 0.02,
                     "lunits {lunits}: {value} wrote {shown:?}, read back as {read}"
@@ -1297,7 +1295,9 @@ mod angle_format_tests {
         assert_eq!(shown(4, 0, 180.0), "W");
         assert_ne!(shown(4, 8, 0.0000000005), "E");
         for prec in [0, 2] {
-            for deg in [0.99999f64, 45.9999, 89.99999, 179.99999, 269.99999, 359.99999] {
+            for deg in [
+                0.99999f64, 45.9999, 89.99999, 179.99999, 269.99999, 359.99999,
+            ] {
                 let text = shown(4, prec, deg);
                 assert!(
                     !text.contains("90d"),
@@ -1314,7 +1314,9 @@ mod angle_format_tests {
                 for deg in [0.99999f64, 45.5, 45.9999, 89.99999, 200.25, 359.99999] {
                     let text = shown(aunits, prec, deg);
                     let read = parse_angle(&text).unwrap_or_else(|| {
-                        panic!("aunits {aunits} prec {prec} wrote {text:?}, which does not read back")
+                        panic!(
+                            "aunits {aunits} prec {prec} wrote {text:?}, which does not read back"
+                        )
                     });
                     let delta = (read.to_degrees().rem_euclid(360.0) - deg.rem_euclid(360.0))
                         .rem_euclid(360.0);

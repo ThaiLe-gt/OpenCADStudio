@@ -510,6 +510,11 @@ pub(crate) fn tessellate_entity_dim_text(
         // tessellate_entity, so leave that alone.
         if !w.selected {
             w.color = text_color;
+            // SDF glyphs carry their own color; changing only the wire no
+            // longer applies DIMCLRT once text uses the glyph pipeline.
+            for vertex in &mut w.text_verts {
+                vertex.color = text_color;
+            }
         }
     }
     wires
@@ -1838,6 +1843,57 @@ pub(crate) fn entity_world_aabb_f64(e: &codec::EntityType) -> Option<[f64; 4]> {
         return None;
     }
     Some([xmin, ymin, xmax, ymax])
+}
+
+/// Full 3-D AABB of `e` in WCS f64. Metal uses this alongside the legacy XY
+/// box so component ownership can distinguish curves that overlap in plan but
+/// live on different elevations/planes. Keep the 2-D helper above unchanged:
+/// OpenCAD's quadtree and model-space translation commands intentionally work
+/// in the drawing XY plane.
+pub(crate) fn entity_world_aabb_3d_f64(e: &codec::EntityType) -> Option<[f64; 6]> {
+    let bbox = e.as_entity().bounding_box();
+    let bounds = [
+        bbox.min.x, bbox.min.y, bbox.min.z, bbox.max.x, bbox.max.y, bbox.max.z,
+    ];
+    if bounds.iter().any(|value| !value.is_finite()) {
+        return None;
+    }
+    if bounds[0] == bounds[3] && bounds[1] == bounds[4] && bounds[2] == bounds[5] {
+        // Imported Make2D splines can collapse to a point at DWG precision.
+        // A native control/fit point is still exact positional evidence. Do
+        // not confuse it with the zero box returned for an empty entity.
+        let has_native_position = match e {
+            codec::EntityType::Spline(spline) => {
+                !spline.control_points.is_empty() || !spline.fit_points.is_empty()
+            }
+            codec::EntityType::Point(_) => true,
+            _ => false,
+        };
+        if !has_native_position {
+            return None;
+        }
+    }
+    Some(bounds)
+}
+
+#[cfg(test)]
+mod metal_bounds_tests {
+    use super::entity_world_aabb_3d_f64;
+    use codec::{entities::Spline, types::Vector3, EntityType};
+
+    #[test]
+    fn collapsed_spline_keeps_its_native_position() {
+        let point = Vector3::new(83154.8477, -268531.8068, 0.0);
+        let spline = Spline::from_control_points(3, vec![point; 4]);
+        assert_eq!(
+            entity_world_aabb_3d_f64(&EntityType::Spline(spline)),
+            Some([point.x, point.y, point.z, point.x, point.y, point.z])
+        );
+        assert_eq!(
+            entity_world_aabb_3d_f64(&EntityType::Spline(Spline::new())),
+            None
+        );
+    }
 }
 
 /// True if `e` is a type the quadtree should skip. `Insert` and

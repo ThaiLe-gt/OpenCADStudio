@@ -4,8 +4,49 @@
 //! path. Keep the last-opened copy in the origin-private file system (OPFS) so
 //! the Start page can reopen it without asking the user to pick it again.
 
-use wasm_bindgen::JsCast;
+use wasm_bindgen::{JsCast, JsValue};
 use wasm_bindgen_futures::JsFuture;
+
+// WKWebView's OPFS writable stream can terminate its Networking process.
+// Embedded Metal uses native, atomic cache files for drawings AND thumbnails.
+enum RecentDirectory {
+    Desktop(js_sys::Function),
+    Browser(web_sys::FileSystemDirectoryHandle),
+}
+
+async fn desktop_entry(
+    bridge: &js_sys::Function,
+    action: &str,
+    key: &str,
+    bytes: Option<&[u8]>,
+) -> Result<JsValue, String> {
+    let payload = bytes
+        .map(|bytes| JsValue::from(js_sys::Uint8Array::from(bytes)))
+        .unwrap_or(JsValue::UNDEFINED);
+    let promise = bridge
+        .call3(
+            &JsValue::NULL,
+            &JsValue::from_str(action),
+            &JsValue::from_str(key),
+            &payload,
+        )
+        .map_err(js_error)?;
+    JsFuture::from(js_sys::Promise::resolve(&promise))
+        .await
+        .map_err(js_error)
+}
+
+async fn remove_entry(directory: &RecentDirectory, key: &str) -> Result<(), String> {
+    match directory {
+        RecentDirectory::Desktop(bridge) => {
+            desktop_entry(bridge, "remove", key, None).await.map(|_| ())
+        }
+        RecentDirectory::Browser(directory) => JsFuture::from(directory.remove_entry(key))
+            .await
+            .map(|_| ())
+            .map_err(js_error),
+    }
+}
 
 struct OpenStoreState {
     latest_id: u64,
@@ -42,7 +83,7 @@ pub async fn store(name: &str, bytes: &[u8]) -> Result<(), String> {
     } else {
         // An overwrite may replace a drawing that had a preview with one that
         // does not. Do not leave the old image attached to the new file.
-        let _ = JsFuture::from(directory.remove_entry(&thumbnail_key(name))).await;
+        let _ = remove_entry(&directory, &thumbnail_key(name)).await;
     }
     Ok(())
 }
@@ -111,11 +152,15 @@ pub async fn store_open(
     }
 }
 
-async fn write_entry(
-    directory: &web_sys::FileSystemDirectoryHandle,
-    key: &str,
-    bytes: &[u8],
-) -> Result<(), String> {
+async fn write_entry(directory: &RecentDirectory, key: &str, bytes: &[u8]) -> Result<(), String> {
+    let directory = match directory {
+        RecentDirectory::Desktop(bridge) => {
+            return desktop_entry(bridge, "write", key, Some(bytes))
+                .await
+                .map(|_| ())
+        }
+        RecentDirectory::Browser(directory) => directory,
+    };
     let options = web_sys::FileSystemGetFileOptions::new();
     options.set_create(true);
     let handle = JsFuture::from(directory.get_file_handle_with_options(key, &options))
@@ -128,8 +173,11 @@ async fn write_entry(
         .map_err(js_error)?
         .dyn_into::<web_sys::FileSystemWritableFileStream>()
         .map_err(js_error)?;
-    let write = writable.write_with_u8_array(bytes).map_err(js_error)?;
-    JsFuture::from(write).await.map_err(js_error)?;
+    for chunk in bytes.chunks(1024 * 1024) {
+        let owned = js_sys::Uint8Array::from(chunk);
+        let write = writable.write_with_js_u8_array(&owned).map_err(js_error)?;
+        JsFuture::from(write).await.map_err(js_error)?;
+    }
     JsFuture::from(writable.close()).await.map_err(js_error)?;
     Ok(())
 }
@@ -139,10 +187,25 @@ pub async fn read(name: &str) -> Result<Vec<u8>, String> {
     read_entry(&directory, &cache_key(name)).await
 }
 
-async fn read_entry(
-    directory: &web_sys::FileSystemDirectoryHandle,
-    key: &str,
-) -> Result<Vec<u8>, String> {
+async fn read_entry(directory: &RecentDirectory, key: &str) -> Result<Vec<u8>, String> {
+    let directory = match directory {
+        RecentDirectory::Desktop(bridge) => {
+            match desktop_entry(bridge, "read", key, None).await {
+                Ok(buffer) => return Ok(js_sys::Uint8Array::new(&buffer).to_vec()),
+                Err(error) if error.contains("CAD cache entry not found") => {
+                    // Keep existing recent drawings recoverable. Legacy OPFS is
+                    // read-only: migration writes exclusively through native IPC.
+                    let legacy = browser_directory(false).await?;
+                    let file = get_file(&legacy, key).await?;
+                    let bytes = read_blob(file.as_ref()).await?;
+                    let _ = desktop_entry(bridge, "write", key, Some(&bytes)).await;
+                    return Ok(bytes);
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        RecentDirectory::Browser(directory) => directory,
+    };
     let file = get_file(directory, key).await?;
     read_blob(file.as_ref()).await
 }
@@ -180,14 +243,33 @@ pub async fn read_thumbnail(name: &str) -> Result<Option<Thumbnail>, String> {
 
 pub async fn remove(name: &str) -> Result<(), String> {
     let directory = recent_directory(false).await?;
-    let drawing = JsFuture::from(directory.remove_entry(&cache_key(name)))
-        .await
-        .map_err(js_error);
-    let _ = JsFuture::from(directory.remove_entry(&thumbnail_key(name))).await;
+    let drawing = remove_entry(&directory, &cache_key(name)).await;
+    let _ = remove_entry(&directory, &thumbnail_key(name)).await;
     drawing.map(|_| ())
 }
 
-async fn recent_directory(create: bool) -> Result<web_sys::FileSystemDirectoryHandle, String> {
+async fn recent_directory(create: bool) -> Result<RecentDirectory, String> {
+    let window = web_sys::window().ok_or_else(|| "browser window unavailable".to_string())?;
+    if let Ok(Some(parent)) = window.parent() {
+        if let Ok(value) =
+            js_sys::Reflect::get(parent.as_ref(), &JsValue::from_str("__METAL_RECENT_CAD"))
+        {
+            if let Some(bridge) = value.dyn_ref::<js_sys::Function>() {
+                return Ok(RecentDirectory::Desktop(bridge.clone()));
+            }
+        }
+        if js_sys::Reflect::has(parent.as_ref(), &JsValue::from_str("__TAURI_INTERNALS__"))
+            .unwrap_or(false)
+        {
+            return Err("Metal native CAD cache bridge is unavailable".into());
+        }
+    }
+    browser_directory(create)
+        .await
+        .map(RecentDirectory::Browser)
+}
+
+async fn browser_directory(create: bool) -> Result<web_sys::FileSystemDirectoryHandle, String> {
     let window = web_sys::window().ok_or_else(|| "browser window unavailable".to_string())?;
     let root = JsFuture::from(window.navigator().storage().get_directory())
         .await

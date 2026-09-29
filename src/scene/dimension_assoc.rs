@@ -1203,6 +1203,7 @@ impl Scene {
         }
     }
 
+
     /// Persist the association for a dimension whose points were picked
     /// through [`AcceptedSnap`]s, preserving each source and its owning space.
     ///
@@ -1740,6 +1741,7 @@ impl Scene {
                         reference
                             .xrefs
                             .iter()
+
                             .chain(reference.intersection_objects.iter())
                             .any(|handle| changed.contains(handle))
                     })

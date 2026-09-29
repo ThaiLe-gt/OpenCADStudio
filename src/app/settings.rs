@@ -506,7 +506,10 @@ pub struct UserSettings {
     pub language: crate::i18n::Language,
     /// CLIPROMPTLINES: how many temporary prompt lines for a single command
     /// are displayed above the command window (0–50, Registry, default 3).
-    #[serde(default = "default_clipromptlines", deserialize_with = "deserialize_clipromptlines")]
+    #[serde(
+        default = "default_clipromptlines",
+        deserialize_with = "deserialize_clipromptlines"
+    )]
     pub cliprompt_lines: i32,
     /// COMMANDLINEFADETIME: how long command-line overlay history lines stay
     /// visible, in milliseconds (0–60000, default 3000). 0 skips transient lines.

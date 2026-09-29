@@ -202,6 +202,7 @@ pub struct Pipeline {
     /// GPU glyph atlas (texture + sampler + bind group). Rebuilt when the shared
     /// CPU atlas grows (new glyphs baked). `None` until the first text upload.
     text_atlas_gpu: Option<text_gpu::TextAtlasGpu>,
+    text_atlas_revision: u64,
     /// Glyph-quad vertices for the frame, split at whole glyph boundaries.
     text_gpu: Vec<text_gpu::TextGpu>,
     block_text_gpu: Vec<text_gpu::BlockTextGpu>,
@@ -2300,6 +2301,7 @@ impl Pipeline {
             block_text_highlight_pipeline,
             text_atlas_bgl,
             text_atlas_gpu: None,
+            text_atlas_revision: 0,
             text_gpu: Vec::new(),
             block_text_gpu: Vec::new(),
             block_text_highlight_gpu: Vec::new(),
@@ -3087,7 +3089,7 @@ analytic={:.1} regular={:.1} blocks={:.1}",
         // Ensure the glyph atlas exists / is current even when the base text
         // pass didn't run this frame (e.g. the dragged text is the only text).
         if let Ok(mut atlas) = crate::scene::text::sdf_atlas::text_atlas().lock() {
-            if self.text_atlas_gpu.is_none() || atlas.is_dirty() {
+            if self.text_atlas_needs_upload() || atlas.is_dirty() {
                 self.text_atlas_gpu = Some(text_gpu::TextAtlasGpu::upload(
                     device,
                     queue,
@@ -3095,6 +3097,7 @@ analytic={:.1} regular={:.1} blocks={:.1}",
                     &self.text_atlas_bgl,
                 ));
                 atlas.clear_dirty();
+                self.text_atlas_revision = crate::scene::text::sdf_atlas::content_revision();
             }
         }
         self.text_preview_gpu = text_gpu::upload_vertices(device, queue, verts);
@@ -3779,6 +3782,11 @@ analytic={:.1} regular={:.1} blocks={:.1}",
     /// Upload the frame's SDF text-quad vertices, and (re)build the GPU glyph
     /// atlas from the shared CPU atlas when it grew (new glyphs baked by the
     /// text collector). `verts` empty (flag off) leaves nothing to draw.
+    pub fn text_atlas_needs_upload(&self) -> bool {
+        self.text_atlas_gpu.is_none()
+            || self.text_atlas_revision != crate::scene::text::sdf_atlas::content_revision()
+    }
+
     pub fn upload_text(
         &mut self,
         device: &wgpu::Device,
@@ -3789,7 +3797,7 @@ analytic={:.1} regular={:.1} blocks={:.1}",
     ) {
         let perf_started = crate::perf::enabled().then(iced::time::Instant::now);
         if let Ok(mut atlas) = crate::scene::text::sdf_atlas::text_atlas().lock() {
-            if self.text_atlas_gpu.is_none() || atlas.is_dirty() {
+            if self.text_atlas_needs_upload() || atlas.is_dirty() {
                 self.text_atlas_gpu = Some(text_gpu::TextAtlasGpu::upload(
                     device,
                     queue,
@@ -3797,6 +3805,7 @@ analytic={:.1} regular={:.1} blocks={:.1}",
                     &self.text_atlas_bgl,
                 ));
                 atlas.clear_dirty();
+                self.text_atlas_revision = crate::scene::text::sdf_atlas::content_revision();
             }
         }
         self.text_gpu = text_gpu::upload_vertices(device, queue, verts);

@@ -235,8 +235,7 @@ impl PlotStyleTable {
                         let gray = if aci == 7 {
                             0
                         } else {
-                            (0.299 * r as f32 + 0.587 * g as f32 + 0.114 * b as f32)
-                                .round() as u8
+                            (0.299 * r as f32 + 0.587 * g as f32 + 0.114 * b as f32).round() as u8
                         };
                         table.aci_entries[aci as usize].color = Some([gray, gray, gray]);
                     }
@@ -350,13 +349,16 @@ impl PlotStyleTable {
         if matches!(entry.lineweight, 0 | 255) {
             None
         } else {
-            self.lineweights.get(entry.lineweight as usize).copied().map(|weight| {
-                if self.apply_factor {
-                    weight * self.scale_factor.max(0.0)
-                } else {
-                    weight
-                }
-            })
+            self.lineweights
+                .get(entry.lineweight as usize)
+                .copied()
+                .map(|weight| {
+                    if self.apply_factor {
+                        weight * self.scale_factor.max(0.0)
+                    } else {
+                        weight
+                    }
+                })
         }
     }
 

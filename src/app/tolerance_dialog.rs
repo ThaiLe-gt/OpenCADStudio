@@ -13,9 +13,9 @@ impl super::OpenCADStudio {
                 _ => None,
             })
             .unwrap_or_default();
-        self.geometric_tolerance = Some(
-            crate::ui::window::geometric_tolerance::State::from_text(editing, text),
-        );
+        self.geometric_tolerance = Some(crate::ui::window::geometric_tolerance::State::from_text(
+            editing, text,
+        ));
         self.active_modal = Some(super::ModalKind::GeometricTolerance);
         self.modal_offset = iced::Vector::ZERO;
         self.modal_resize = iced::Vector::ZERO;
@@ -37,13 +37,9 @@ impl super::OpenCADStudio {
         }
         let text = state.to_text();
         let i = self.active_tab;
-        let unchanged = self.tabs[i]
-            .scene
-            .document
-            .get_entity(handle)
-            .is_some_and(|entity| {
-                matches!(entity, EntityType::Tolerance(tolerance) if tolerance.text == text)
-            });
+        let unchanged = self.tabs[i].scene.document.get_entity(handle).is_some_and(
+            |entity| matches!(entity, EntityType::Tolerance(tolerance) if tolerance.text == text),
+        );
         if unchanged {
             return true;
         }
@@ -83,10 +79,9 @@ impl super::OpenCADStudio {
             &mut preview_entity,
         );
         let preview_strokes = match &preview_entity {
-            EntityType::Tolerance(tolerance) => crate::entities::tolerance::preview_strokes(
-                tolerance,
-                &self.tabs[i].scene.document,
-            ),
+            EntityType::Tolerance(tolerance) => {
+                crate::entities::tolerance::preview_strokes(tolerance, &self.tabs[i].scene.document)
+            }
             _ => Vec::new(),
         };
         let mut command = crate::modules::annotate::tolerance_cmd::ToleranceCommand::with_text(

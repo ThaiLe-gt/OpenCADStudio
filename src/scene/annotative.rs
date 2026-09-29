@@ -1737,9 +1737,7 @@ fn apply_mleader_style_at_display_scale(
         .collect::<Vec<_>>();
     apply_mleader_style(entity, style);
 
-    let scale = if display_scale.is_finite()
-        && display_scale > 1.0e-12
-    {
+    let scale = if display_scale.is_finite() && display_scale > 1.0e-12 {
         display_scale
     } else {
         1.0
@@ -1757,10 +1755,7 @@ fn apply_mleader_style_at_display_scale(
     };
 
     for (index, root) in entity.context.leader_roots.iter_mut().enumerate() {
-        root.landing_distance = if entity
-            .property_override_flags
-            .contains(F::LANDING_DISTANCE)
-        {
+        root.landing_distance = if entity.property_override_flags.contains(F::LANDING_DISTANCE) {
             landing_distances
                 .get(index)
                 .copied()
@@ -1770,8 +1765,7 @@ fn apply_mleader_style_at_display_scale(
             entity.dogleg_length * scale
         };
 
-        root.text_attachment_direction =
-            entity.text_attachment_direction;
+        root.text_attachment_direction = entity.text_attachment_direction;
     }
 }
 
@@ -1780,9 +1774,7 @@ pub fn apply_mleader_style_to_object(
     handle: Handle,
     style: &codec::objects::MultiLeaderStyle,
 ) -> bool {
-    let Some(EntityType::MultiLeader(original)) =
-        doc.get_entity(handle).cloned()
-    else {
+    let Some(EntityType::MultiLeader(original)) = doc.get_entity(handle).cloned() else {
         return false;
     };
 
@@ -1806,15 +1798,9 @@ pub fn apply_mleader_style_to_object(
 
     let mut styled = original.clone();
 
-    apply_mleader_style_at_display_scale(
-        &mut styled,
-        style,
-        base_display_scale,
-    );
+    apply_mleader_style_at_display_scale(&mut styled, style, base_display_scale);
 
-    if let Some(EntityType::MultiLeader(entity)) =
-        doc.get_entity_mut(handle)
-    {
+    if let Some(EntityType::MultiLeader(entity)) = doc.get_entity_mut(handle) {
         *entity = styled;
     }
 
@@ -1842,16 +1828,14 @@ pub fn apply_mleader_style_to_object(
                         continue;
                     };
 
-                    context.clone()
-                }
+                context.clone()
+            }
 
                 _ => continue,
             };
 
         let context_scale =
-            if context_before.scale_factor.is_finite()
-                && context_before.scale_factor > 1.0e-12
-            {
+            if context_before.scale_factor.is_finite() && context_before.scale_factor > 1.0e-12 {
                 context_before.scale_factor
             } else {
                 base_display_scale
@@ -1859,14 +1843,9 @@ pub fn apply_mleader_style_to_object(
 
         let mut per_scale = original.clone();
 
-        per_scale.context =
-            context_before;
+        per_scale.context = context_before;
 
-        apply_mleader_style_at_display_scale(
-            &mut per_scale,
-            style,
-            context_scale,
-        );
+        apply_mleader_style_at_display_scale(&mut per_scale, style, context_scale);
 
         if let Some(
             ObjectType::ObjectContextData(leaf)

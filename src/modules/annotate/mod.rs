@@ -1,6 +1,7 @@
 // Annotate module — dimension, text, leader, table, and markup tools.
 
 pub mod aligned_dim;
+
 pub mod annotation_scale;
 pub mod arc_length_dim;
 pub mod angular_dim;
@@ -15,9 +16,9 @@ pub mod dimedit;
 pub mod dimjogline;
 pub mod dimspace;
 pub mod dimtedit;
+pub mod jogged_radius_dim;
 pub mod leader_cmd;
 pub mod linear_dim;
-pub mod jogged_radius_dim;
 pub mod mleader_cmd;
 pub mod mleader_edit;
 pub mod mtext;

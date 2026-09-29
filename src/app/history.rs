@@ -342,7 +342,33 @@ impl OpenCADStudio {
 
     pub(super) fn finish_all_pending_history(&mut self) {
         for i in 0..self.tabs.len() {
+            if self.tabs[i].history.pending.as_ref()
+                .is_some_and(|pending| pending.finish_at_message_boundary)
+            {
+                self.finish_pending_history(i);
+            }
+        }
+    }
+
+    /// Undo only the exact preview transaction, never an intervening edit.
+    pub(super) fn rollback_native_transaction(&mut self, i: usize, label: &str) -> Result<(), String> {
+        if let Some(pending) = &self.tabs[i].history.pending {
+            if pending.label != label {
+                return Err("progressive transaction cannot be rolled back because the document changed".into());
+            }
             self.finish_pending_history(i);
+        }
+        if !self.tabs[i].history.undo_stack.last().is_some_and(|snapshot| snapshot.label() == label) {
+            return Err("progressive transaction cannot be rolled back because the document changed".into());
+        }
+        self.undo_active_tab();
+        Ok(())
+    }
+
+    pub(super) fn begin_multi_message_history(&mut self, i: usize, label: impl Into<String>) {
+        self.push_undo_snapshot(i, label);
+        if let Some(pending) = &mut self.tabs[i].history.pending {
+            pending.finish_at_message_boundary = false;
         }
     }
 
@@ -359,6 +385,7 @@ impl OpenCADStudio {
         let recorder = self.tabs[i].scene.document.begin_entity_change_recording();
         self.tabs[i].history.pending = Some(PendingHistorySnapshot {
             label,
+            finish_at_message_boundary: true,
             current_layout,
             active_layer: self.tabs[i].active_layer.clone(),
             selected_before,
@@ -1262,4 +1289,76 @@ pub(super) fn history_dropdown_labels(stack: &[HistorySnapshot]) -> Vec<String> 
         .rev()
         .map(|snapshot| snapshot.label().to_string())
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::OpenCADStudio;
+    use codec::{entities::Point, EntityType};
+
+    #[test]
+    fn atomic_native_preview_rolls_back_only_its_own_history() {
+        for finish_preview in [false, true] {
+            for intervening_edit in [None, Some(false), Some(true)] {
+                let mut app = OpenCADStudio::new_for_test();
+                app.automation_op(r#"{"op":"new"}"#);
+                let i = app.active_tab;
+                let label = "METAL PROGRESSIVE atomic-operation";
+                app.push_undo_snapshot(i, label);
+                app.tabs[i].scene.document.add_entity(EntityType::Point(Point::new())).unwrap();
+                if finish_preview { app.finish_all_pending_history(); }
+                if let Some(finish_edit) = intervening_edit {
+                    app.push_undo_snapshot(i, "user-edit");
+                    app.tabs[i].scene.document.add_entity(EntityType::Point(Point::new())).unwrap();
+                    if finish_edit { app.finish_all_pending_history(); }
+                    assert!(app.rollback_native_transaction(i, label).is_err());
+                    assert_eq!(app.tabs[i].scene.document.entities().count(), 2);
+                } else {
+                    assert!(app.rollback_native_transaction(i, "METAL PROGRESSIVE other-operation").is_err());
+                    assert_eq!(app.tabs[i].scene.document.entities().count(), 1);
+                    assert!(app.rollback_native_transaction(i, label).is_ok());
+                    assert_eq!(app.tabs[i].scene.document.entities().count(), 0);
+                    assert!(app.rollback_native_transaction(i, label).is_err());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn multi_message_history_survives_ui_boundaries_and_undoes_all_chunks() {
+        let mut app = OpenCADStudio::new_for_test();
+        app.automation_op(r#"{"op":"new"}"#);
+        let i = app.active_tab;
+        app.begin_multi_message_history(i, "progressive-test");
+        for _ in 0..3 {
+            app.tabs[i].scene.document.add_entity(EntityType::Point(Point::new())).unwrap();
+            app.finish_all_pending_history();
+            assert!(app.tabs[i].history.pending.is_some());
+            assert!(app.tabs[i].history.undo_stack.is_empty());
+        }
+        app.finish_pending_history(i);
+        assert_eq!(app.tabs[i].history.undo_stack.len(), 1);
+        assert_eq!(app.tabs[i].scene.document.entities().count(), 3);
+        app.undo_active_tab();
+        assert_eq!(app.tabs[i].scene.document.entities().count(), 0);
+    }
+
+    #[test]
+    fn another_edit_ends_the_multi_message_transaction() {
+        let mut app = OpenCADStudio::new_for_test();
+        app.automation_op(r#"{"op":"new"}"#);
+        let i = app.active_tab;
+        app.begin_multi_message_history(i, "progressive-test");
+        app.tabs[i].scene.document.add_entity(EntityType::Point(Point::new())).unwrap();
+        app.push_undo_snapshot(i, "user-edit");
+        assert_eq!(app.tabs[i].history.undo_stack.last().unwrap().label(), "progressive-test");
+        assert_eq!(app.tabs[i].history.pending.as_ref().unwrap().label, "user-edit");
+        app.tabs[i].scene.document.add_entity(EntityType::Point(Point::new())).unwrap();
+        app.finish_all_pending_history();
+        assert!(app.tabs[i].history.pending.is_none());
+        app.undo_active_tab();
+        assert_eq!(app.tabs[i].scene.document.entities().count(), 1);
+        app.undo_active_tab();
+        assert_eq!(app.tabs[i].scene.document.entities().count(), 0);
+    }
 }

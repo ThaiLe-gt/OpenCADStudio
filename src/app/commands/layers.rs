@@ -91,7 +91,9 @@ impl OpenCADStudio {
                     .filter(|&(code, _)| code != 0)
                     .map(|(code, label)| (label, units::short(code), None))
                     .collect();
-                let current = crate::t!(units::label(self.tabs[i].scene.document.header.insertion_units));
+                let current = crate::t!(units::label(
+                    self.tabs[i].scene.document.header.insertion_units
+                ));
                 self.command_line
                     .push_info(crate::tf!("DWGUNITS  current unit: {current}").as_ref());
                 let c = KeywordCommand::new("DWGUNITS", "DWGUNITS  Convert drawing to:", choices);
@@ -269,7 +271,10 @@ impl OpenCADStudio {
                         let states = self.tabs[i].scene.document.layer_states();
                         if states.is_empty() {
                             self.command_line.push_info(
-                                crate::t!("LAYERSTATE: no saved states. Use LAYERSTATE SAVE <name>.").as_ref(),
+                                crate::t!(
+                                    "LAYERSTATE: no saved states. Use LAYERSTATE SAVE <name>."
+                                )
+                                .as_ref(),
                             );
                         } else {
                             let mut names: Vec<&str> =

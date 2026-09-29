@@ -390,12 +390,7 @@ impl Scene {
         if pts.len() < 2 {
             return None;
         }
-        let mut wire = WireModel::solid_f64(
-            handle.value().to_string(),
-            pts,
-            m.color,
-            false,
-        );
+        let mut wire = WireModel::solid_f64(handle.value().to_string(), pts, m.color, false);
         wire.aci = m.aci;
         wire.line_weight_px = m.line_weight_px;
         Some(wire)
