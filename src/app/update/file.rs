@@ -2422,12 +2422,13 @@ impl OpenCADStudio {
                 .ok()
                 .and_then(|value| value.as_string())
                 .unwrap_or_default();
-            if let Some(index) = self
+            if let Some(id) = self
                 .tabs
                 .iter()
-                .position(|tab| !tab.is_start && tab.tab_display_name() == name)
+                .find(|tab| !tab.is_start && tab.tab_display_name() == name)
+                .map(|tab| tab.id)
             {
-                return Task::done(Message::TabClose(index));
+                return Task::done(Message::TabClose(id));
             }
             return Task::none();
         }
@@ -5743,11 +5744,11 @@ impl OpenCADStudio {
                 .push_error(crate::tf!("Save failed: {error}").as_ref()),
         }
         if close_after
-            && matches!(self.pending_close, Some(crate::app::PendingClose::Tab(index)) if index == i)
+            && matches!(self.pending_close, Some(crate::app::PendingClose::Tab(id)) if id == tab_id)
         {
             if saved && unchanged {
                 self.pending_close.take();
-                let continuation = self.update(Message::TabClose(i));
+                let continuation = self.update(Message::TabClose(tab_id));
                 let rest = self.continue_tab_close_queue();
                 return Task::batch([continuation, rest]);
             }
