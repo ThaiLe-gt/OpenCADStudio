@@ -270,7 +270,10 @@ impl DimConstraintCommand {
         let r1 = first - vertex;
         let r2 = second - vertex;
         let at = location - vertex;
-        if r1.length_squared() < 1.0e-18 || r2.length_squared() < 1.0e-18 || at.length_squared() < 1.0e-18 {
+        if r1.length_squared() < 1.0e-18
+            || r2.length_squared() < 1.0e-18
+            || at.length_squared() < 1.0e-18
+        {
             return None;
         }
         let a1 = r1.y.atan2(r1.x);
@@ -402,9 +405,10 @@ impl DimConstraintCommand {
         point: DVec3,
     ) -> Option<(ParametricRef, ParametricRef)> {
         match entity {
-            EntityType::Line(_) | EntityType::Arc(_) => {
-                Some((ParametricRef::point(handle, 0), ParametricRef::point(handle, 1)))
-            }
+            EntityType::Line(_) | EntityType::Arc(_) => Some((
+                ParametricRef::point(handle, 0),
+                ParametricRef::point(handle, 1),
+            )),
             EntityType::LwPolyline(_) | EntityType::Polyline2D(_) => {
                 let (source, _, _) =
                     crate::scene::centerline::picked_source(entity, handle, point)?;
@@ -415,7 +419,10 @@ impl DimConstraintCommand {
                 } else {
                     0
                 };
-                Some((ParametricRef::point(handle, index), ParametricRef::point(handle, end)))
+                Some((
+                    ParametricRef::point(handle, index),
+                    ParametricRef::point(handle, end),
+                ))
             }
             _ => None,
         }
@@ -456,18 +463,28 @@ impl DimConstraintCommand {
             // A text's baseline or an ellipse's axis is a line whose one
             // constraint point is the insertion point / the center.
             EntityType::Text(_) | EntityType::MText(_) => {
-                return Self::axis_target(entity, ParametricRef::text_baseline(handle), ParametricRef::point(handle, 0));
+                return Self::axis_target(
+                    entity,
+                    ParametricRef::text_baseline(handle),
+                    ParametricRef::point(handle, 0),
+                );
             }
             EntityType::Ellipse(_) => {
                 let center = ParametricRef::point(handle, -3);
-                let major = Self::axis_target(entity, ParametricRef::ellipse_major_axis(handle), center);
-                let minor = Self::axis_target(entity, ParametricRef::ellipse_minor_axis(handle), center);
+                let major =
+                    Self::axis_target(entity, ParametricRef::ellipse_major_axis(handle), center);
+                let minor =
+                    Self::axis_target(entity, ParametricRef::ellipse_minor_axis(handle), center);
                 let gap = |target: &LineTarget| {
                     let offset = point - target.ends[0].1;
                     (offset.x * target.dir.y - offset.y * target.dir.x).abs()
                 };
                 return match (major, minor) {
-                    (Some(major), Some(minor)) => Some(if gap(&minor) < gap(&major) { minor } else { major }),
+                    (Some(major), Some(minor)) => Some(if gap(&minor) < gap(&major) {
+                        minor
+                    } else {
+                        major
+                    }),
                     (major, minor) => major.or(minor),
                 };
             }
@@ -485,7 +502,11 @@ impl DimConstraintCommand {
 
     /// A directional axis (text baseline, ellipse axis) as a line target
     /// whose only constraint point is `anchor`.
-    fn axis_target(entity: &EntityType, axis: ParametricRef, anchor: ParametricRef) -> Option<LineTarget> {
+    fn axis_target(
+        entity: &EntityType,
+        axis: ParametricRef,
+        anchor: ParametricRef,
+    ) -> Option<LineTarget> {
         let [start, end] =
             crate::scene::parametric_constraints::directional_axis_endpoints(entity, axis)?;
         let (start, end) = (
@@ -640,9 +661,7 @@ impl CadCommand for DimConstraintCommand {
                 format!("{name}  Specify second angle constraint point:")
             }
             Step::RadialObject => format!("{name}  Select arc or circle:"),
-            Step::AngularLocation { .. }
-            | Step::Location { .. }
-            | Step::RadialLocation { .. } => {
+            Step::AngularLocation { .. } | Step::Location { .. } | Step::RadialLocation { .. } => {
                 format!("{name}  Specify dimension line location:")
             }
             Step::RadialValue { measured, .. } => format!(
@@ -727,7 +746,9 @@ impl CadCommand for DimConstraintCommand {
             Step::Value { .. } | Step::AngularValue { .. } | Step::RadialValue { .. } => {
                 let text = text.trim();
                 let (name, expression) = match text.split_once('=') {
-                    Some((name, expression)) => (name.trim().to_string(), expression.trim().to_string()),
+                    Some((name, expression)) => {
+                        (name.trim().to_string(), expression.trim().to_string())
+                    }
                     None => (self.default_name.clone(), text.to_string()),
                 };
                 match self.step {
@@ -792,26 +813,27 @@ impl CadCommand for DimConstraintCommand {
                     whole_curve: false,
                 })
             }
-            Step::PointLineLine { point: first, point_pos } => {
-                match self.pick_line(handle, point) {
-                    Ok(line) => {
-                        if line.line.entity == first.entity {
-                            return Self::report(Self::SAME_POINT);
-                        }
-                        let (second, second_point) = line.nearest_end(point_pos);
-                        self.step = Step::Location {
-                            first,
-                            second,
-                            first_point: point_pos,
-                            second_point,
-                            direction: Some(line),
-                        };
-                        CmdResult::NeedPoint
+            Step::PointLineLine {
+                point: first,
+                point_pos,
+            } => match self.pick_line(handle, point) {
+                Ok(line) => {
+                    if line.line.entity == first.entity {
+                        return Self::report(Self::SAME_POINT);
                     }
-                    Err("") => CmdResult::NeedPoint,
-                    Err(message) => Self::report(message),
+                    let (second, second_point) = line.nearest_end(point_pos);
+                    self.step = Step::Location {
+                        first,
+                        second,
+                        first_point: point_pos,
+                        second_point,
+                        direction: Some(line),
+                    };
+                    CmdResult::NeedPoint
                 }
-            }
+                Err("") => CmdResult::NeedPoint,
+                Err(message) => Self::report(message),
+            },
             Step::LineFirst => match self.pick_line(handle, point) {
                 Ok(line) => {
                     self.step = Step::LinePoint { line };
@@ -989,7 +1011,12 @@ impl CadCommand for DimConstraintCommand {
     }
 
     fn accept_parallel_line(&mut self, ends: [(ParametricRef, DVec3); 2]) -> CmdResult {
-        let Step::TwoLinesParallel { first, second, pick } = self.step else {
+        let Step::TwoLinesParallel {
+            first,
+            second,
+            pick,
+        } = self.step
+        else {
             return CmdResult::NeedPoint;
         };
         let Some(dir) = (ends[1].1 - ends[0].1).try_normalize() else {
@@ -1458,8 +1485,13 @@ mod tests {
             "DCLINEAR  Enter value or name and value <d1=100>:"
         );
         let CmdResult::AddDimensionalConstraint {
-            kind, name, expression, ..
-        } = command.on_text_input("w=d1*2").expect("a value builds the constraint")
+            kind,
+            name,
+            expression,
+            ..
+        } = command
+            .on_text_input("w=d1*2")
+            .expect("a value builds the constraint")
         else {
             panic!("the value must build the constraint");
         };

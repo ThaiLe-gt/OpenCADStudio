@@ -118,6 +118,7 @@ impl DataLinkPlaceCommand {
             world_width: 0.0,
             depth_override: None,
             display_visible: true,
+            snap_only: false,
             plot_visible: true,
             fill_is_3d: false,
             fill_is_2d_solid: false,
@@ -143,6 +144,8 @@ impl DataLinkPlaceCommand {
             plinegen: true,
             fill_tris: Vec::new(),
             fill_tris_low: Vec::new(),
+
+            ..Default::default()
         }
     }
 }
@@ -169,7 +172,7 @@ impl CadCommand for DataLinkPlaceCommand {
         self.table.insertion_point = codec::types::Vector3::new(point.x, point.y, point.z);
         CmdResult::CommitAndExit(
             self.plane
-                .place_entity(EntityType::Table(self.table.clone())),
+                .place_entity(EntityType::Table(Box::new(self.table.clone()))),
         )
     }
 

@@ -551,7 +551,7 @@ pub fn match_properties_kernel(
 
 #[cfg(test)]
 mod match_layer_kernel_tests {
-    use super::{MatchLayerError, match_layer_kernel};
+    use super::{match_layer_kernel, MatchLayerError};
 
     fn line_on(layer: &str) -> codec::EntityType {
         let mut line = codec::entities::Line::new();
@@ -606,7 +606,7 @@ mod match_layer_kernel_tests {
 
 #[cfg(test)]
 mod match_properties_kernel_tests {
-    use super::{MatchOpts, match_properties_kernel};
+    use super::{match_properties_kernel, MatchOpts};
     use codec::EntityType;
 
     fn line_src() -> EntityType {

@@ -1,9 +1,9 @@
 use codec::entities::MLine;
 use codec::objects::MLineStyle;
 use codec::{EntityType, Handle};
+use glam::DVec3;
 use kernel::geom2d::{Curve, Line};
 use kernel::space::{PlanarCurve, Plane, Vec3 as KernelVec3};
-use glam::DVec3;
 use rustc_hash::FxHashMap as HashMap;
 
 use crate::command::{CadCommand, CmdOption, CmdResult};
@@ -92,11 +92,7 @@ impl MlineEditCommand {
                 }
                 let insert = segment + 1;
                 let mut vertex = mline.vertices[segment].clone();
-                vertex.position = codec::types::Vector3::new(
-                    projected.x,
-                    projected.y,
-                    projected.z,
-                );
+                vertex.position = codec::types::Vector3::new(projected.x, projected.y, projected.z);
                 mline.vertices.insert(insert, vertex);
                 crate::entities::mline::rebuild_mline_geometry(&mut mline);
                 crate::modules::draw::draw::mline::sync_mline_element_parameters(
@@ -994,13 +990,11 @@ fn move_closest_end(mline: &mut MLine, style: &MLineStyle, index: usize, interse
     } else {
         (mline.vertices.len() > 2).then_some(last_index - 2)
     };
-    let peripheral = peripheral_segment
-        .and_then(|segment| snapshot_segment_data(mline, segment, normal).map(|data| (segment, data)));
-    mline.vertices[index].position = codec::types::Vector3::new(
-        intersection.x,
-        intersection.y,
-        intersection.z,
-    );
+    let peripheral = peripheral_segment.and_then(|segment| {
+        snapshot_segment_data(mline, segment, normal).map(|data| (segment, data))
+    });
+    mline.vertices[index].position =
+        codec::types::Vector3::new(intersection.x, intersection.y, intersection.z);
     crate::entities::mline::rebuild_mline_geometry(mline);
     crate::modules::draw::draw::mline::sync_mline_element_parameters(mline, style);
     restore_shifted_segment_data(mline, segment, normal, source, index == 0);
@@ -1043,11 +1037,7 @@ fn segment_intersection(
         - kernel::space::Vec3::from(first.0.to_array()))
     .normalize()?
     .to_array();
-    let plane = kernel::space::Plane::orthonormal(
-        first.0.to_array(),
-        axis,
-        normal.to_array(),
-    )?;
+    let plane = kernel::space::Plane::orthonormal(first.0.to_array(), axis, normal.to_array())?;
     let points = [
         first.0.to_array(),
         first.1.to_array(),

@@ -106,6 +106,9 @@ const TOOLS: &[Tool] = &[
 #[derive(Clone, Copy)]
 struct Panel {
     id: &'static str,
+    /// A command the owning ribbon group must hold, for titles more than one
+    /// tab uses ("Block" on Home and Insert).
+    anchor: Option<&'static str>,
     title_id: &'static str,
     title: &'static str,
     tools: &'static [Tool],
@@ -121,24 +124,88 @@ const REFERENCE_TOOLS: &[Tool] = &[Tool {
 }];
 pub(super) const REFERENCE_PANEL_ID: &str = "reference_extension";
 
+const fn icon_tool(command: &'static str, label: &'static str, icon: &'static [u8]) -> Tool {
+    Tool {
+        command,
+        label,
+        icon,
+        options: &[],
+    }
+}
+
+/// Home > Block slide-out.
+const HOME_BLOCK_TOOLS: &[Tool] = &[
+    icon_tool(
+        "ATTDEF",
+        "Define Attributes",
+        include_bytes!("../../../assets/icons/attdef.svg"),
+    ),
+    icon_tool(
+        "ATTMAN",
+        "Manage Attributes",
+        include_bytes!("../../../assets/icons/attman.svg"),
+    ),
+    icon_tool(
+        "ATTSYNC",
+        "Synchronize",
+        include_bytes!("../../../assets/icons/attsync.svg"),
+    ),
+    icon_tool(
+        "BASE",
+        "Set Base Point",
+        include_bytes!("../../../assets/icons/base_point.svg"),
+    ),
+];
+
+/// Insert > Block Definition slide-out.
+const BLOCK_DEFINITION_TOOLS: &[Tool] = &[
+    icon_tool(
+        "BASE",
+        "Set Base Point",
+        include_bytes!("../../../assets/icons/base_point.svg"),
+    ),
+    icon_tool(
+        "ATTSYNC",
+        "Synchronize",
+        include_bytes!("../../../assets/icons/attsync.svg"),
+    ),
+];
+
 const PANELS: &[Panel] = &[
     Panel {
         id: PANEL_ID,
+        anchor: None,
         title_id: TITLE_ID,
         title: "Draw",
         tools: TOOLS,
     },
     Panel {
         id: "modify_extension",
+        anchor: None,
         title_id: "modify_extension_title",
         title: "Modify",
         tools: super::modify_panel::TOOLS,
     },
     Panel {
         id: REFERENCE_PANEL_ID,
+        anchor: None,
         title_id: "reference_extension_title",
         title: "Reference",
         tools: REFERENCE_TOOLS,
+    },
+    Panel {
+        id: "home_block_extension",
+        anchor: Some("BEDIT"),
+        title_id: "home_block_extension_title",
+        title: "Block",
+        tools: HOME_BLOCK_TOOLS,
+    },
+    Panel {
+        id: "block_definition_extension",
+        anchor: None,
+        title_id: "block_definition_extension_title",
+        title: "Block Definition",
+        tools: BLOCK_DEFINITION_TOOLS,
     },
 ];
 
@@ -169,16 +236,58 @@ pub(super) fn parent_panel(id: &str) -> Option<&'static str> {
     panel_for_dropdown(id).map(|panel| panel.id)
 }
 
-pub(super) fn group_title<'a>(title: &'static str, open: &Option<String>) -> Element<'a, Message> {
-    let Some(panel) = PANELS
-        .iter()
-        .find(|panel| panel.title == title && !panel.tools.is_empty())
-    else {
+/// The slide-out under the title of the ribbon group `title`, whose items
+/// are `group_ids`.
+fn panel_for_group(title: &str, group_ids: &[&'static str]) -> Option<Panel> {
+    PANELS.iter().copied().find(|panel| {
+        panel.title == title
+            && !panel.tools.is_empty()
+            && panel
+                .anchor
+                .is_none_or(|anchor| group_ids.contains(&anchor))
+    })
+}
+
+/// Every command the slide-out of the group `title` offers: each tool and
+/// each of its submenu options.
+pub(super) fn slide_out_commands(
+    title: &str,
+    group_ids: &[&'static str],
+) -> impl Iterator<Item = &'static str> {
+    panel_for_group(title, group_ids)
+        .into_iter()
+        .flat_map(|panel| panel.tools)
+        .flat_map(|tool| {
+            std::iter::once(tool.command).chain(tool.options.iter().map(|(cmd, _)| *cmd))
+        })
+}
+
+/// A slide-out tool is lit while it or one of its submenu options runs.
+fn tool_is_active(tool: &Tool, active_tool: Option<&str>) -> bool {
+    active_tool.is_some_and(|active| {
+        tool.command == active || tool.options.iter().any(|(cmd, _)| *cmd == active)
+    })
+}
+
+pub(super) fn group_title<'a>(
+    title: &'static str,
+    group_ids: &[&'static str],
+    open: &Option<String>,
+    active_tool: Option<&str>,
+) -> Element<'a, Message> {
+    let Some(panel) = panel_for_group(title, group_ids) else {
         return container(text(t!(title)).size(9).style(muted_text_style))
             .padding([1, 4])
             .into();
     };
     let expanded = open.as_deref().and_then(parent_panel) == Some(panel.id);
+    // A command running from the closed slide-out lights its title, the way a
+    // dropdown lights while one of its items runs.
+    let lit = expanded
+        || panel
+            .tools
+            .iter()
+            .any(|tool| tool_is_active(tool, active_tool));
     let arrow = if expanded {
         icons::themed_arrow_up(GROUP_TITLE_ARROW_SIZE)
     } else {
@@ -195,7 +304,7 @@ pub(super) fn group_title<'a>(title: &'static str, open: &Option<String>) -> Ele
             .align_y(iced::Center),
         )
         .on_press(Message::ToggleRibbonDropdown(panel.id.to_string()))
-        .style(move |theme: &Theme, status| tool_btn_style(theme, expanded, status))
+        .style(move |theme: &Theme, status| tool_btn_style(theme, lit, status))
         .padding([1, 4]),
     )
     .into();
@@ -220,7 +329,11 @@ pub(super) fn group_title<'a>(title: &'static str, open: &Option<String>) -> Ele
         })
         .style(move |theme: &Theme, status| tool_btn_style(theme, false, status))
         .padding([0, 3]),
-        make_tip(format!("{}\n{} EXTERNALREFERENCES", t!("External References"), t!("Command:"))),
+        make_tip(format!(
+            "{}\n{} EXTERNALREFERENCES",
+            t!("External References"),
+            t!("Command:")
+        )),
         tooltip::Position::Bottom,
     )
     .delay(Duration::from_millis(400))
@@ -303,7 +416,11 @@ fn reference_overlay<'a>(ribbon: &Ribbon, panel: Panel, win: (f32, f32)) -> Elem
     let fading = row![
         tooltip(
             switch,
-            make_tip(format!("{}\n{} XDWGFADECTL", t!("Xref fading"), t!("Command:"))),
+            make_tip(format!(
+                "{}\n{} XDWGFADECTL",
+                t!("Xref fading"),
+                t!("Command:")
+            )),
             tooltip::Position::Bottom
         )
         .delay(Duration::from_millis(400))
@@ -377,7 +494,7 @@ pub(super) fn overlay<'a>(ribbon: &Ribbon, id: &str, win: (f32, f32)) -> Element
                         .map(|tool| {
                             tool_button(
                                 tool,
-                                ribbon.active_tool.as_deref() == Some(tool.command),
+                                tool_is_active(tool, ribbon.active_tool.as_deref()),
                                 panel.id,
                             )
                         })

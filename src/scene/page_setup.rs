@@ -77,7 +77,11 @@ fn plotsettings_dict_handle_in(document: &CadDocument) -> Option<Handle> {
         ObjectType::PlotSettings(ps) => Some(ps.owner),
         _ => None,
     })?;
-    matches!(document.objects.get(&owner), Some(ObjectType::Dictionary(_))).then_some(owner)
+    matches!(
+        document.objects.get(&owner),
+        Some(ObjectType::Dictionary(_))
+    )
+    .then_some(owner)
 }
 
 /// The named page setups of any document — `(name, settings)` in dictionary
@@ -116,7 +120,10 @@ impl Scene {
 
     /// Names of the document's named page setups, in dictionary order.
     pub fn page_setup_names(&self) -> Vec<String> {
-        match self.plotsettings_dict_handle().and_then(|h| self.document.objects.get(&h)) {
+        match self
+            .plotsettings_dict_handle()
+            .and_then(|h| self.document.objects.get(&h))
+        {
             Some(ObjectType::Dictionary(d)) => d.entries.iter().map(|(k, _)| k.clone()).collect(),
             _ => Vec::new(),
         }
@@ -164,7 +171,8 @@ impl Scene {
         self.document.header.acad_plotsettings_dict_handle = new_handle;
         if let Some(ObjectType::Dictionary(rd)) = self.document.objects.get_mut(&root) {
             rd.entries.retain(|(k, _)| k != "ACAD_PLOTSETTINGS");
-            rd.entries.push(("ACAD_PLOTSETTINGS".to_string(), new_handle));
+            rd.entries
+                .push(("ACAD_PLOTSETTINGS".to_string(), new_handle));
         }
         new_handle
     }
@@ -201,15 +209,21 @@ impl Scene {
         let dict_handle = self.ensure_plotsettings_dict();
         // Replacing keeps the entry's stored spelling so the dictionary key
         // and the object's page_name stay one name.
-        ps.page_name = self.page_setup_key(name).unwrap_or_else(|| name.to_string());
+        ps.page_name = self
+            .page_setup_key(name)
+            .unwrap_or_else(|| name.to_string());
         ps.owner = dict_handle;
         if let Some(h) = self.page_setup_handle(name) {
             ps.handle = h;
-            self.document.objects.insert(h, ObjectType::PlotSettings(ps));
+            self.document
+                .objects
+                .insert(h, ObjectType::PlotSettings(ps));
         } else {
             ps.handle = self.document.allocate_handle();
             let h = ps.handle;
-            self.document.objects.insert(h, ObjectType::PlotSettings(ps));
+            self.document
+                .objects
+                .insert(h, ObjectType::PlotSettings(ps));
             if let Some(ObjectType::Dictionary(d)) = self.document.objects.get_mut(&dict_handle) {
                 d.entries.push((name.to_string(), h));
             }
@@ -221,19 +235,18 @@ impl Scene {
         let Some(dict_handle) = self.plotsettings_dict_handle() else {
             return;
         };
-        let handle = if let Some(ObjectType::Dictionary(d)) =
-            self.document.objects.get_mut(&dict_handle)
-        {
-            let h = d
-                .entries
-                .iter()
-                .find(|(k, _)| k.eq_ignore_ascii_case(name))
-                .map(|(_, h)| *h);
-            d.entries.retain(|(k, _)| !k.eq_ignore_ascii_case(name));
-            h
-        } else {
-            None
-        };
+        let handle =
+            if let Some(ObjectType::Dictionary(d)) = self.document.objects.get_mut(&dict_handle) {
+                let h = d
+                    .entries
+                    .iter()
+                    .find(|(k, _)| k.eq_ignore_ascii_case(name))
+                    .map(|(_, h)| *h);
+                d.entries.retain(|(k, _)| !k.eq_ignore_ascii_case(name));
+                h
+            } else {
+                None
+            };
         if let Some(h) = handle {
             self.document.objects.remove(&h);
         }
@@ -254,7 +267,11 @@ impl Scene {
         };
         let mut renamed = None;
         if let Some(ObjectType::Dictionary(d)) = self.document.objects.get_mut(&dict_handle) {
-            if let Some(e) = d.entries.iter_mut().find(|(k, _)| k.eq_ignore_ascii_case(old)) {
+            if let Some(e) = d
+                .entries
+                .iter_mut()
+                .find(|(k, _)| k.eq_ignore_ascii_case(old))
+            {
                 e.0 = new.to_string();
                 renamed = Some(e.1);
             }

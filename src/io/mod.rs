@@ -3,40 +3,39 @@
 // All file reading/writing goes through opencadcodec.
 // Default save format: DWG (AC1032 / R2018+).
 
-pub mod file_association;
-pub mod font_repo;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod edit_lock;
+pub mod file_association;
+pub mod font_repo;
+pub mod line_read;
+pub mod linetypes;
 pub mod obj;
 pub mod ole_embed;
-#[cfg(not(target_arch = "wasm32"))]
-pub mod single_instance;
+pub mod paper_catalog;
+pub mod patterns;
 pub mod pdf_export;
+pub mod plot_device;
 pub mod plot_style;
 pub mod print_to_printer;
 pub mod recovery;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod single_instance;
 pub mod step;
 pub mod stl;
-pub mod xref;
-pub mod xref_model;
-pub mod linetypes;
-pub mod patterns;
-pub mod update_check;
-pub mod paper_catalog;
-pub mod plot_device;
-pub mod windows_media;
 pub mod thumbnail;
-#[cfg(target_arch = "wasm32")]
-mod web_worker;
+pub mod update_check;
 #[cfg(target_arch = "wasm32")]
 pub(crate) mod web_recent;
+#[cfg(target_arch = "wasm32")]
+mod web_worker;
+pub mod windows_media;
+pub mod xref;
+pub mod xref_model;
 
 use crate::scene::DerivedCaches;
 use codec::entities::EntityType;
 use codec::io::dwg::DwgReader;
-use codec::{
-    CadDocument, DwgReadOptions, DwgWriter, DxfReader, DxfReaderConfiguration, DxfWriter,
-};
+use codec::{CadDocument, DwgReadOptions, DwgWriter, DxfReader, DxfReaderConfiguration, DxfWriter};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU16, AtomicU32, AtomicU8, Ordering};
 use std::sync::Arc;
@@ -97,9 +96,7 @@ pub fn open_phase_name(phase: u8) -> &'static str {
 
 fn recovery_fingerprint_needed(caches: &DerivedCaches) -> bool {
     let parser_issue = caches.read_stats.as_ref().is_some_and(|stats| {
-        stats.recovered()
-            || stats.skipped_source_records > 0
-            || !stats.stream_completed
+        stats.recovered() || stats.skipped_source_records > 0 || !stats.stream_completed
     });
     let reference_issue = caches.xrefs.iter().any(|item| {
         matches!(
@@ -129,10 +126,7 @@ impl OpenLoadError {
     }
 
     #[cfg(not(target_arch = "wasm32"))]
-    fn recovery_prompt(
-        message: impl Into<String>,
-        read_stats: Option<codec::ReadStats>,
-    ) -> Self {
+    fn recovery_prompt(message: impl Into<String>, read_stats: Option<codec::ReadStats>) -> Self {
         Self {
             message: message.into(),
             source_sha256: None,
@@ -169,10 +163,22 @@ impl From<&str> for OpenLoadError {
 pub async fn pick_open_path() -> Option<(PathBuf, u64)> {
     let handle = crate::sys::file_dialog()
         .set_title(crate::t!("Open CAD file").as_ref())
-        .add_filter(crate::t!("CAD Files").as_ref(), &["dwg", "dxf", "bak", "sv$", "DWG", "DXF", "BAK"])
+        .add_filter(
+            crate::t!("CAD Files").as_ref(),
+            &[
+                "dwg", "dxf", "dwt", "bak", "sv$", "DWG", "DXF", "DWT", "BAK",
+            ],
+        )
         .add_filter(crate::t!("DWG Files").as_ref(), &["dwg", "DWG"])
         .add_filter(crate::t!("DXF Files").as_ref(), &["dxf", "DXF"])
-        .add_filter(crate::t!("Backup / Autosave").as_ref(), &["bak", "sv$", "BAK"])
+        .add_filter(
+            crate::t!("Drawing Template (*.dwt)").as_ref(),
+            &["dwt", "DWT"],
+        )
+        .add_filter(
+            crate::t!("Backup / Autosave").as_ref(),
+            &["bak", "sv$", "BAK"],
+        )
         .add_filter(crate::t!("All Files").as_ref(), &["*"])
         .pick_file()
         .await?;
@@ -200,11 +206,14 @@ pub async fn pick_layer_standard_path() -> Option<PathBuf> {
 /// Pick where a set of layer mappings is written, or read back from.
 pub async fn pick_layer_mapping_path(save: bool) -> Option<PathBuf> {
     let dialog = crate::sys::file_dialog()
-        .set_title(crate::t!(if save {
-            "Save layer mappings"
-        } else {
-            "Load layer mappings"
-        }).as_ref())
+        .set_title(
+            crate::t!(if save {
+                "Save layer mappings"
+            } else {
+                "Load layer mappings"
+            })
+            .as_ref(),
+        )
         .add_filter(crate::t!("Layer mappings").as_ref(), &["ocslmap"])
         .add_filter(crate::t!("All Files").as_ref(), &["*"]);
     let handle = if save {
@@ -303,131 +312,133 @@ async fn open_path_with_phase_attempt(
             let initial_fingerprint = crate::io::edit_lock::FileFingerprint::capture(&path2).ok();
             let attempted = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 (|| -> Result<_, OpenAttemptFailure> {
-        use iced::time::Instant;
-                progress2.set(crate::app::OPEN_PHASE_PARSING, 200, 0, 1000);
-        let t_parse = Instant::now();
-        let parser_progress = {
-                    let progress = Arc::clone(&progress2);
-                    let callback: Arc<dyn Fn(u16) + Send + Sync> = Arc::new(move |value| {
-                        progress.set_fraction(
-                            crate::app::OPEN_PHASE_PARSING,
-                            200,
-                            5600,
-                            value as usize,
-                            1000,
-                        );
-                    });
-                    callback
-                };
-                std::fs::File::open(&path2).map_err(|error| {
-                    // 32 = ERROR_SHARING_VIOLATION, 33 = ERROR_LOCK_VIOLATION:
-                    // another program holds the drawing without read sharing,
-                    // so nothing on the machine can read the bytes until it
-                    // closes the file — not even read-only.
-                    let message = match error.raw_os_error() {
-                        Some(32) | Some(33) => format!(
-                            "\"{}\" is in use by another program. Close the file there and \
-                             reopen it here, or open a copy of the file.",
-                            path2.display()
-                        ),
-                        _ => format!("failed to open drawing: {error}"),
-                    };
-                    OpenAttemptFailure {
-                        message,
-                        read_stats: None,
-                        recoverable: false,
-                    }
-                })?;
-                let outcome = load_file_for_open(&path2, Some(parser_progress), &attempt)?;
-                let read_stats = outcome.stats;
-                let mut doc = outcome.document;
-        let parse_ms = t_parse.elapsed().as_millis() as u32;
-                progress2.set(crate::app::OPEN_PHASE_PARSING, 5800, 1000, 1000);
-        let t_purge = Instant::now();
-        let dropped = purge_corrupt_entities(&mut doc);
-        let purge_ms = t_purge.elapsed().as_millis() as u32;
-                if matches!(attempt, OpenAttempt::Strict) && dropped > 0 {
-                    return Err(OpenAttemptFailure {
-                        message: format!(
-                            "normal read found {dropped} structurally invalid drawing records"
-                        ),
-                        read_stats: Some(read_stats),
-                        recoverable: true,
-                    });
-                }
-                progress2.set(crate::app::OPEN_PHASE_XREF, 6000, 0, 1);
-                let t_xref = Instant::now();
-                let (xref_infos, xref_dropped) = if let Some(base_dir) = path2.parent() {
-                    let xref_progress = {
+                    use iced::time::Instant;
+                    progress2.set(crate::app::OPEN_PHASE_PARSING, 200, 0, 1000);
+                    let t_parse = Instant::now();
+                    let parser_progress = {
                         let progress = Arc::clone(&progress2);
-                        let callback: Arc<dyn Fn(usize, usize) + Send + Sync> =
-                            Arc::new(move |completed, total| {
-                                progress.set_fraction(
-                                    crate::app::OPEN_PHASE_XREF,
-                                    6000,
-                                    1400,
-                                    completed,
-                                    total,
-                                );
-                            });
+                        let callback: Arc<dyn Fn(u16) + Send + Sync> = Arc::new(move |value| {
+                            progress.set_fraction(
+                                crate::app::OPEN_PHASE_PARSING,
+                                200,
+                                5600,
+                                value as usize,
+                                1000,
+                            );
+                        });
                         callback
                     };
-                    crate::io::xref::register_underlay_sources(&doc, base_dir);
-                    crate::io::xref::resolve_xrefs_with_progress(
-                        &mut doc,
-                        base_dir,
-                        Some(xref_progress),
-                    )
-                } else {
-                    (Vec::new(), 0)
-                };
-                let xref_ms = t_xref.elapsed().as_millis() as u32;
-                progress2.set(crate::app::OPEN_PHASE_CACHING, 7400, 0, 10000);
-        let t_caches = Instant::now();
-        let cache_progress = |value: u16| {
-                    progress2.set_fraction(
-                        crate::app::OPEN_PHASE_CACHING,
-                        7400,
-                        2200,
-                        value as usize,
-                        10000,
+                    std::fs::File::open(&path2).map_err(|error| {
+                        // 32 = ERROR_SHARING_VIOLATION, 33 = ERROR_LOCK_VIOLATION:
+                        // another program holds the drawing without read sharing,
+                        // so nothing on the machine can read the bytes until it
+                        // closes the file — not even read-only.
+                        let message = match error.raw_os_error() {
+                            Some(32) | Some(33) => format!(
+                                "\"{}\" is in use by another program. Close the file there and \
+                             reopen it here, or open a copy of the file.",
+                                path2.display()
+                            ),
+                            _ => format!("failed to open drawing: {error}"),
+                        };
+                        OpenAttemptFailure {
+                            message,
+                            read_stats: None,
+                            recoverable: false,
+                        }
+                    })?;
+                    let outcome = load_file_for_open(&path2, Some(parser_progress), &attempt)?;
+                    let read_stats = outcome.stats;
+                    let mut doc = outcome.document;
+                    let parse_ms = t_parse.elapsed().as_millis() as u32;
+                    progress2.set(crate::app::OPEN_PHASE_PARSING, 5800, 1000, 1000);
+                    let t_purge = Instant::now();
+                    let dropped = purge_corrupt_entities(&mut doc);
+                    let purge_ms = t_purge.elapsed().as_millis() as u32;
+                    if matches!(attempt, OpenAttempt::Strict) && dropped > 0 {
+                        return Err(OpenAttemptFailure {
+                            message: format!(
+                                "normal read found {dropped} structurally invalid drawing records"
+                            ),
+                            read_stats: Some(read_stats),
+                            recoverable: true,
+                        });
+                    }
+                    // Before the geometry is prepared below: completing the
+                    // drawing's catalog linetypes (and repairing stripped ones)
+                    // after it would leave the first view drawn without them.
+                    crate::io::linetypes::populate_document(&mut doc);
+                    progress2.set(crate::app::OPEN_PHASE_XREF, 6000, 0, 1);
+                    let t_xref = Instant::now();
+                    let (xref_infos, xref_dropped) = if let Some(base_dir) = path2.parent() {
+                        let xref_progress = {
+                            let progress = Arc::clone(&progress2);
+                            let callback: Arc<dyn Fn(usize, usize) + Send + Sync> =
+                                Arc::new(move |completed, total| {
+                                    progress.set_fraction(
+                                        crate::app::OPEN_PHASE_XREF,
+                                        6000,
+                                        1400,
+                                        completed,
+                                        total,
+                                    );
+                                });
+                            callback
+                        };
+                        crate::io::xref::register_underlay_sources(&doc, base_dir);
+                        crate::io::xref::resolve_xrefs_with_progress(
+                            &mut doc,
+                            base_dir,
+                            Some(xref_progress),
+                        )
+                    } else {
+                        (Vec::new(), 0)
+                    };
+                    let xref_ms = t_xref.elapsed().as_millis() as u32;
+                    progress2.set(crate::app::OPEN_PHASE_CACHING, 7400, 0, 10000);
+                    let t_caches = Instant::now();
+                    let cache_progress = |value: u16| {
+                        progress2.set_fraction(
+                            crate::app::OPEN_PHASE_CACHING,
+                            7400,
+                            2200,
+                            value as usize,
+                            10000,
+                        );
+                    };
+                    let mut caches = crate::scene::build_derived_caches_with_progress(
+                        &doc,
+                        &cache_progress,
+                        path2.parent(),
                     );
-                };
-                let mut caches = crate::scene::build_derived_caches_with_progress(
-                    &doc,
-                    &cache_progress,
-                    path2.parent(),
-                );
-        caches.timings = crate::scene::OpenTimings {
-            parse_ms,
-            purge_ms,
-            caches_ms: t_caches.elapsed().as_millis() as u32,
-                    xref_ms,
-                    // Filled in after `prepare_open_geometry` below.
-                    finalize_ms: 0,
-        };
-        caches.corrupt_dropped = dropped;
-                caches.read_stats = Some(read_stats);
-                caches.xref_dropped = xref_dropped;
-                caches.xrefs = xref_infos;
-                if recovery_fingerprint_needed(&caches) {
-                    caches.source_sha256 = stable_sha256_file(
-                        &path2,
-                        initial_fingerprint.as_ref(),
-                    );
-                }
-                progress2.set(crate::app::OPEN_PHASE_FINALIZING, 9600, 0, 1);
-                let t_finalize = Instant::now();
-                let (prepared_doc, prepared_geometry) =
-                    crate::scene::prepare_open_geometry(doc, &caches, model_bg);
-                caches.timings.finalize_ms = t_finalize.elapsed().as_millis() as u32;
-                doc = prepared_doc;
-                caches.prepared_geometry = Some(prepared_geometry);
-                progress2.set(crate::app::OPEN_PHASE_FINALIZING, 9950, 1, 1);
-                // The localized command-line summary predates `finalize_ms` and
-                // is keyed on its format string, so the full breakdown goes out
-                // here instead of changing that key across every locale.
-                crate::perf_record!(
+                    caches.timings = crate::scene::OpenTimings {
+                        parse_ms,
+                        purge_ms,
+                        caches_ms: t_caches.elapsed().as_millis() as u32,
+                        xref_ms,
+                        // Filled in after `prepare_open_geometry` below.
+                        finalize_ms: 0,
+                    };
+                    caches.corrupt_dropped = dropped;
+                    caches.read_stats = Some(read_stats);
+                    caches.xref_dropped = xref_dropped;
+                    caches.xrefs = xref_infos;
+                    if recovery_fingerprint_needed(&caches) {
+                        caches.source_sha256 =
+                            stable_sha256_file(&path2, initial_fingerprint.as_ref());
+                    }
+                    progress2.set(crate::app::OPEN_PHASE_FINALIZING, 9600, 0, 1);
+                    let t_finalize = Instant::now();
+                    let (prepared_doc, prepared_geometry) =
+                        crate::scene::prepare_open_geometry(doc, &caches, model_bg);
+                    caches.timings.finalize_ms = t_finalize.elapsed().as_millis() as u32;
+                    doc = prepared_doc;
+                    caches.prepared_geometry = Some(prepared_geometry);
+                    progress2.set(crate::app::OPEN_PHASE_FINALIZING, 9950, 1, 1);
+                    // The localized command-line summary predates `finalize_ms` and
+                    // is keyed on its format string, so the full breakdown goes out
+                    // here instead of changing that key across every locale.
+                    crate::perf_record!(
                     "[perf] open-phases parse={}ms purge={}ms xref={}ms caches={}ms finalize={}ms",
                     caches.timings.parse_ms,
                     caches.timings.purge_ms,
@@ -445,10 +456,7 @@ async fn open_path_with_phase_attempt(
                 } else {
                     OpenLoadError {
                         message: failure.message,
-                        source_sha256: stable_sha256_file(
-                            &path2,
-                            initial_fingerprint.as_ref(),
-                        ),
+                        source_sha256: stable_sha256_file(&path2, initial_fingerprint.as_ref()),
                         read_stats: failure.read_stats,
                         recovery_available: false,
                     }
@@ -460,17 +468,14 @@ async fn open_path_with_phase_attempt(
                     );
                     Err(OpenLoadError {
                         message,
-                        source_sha256: stable_sha256_file(
-                            &path2,
-                            initial_fingerprint.as_ref(),
-                        ),
+                        source_sha256: stable_sha256_file(&path2, initial_fingerprint.as_ref()),
                         read_stats: None,
                         recovery_available: false,
                     })
                 }
             };
             let _ = sender.send(result);
-    })
+        })
         .map_err(|error| OpenLoadError::from(format!("failed to start parser thread: {error}")))?;
     let (doc, caches) = receiver
         .await
@@ -520,12 +525,17 @@ pub struct WebOpenOutcome {
 }
 
 #[cfg(target_arch = "wasm32")]
-pub async fn pick_and_load_web(
-    progress: Arc<OpenProgressState>,
-) -> WebOpenOutcome {
+pub async fn pick_and_load_web(progress: Arc<OpenProgressState>) -> WebOpenOutcome {
     let Some(handle) = crate::sys::file_dialog()
         .set_title(crate::t!("Open CAD file").as_ref())
-        .add_filter(crate::t!("CAD Files").as_ref(), &["dwg", "dxf", "DWG", "DXF"])
+        .add_filter(
+            crate::t!("CAD Files").as_ref(),
+            &["dwg", "dxf", "dwt", "DWG", "DXF", "DWT"],
+        )
+        .add_filter(
+            crate::t!("Drawing Template (*.dwt)").as_ref(),
+            &["dwt", "DWT"],
+        )
         .add_filter(crate::t!("All Files").as_ref(), &["*"])
         .pick_file()
         .await
@@ -584,10 +594,7 @@ pub async fn load_metal_web_bytes(
 
 /// Reopen a browser-private recent copy without showing the file picker.
 #[cfg(target_arch = "wasm32")]
-pub async fn open_recent_web(
-    path: PathBuf,
-    progress: Arc<OpenProgressState>,
-) -> WebOpenOutcome {
+pub async fn open_recent_web(path: PathBuf, progress: Arc<OpenProgressState>) -> WebOpenOutcome {
     open_recent_web_attempt(path, progress, false, String::new()).await
 }
 
@@ -600,15 +607,7 @@ pub async fn recover_web_bytes(
     initial_stats: Option<codec::ReadStats>,
 ) -> WebOpenOutcome {
     let size_bytes = bytes.len() as u64;
-    let result = load_web_bytes(
-        &name,
-        &bytes,
-        progress,
-        true,
-        &initial_error,
-        initial_stats,
-    )
-    .await;
+    let result = load_web_bytes(&name, &bytes, progress, true, &initial_error, initial_stats).await;
     WebOpenOutcome {
         name,
         size_bytes,
@@ -651,15 +650,7 @@ async fn open_recent_web_attempt(
         bytes.len(),
         bytes.len(),
     );
-    let result = load_web_bytes(
-        &name,
-        &bytes,
-        progress,
-        recovery_mode,
-        &initial_error,
-        None,
-    )
-    .await;
+    let result = load_web_bytes(&name, &bytes, progress, recovery_mode, &initial_error, None).await;
     let keep_for_recovery = result
         .as_ref()
         .err()
@@ -685,38 +676,32 @@ async fn load_web_bytes(
     mut initial_stats: Option<codec::ReadStats>,
 ) -> Result<(String, PathBuf, CadDocument, DerivedCaches), OpenLoadError> {
     progress.set(crate::app::OPEN_PHASE_PARSING, 1000, 0, 1);
-    let (outcome, mut source_sha256) = match web_worker::parse_document(
-        name,
-        bytes,
-        recovery_mode,
-        initial_error,
-    )
-    .await
-    {
-        Ok(result) => result,
-        Err(error) => {
-            let recoverable_parse_error = error.recovery_available;
-            let mut source_sha256 = error.source_sha256;
-            if recovery_mode && source_sha256.is_none() {
-                source_sha256 = web_worker::sha256_document(bytes).await.ok();
-            }
-            let read_stats = merge_read_stats(error.read_stats, initial_stats.take());
-            let message = if recovery_mode && !error.message.contains("initial read failed:") {
-                format!(
-                    "initial read failed: {initial_error}; recovery read failed: {}",
+    let (outcome, mut source_sha256) =
+        match web_worker::parse_document(name, bytes, recovery_mode, initial_error).await {
+            Ok(result) => result,
+            Err(error) => {
+                let recoverable_parse_error = error.recovery_available;
+                let mut source_sha256 = error.source_sha256;
+                if recovery_mode && source_sha256.is_none() {
+                    source_sha256 = web_worker::sha256_document(bytes).await.ok();
+                }
+                let read_stats = merge_read_stats(error.read_stats, initial_stats.take());
+                let message = if recovery_mode && !error.message.contains("initial read failed:") {
+                    format!(
+                        "initial read failed: {initial_error}; recovery read failed: {}",
+                        error.message
+                    )
+                } else {
                     error.message
-                )
-            } else {
-                error.message
-            };
-            return Err(OpenLoadError {
-                message: format!("Web parser worker: {message}"),
-                recovery_available: !recovery_mode && recoverable_parse_error,
-                source_sha256,
-                read_stats,
-            });
-        }
-    };
+                };
+                return Err(OpenLoadError {
+                    message: format!("Web parser worker: {message}"),
+                    recovery_available: !recovery_mode && recoverable_parse_error,
+                    source_sha256,
+                    read_stats,
+                });
+            }
+        };
     let mut outcome = outcome;
     if let Some(initial_stats) = initial_stats.take() {
         merge_read_diagnostics(&mut outcome.stats, initial_stats);
@@ -729,13 +714,12 @@ async fn load_web_bytes(
     }
     fix_viewport_status_flags(&mut doc);
     fix_current_style_names(&mut doc);
+    crate::entities::field::local_header_dates(&mut doc);
     progress.set(crate::app::OPEN_PHASE_CACHING, 7000, 0, 1);
     let dropped = purge_corrupt_entities(&mut doc);
     if !recovery_mode && dropped > 0 {
         return Err(OpenLoadError {
-            message: format!(
-                "normal read found {dropped} structurally invalid drawing records"
-            ),
+            message: format!("normal read found {dropped} structurally invalid drawing records"),
             source_sha256: None,
             read_stats: Some(outcome.stats),
             recovery_available: true,
@@ -764,12 +748,14 @@ pub fn load_bytes(name: &str, bytes: Vec<u8>) -> Result<CadDocument, String> {
         ext.as_str()
     };
     match format {
-        "dwg" => {
+        // Templates (.dwt) and standards (.dws) are drawings in the DWG format.
+        "dwg" | "dwt" | "dws" => {
             let mut doc = DwgReader::from_stream(Cursor::new(bytes))
                 .read()
                 .map_err(|e| e.to_string())?;
             fix_viewport_status_flags(&mut doc);
             fix_current_style_names(&mut doc);
+            crate::entities::field::local_header_dates(&mut doc);
             Ok(doc)
         }
         "dxf" => {
@@ -781,6 +767,7 @@ pub fn load_bytes(name: &str, bytes: Vec<u8>) -> Result<CadDocument, String> {
             fix_dxf_layout_plot_settings(&mut doc);
             fix_viewport_status_flags(&mut doc);
             fix_current_style_names(&mut doc);
+            crate::entities::field::local_header_dates(&mut doc);
             Ok(doc)
         }
         _ => Err(format!("Unsupported file format: .{ext}")),
@@ -797,6 +784,8 @@ pub fn load_bytes_finalized(path: &Path, bytes: Vec<u8>) -> Result<(CadDocument,
     normalize_block_origins(&mut doc);
     resolve_raster_image_paths(&mut doc, path.parent());
     doc.source_path = Some(path.to_string_lossy().into_owned());
+    // Opening is a field evaluation event (FIELDEVAL bit 1).
+    crate::entities::field::update_fields(&mut doc, 1, None);
     let dropped = purge_corrupt_entities(&mut doc);
     Ok((doc, dropped))
 }
@@ -858,13 +847,12 @@ fn load_file_for_open(
 ) -> Result<codec::ReadOutcome, OpenAttemptFailure> {
     let outcome = match attempt {
         OpenAttempt::Strict => {
-            let outcome = read_file_attempt(path, progress, false).map_err(|failure| {
-                OpenAttemptFailure {
+            let outcome =
+                read_file_attempt(path, progress, false).map_err(|failure| OpenAttemptFailure {
                     message: failure.message,
                     read_stats: None,
                     recoverable: failure.recoverable,
-                }
-            })?;
+                })?;
             if !outcome.stats.has_usable_drawing_data() {
                 return Err(OpenAttemptFailure {
                     message: "initial read returned no source drawing records".to_string(),
@@ -893,16 +881,15 @@ fn load_file_for_open(
             outcome
         }
         OpenAttempt::Recovery(initial_error, initial_stats) => {
-            let mut outcome = read_file_attempt(path, progress, true).map_err(|failure| {
-                OpenAttemptFailure {
+            let mut outcome =
+                read_file_attempt(path, progress, true).map_err(|failure| OpenAttemptFailure {
                     message: format!(
                         "initial read failed: {initial_error}; recovery read failed: {}",
                         failure.message
                     ),
                     read_stats: initial_stats.clone(),
                     recoverable: false,
-                }
-            })?;
+                })?;
             if !outcome.stats.has_usable_drawing_data() {
                 if let Some(initial_stats) = initial_stats.clone() {
                     merge_read_diagnostics(&mut outcome.stats, initial_stats);
@@ -980,10 +967,7 @@ fn recoverable_reader_error(error: &codec::DxfError) -> bool {
     )
 }
 
-fn merge_read_diagnostics(
-    target: &mut codec::ReadStats,
-    source: codec::ReadStats,
-) {
+fn merge_read_diagnostics(target: &mut codec::ReadStats, source: codec::ReadStats) {
     for diagnostic in source.diagnostics {
         if !target.diagnostics.contains(&diagnostic) {
             codec::push_read_diagnostic(&mut target.diagnostics, diagnostic);
@@ -1025,7 +1009,7 @@ fn read_file_attempt(
     };
 
     match effective.as_str() {
-        "dwg" => read_dwg_path(path, progress, failsafe),
+        "dwg" | "dwt" | "dws" => read_dwg_path(path, progress, failsafe),
         "dxf" => read_dxf_path(path, failsafe),
         _ => Err(ReaderFailure::terminal(format!(
             "Unsupported file format: .{ext}"
@@ -1039,6 +1023,7 @@ fn finalize_loaded_outcome(
 ) -> Result<codec::ReadOutcome, String> {
     let doc = &mut outcome.document;
     normalize_block_origins(doc);
+    materialize_missing_block_markers(doc);
     normalize_knotless_splines(doc);
     if outcome.stats.source_format == Some(codec::SourceFormat::Dxf) {
         fix_dxf_dimension_rotations(doc);
@@ -1046,8 +1031,11 @@ fn finalize_loaded_outcome(
     }
     fix_viewport_status_flags(doc);
     fix_current_style_names(doc);
+    crate::entities::field::local_header_dates(doc);
     resolve_raster_image_paths(doc, path.parent());
     doc.source_path = Some(path.to_string_lossy().into_owned());
+    // Opening is a field evaluation event (FIELDEVAL bit 1).
+    crate::entities::field::update_fields(doc, 1, None);
     Ok(outcome)
 }
 
@@ -1100,20 +1088,16 @@ fn read_dwg_path(
         if let Some(progress) = progress {
             reader.set_progress_callback(progress);
         }
-        reader
-            .read_with_stats()
-            .map_err(ReaderFailure::from_reader)
+        reader.read_with_stats().map_err(ReaderFailure::from_reader)
     }
     #[cfg(target_arch = "wasm32")]
     {
-        let mut reader = DwgReader::from_file_with_options(path, options)
-            .map_err(ReaderFailure::from_reader)?;
+        let mut reader =
+            DwgReader::from_file_with_options(path, options).map_err(ReaderFailure::from_reader)?;
         if let Some(progress) = progress {
             reader.set_progress_callback(progress);
         }
-        reader
-            .read_with_stats()
-            .map_err(ReaderFailure::from_reader)
+        reader.read_with_stats().map_err(ReaderFailure::from_reader)
     }
 }
 
@@ -1242,6 +1226,84 @@ fn normalize_block_origins(doc: &mut CadDocument) {
     }
 }
 
+/// The DXF section reader keeps BLOCK/ENDBLK marker identities on the block
+/// record but never materializes the sentinel entities, so
+/// `block_entity_handle`/`block_end_handle` dangle after every DXF load
+/// (reopened baked `*D` dimension blocks hit this every time). Re-create any
+/// missing sentinel so each record points at a real Block/BlockEnd again.
+/// Idempotent: records whose markers already resolve (DWG loads, live docs)
+/// are untouched. File handles are reused when still free so a repair +
+/// resave stays handle-stable; otherwise a fresh handle is minted and the
+/// record is pointed at it.
+fn materialize_missing_block_markers(doc: &mut CadDocument) {
+    use codec::entities::{Block, BlockEnd};
+    use codec::{EntityType, Handle};
+
+    struct Work {
+        name: String,
+        record_handle: Handle,
+        base_point: codec::types::Vector3,
+        block_handle: Handle,
+        end_handle: Handle,
+        need_block: bool,
+        need_end: bool,
+    }
+    let work: Vec<Work> = doc
+        .block_records
+        .iter()
+        .map(|record| Work {
+            name: record.name.clone(),
+            record_handle: record.handle,
+            base_point: record.base_point,
+            block_handle: record.block_entity_handle,
+            end_handle: record.block_end_handle,
+            need_block: !matches!(
+                doc.get_entity(record.block_entity_handle),
+                Some(EntityType::Block(_))
+            ),
+            need_end: !matches!(
+                doc.get_entity(record.block_end_handle),
+                Some(EntityType::BlockEnd(_))
+            ),
+        })
+        .filter(|w| w.need_block || w.need_end)
+        .collect();
+
+    for w in work {
+        if w.need_block {
+            let mut marker = Block::new(&w.name, w.base_point);
+            // Reuse the file handle only if nothing else claims it; an
+            // explicit handle is respected by add_entity (bumping the counter
+            // past it), otherwise a NULL handle mints a fresh one below.
+            if !w.block_handle.is_null() && doc.get_entity(w.block_handle).is_none() {
+                marker.common.handle = w.block_handle;
+            }
+            marker.common.owner_handle = w.record_handle;
+            if let Ok(handle) = doc.add_entity(EntityType::Block(marker)) {
+                if handle != w.block_handle {
+                    if let Some(record) = doc.block_records.get_mut(&w.name) {
+                        record.block_entity_handle = handle;
+                    }
+                }
+            }
+        }
+        if w.need_end {
+            let mut marker = BlockEnd::new();
+            if !w.end_handle.is_null() && doc.get_entity(w.end_handle).is_none() {
+                marker.common.handle = w.end_handle;
+            }
+            marker.common.owner_handle = w.record_handle;
+            if let Ok(handle) = doc.add_entity(EntityType::BlockEnd(marker)) {
+                if handle != w.end_handle {
+                    if let Some(record) = doc.block_records.get_mut(&w.name) {
+                        record.block_end_handle = handle;
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// A RasterImage entity stores its file path on the linked ImageDefinition,
 /// often as the original author's absolute path (e.g. a Windows / VMware share)
 /// that doesn't exist on this machine. Resolve each image to a usable path:
@@ -1323,7 +1385,7 @@ pub const DEFAULT_SAVE_FORMAT: &str = "DWG 2018";
 
 pub const SAVE_FORMAT_OPTIONS: &[&str] = &[
     "DWG 2018", "DWG 2013", "DWG 2010", "DWG 2007", "DWG 2004", "DWG 2000", "DWG R14", "DXF 2018",
-    "DXF 2013", "DXF 2010", "DXF 2007", "DXF 2004", "DXF 2000", "DXF R14",
+    "DXF 2013", "DXF 2010", "DXF 2007", "DXF 2004", "DXF 2000", "DXF R14", "DWT 2018",
 ];
 
 pub fn canonical_save_format(format: &str) -> &'static str {
@@ -1353,7 +1415,14 @@ pub fn parse_save_format(format: &str) -> (&'static str, codec::DxfVersion) {
     use codec::DxfVersion;
     let f = format.to_ascii_uppercase();
     let is_dxf = f.starts_with("DXF");
-    let ext = if is_dxf { "dxf" } else { "dwg" };
+    // A drawing template (.dwt) is a DWG under another extension (#1635).
+    let ext = if is_dxf {
+        "dxf"
+    } else if f.starts_with("DWT") {
+        "dwt"
+    } else {
+        "dwg"
+    };
     let version = if f.contains("2013") {
         DxfVersion::AC1027
     } else if f.contains("2010") {
@@ -1514,10 +1583,7 @@ impl SaveFailure {
     #[cfg(not(target_arch = "wasm32"))]
     fn externally_modified(path: &Path) -> Self {
         Self {
-            message: format!(
-                "{} changed on disk after it was opened",
-                path.display()
-            ),
+            message: format!("{} changed on disk after it was opened", path.display()),
             file_in_use: false,
             externally_modified: true,
         }
@@ -1532,14 +1598,14 @@ impl std::fmt::Display for SaveFailure {
 
 impl std::error::Error for SaveFailure {}
 
-const SUPPORTED_SAVE_FORMATS: &str = ".dwg, .dxf";
+const SUPPORTED_SAVE_FORMATS: &str = ".dwg, .dxf, .dwt";
 
 fn validate_save_extension(path: &Path) -> Result<(), SaveFailure> {
     let extension = path
         .extension()
         .map(|value| value.to_string_lossy().to_lowercase())
         .unwrap_or_default();
-    if matches!(extension.as_str(), "dwg" | "dxf" | "sv$") {
+    if matches!(extension.as_str(), "dwg" | "dxf" | "dwt" | "sv$") {
         return Ok(());
     }
 
@@ -1596,16 +1662,12 @@ mod save_failure_tests {
                 .as_nanos()
         ));
 
-        let error = save_as_version(
-            &codec::CadDocument::new(),
-            &path,
-            codec::DxfVersion::AC1032,
-        )
-        .unwrap_err();
+        let error = save_as_version(&codec::CadDocument::new(), &path, codec::DxfVersion::AC1032)
+            .unwrap_err();
 
         assert_eq!(
             error,
-            "unsupported output format .pdf; supported formats: .dwg, .dxf"
+            "unsupported output format .pdf; supported formats: .dwg, .dxf, .dwt"
         );
         assert!(!path.exists(), "unsupported export created an output file");
     }
@@ -1683,6 +1745,16 @@ mod save_failure_tests {
 /// picked from outside the plot styles folder is copied into it (unless a
 /// file of that name is already there), so the dialog lists it from now on
 /// and page setups naming it resolve after a restart.
+/// Pick a `.lin` linetype definition file and return its text (#1588).
+pub async fn pick_linetype_file() -> Option<String> {
+    let handle = crate::sys::file_dialog()
+        .set_title(crate::t!("Load Linetypes").as_ref())
+        .add_filter(crate::t!("Linetype Files").as_ref(), &["lin", "LIN"])
+        .pick_file()
+        .await?;
+    Some(String::from_utf8_lossy(&handle.read().await).into_owned())
+}
+
 pub async fn pick_plot_style() -> Result<Option<plot_style::PlotStyleTable>, String> {
     let dialog = crate::sys::file_dialog()
         .set_title(crate::t!("Load Plot Style Table").as_ref())
@@ -1723,7 +1795,10 @@ pub async fn pick_plot_style() -> Result<Option<plot_style::PlotStyleTable>, Str
 pub async fn pick_image_file() -> Result<(PathBuf, u32, u32), String> {
     let handle = crate::sys::file_dialog()
         .set_title(crate::t!("Select Image File").as_ref())
-        .add_filter(crate::t!("Images").as_ref(), &["png", "jpg", "jpeg", "bmp", "tiff", "tif"])
+        .add_filter(
+            crate::t!("Images").as_ref(),
+            &["png", "jpg", "jpeg", "bmp", "tiff", "tif"],
+        )
         .add_filter(crate::t!("PNG").as_ref(), &["png"])
         .add_filter(crate::t!("JPEG").as_ref(), &["jpg", "jpeg"])
         .add_filter(crate::t!("All Files").as_ref(), &["*"])
@@ -1741,7 +1816,10 @@ pub async fn pick_image_file() -> Result<(PathBuf, u32, u32), String> {
 pub async fn pick_embedded_image_file() -> Result<ole_embed::EmbeddedImage, String> {
     let handle = crate::sys::file_dialog()
         .set_title(crate::t!("Select Image File").as_ref())
-        .add_filter(crate::t!("Images").as_ref(), &["png", "jpg", "jpeg", "bmp", "tiff", "tif"])
+        .add_filter(
+            crate::t!("Images").as_ref(),
+            &["png", "jpg", "jpeg", "bmp", "tiff", "tif"],
+        )
         .add_filter(crate::t!("PNG").as_ref(), &["png"])
         .add_filter(crate::t!("JPEG").as_ref(), &["jpg", "jpeg"])
         .add_filter(crate::t!("All Files").as_ref(), &["*"])
@@ -1888,16 +1966,40 @@ fn replace_save_file(temp_path: &Path, path: &Path) -> std::io::Result<()> {
 
 #[cfg(target_os = "windows")]
 fn replace_save_file(temp_path: &Path, path: &Path) -> std::io::Result<()> {
+    use std::os::windows::fs::MetadataExt;
+    use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_HIDDEN;
+    // The temp name starts with a dot, and a Samba share stores such files
+    // as Hidden; that attribute rides the rename onto the drawing. Only a
+    // drawing that was hidden before the save stays hidden. (#1414)
+    let was_hidden = std::fs::metadata(path)
+        .is_ok_and(|meta| meta.file_attributes() & FILE_ATTRIBUTE_HIDDEN != 0);
+    replace_save_file_inner(temp_path, path)?;
+    if !was_hidden {
+        if let Ok(meta) = std::fs::metadata(path) {
+            let attributes = meta.file_attributes();
+            if attributes & FILE_ATTRIBUTE_HIDDEN != 0 {
+                use std::os::windows::ffi::OsStrExt;
+                let wide: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+                unsafe {
+                    windows_sys::Win32::Storage::FileSystem::SetFileAttributesW(
+                        wide.as_ptr(),
+                        attributes & !FILE_ATTRIBUTE_HIDDEN,
+                    );
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn replace_save_file_inner(temp_path: &Path, path: &Path) -> std::io::Result<()> {
     if !path.exists() {
         return std::fs::rename(temp_path, path);
     }
     use std::os::windows::ffi::OsStrExt;
     let replaced: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
-    let replacement: Vec<u16> = temp_path
-        .as_os_str()
-        .encode_wide()
-        .chain(Some(0))
-        .collect();
+    let replacement: Vec<u16> = temp_path.as_os_str().encode_wide().chain(Some(0)).collect();
     let ok = unsafe {
         windows_sys::Win32::Storage::FileSystem::ReplaceFileW(
             replaced.as_ptr(),
@@ -1945,7 +2047,9 @@ pub fn save_to_bytes(
     let dimensions_ms = dimensions_started.elapsed().as_secs_f64() * 1000.0;
     let write_started = iced::time::Instant::now();
     let result = match ext.to_lowercase().as_str() {
-        "dxf" => DxfWriter::new(&doc).write_to_vec().map_err(|e| e.to_string()),
+        "dxf" => DxfWriter::new(&doc)
+            .write_to_vec()
+            .map_err(|e| e.to_string()),
         _ => {
             let mut buf = std::io::Cursor::new(Vec::new());
             DwgWriter::write_to_writer(&mut buf, &doc).map_err(|e| e.to_string())?;
@@ -1969,7 +2073,6 @@ pub fn save_to_bytes(
     result
 }
 
-
 // ── Post-load fixups ──────────────────────────────────────────────────────
 
 // Resolve the current text / dimension / multiline style from the handle the
@@ -1983,13 +2086,23 @@ fn fix_current_style_names(doc: &mut CadDocument) {
 
     let h = doc.header.current_text_style_handle;
     if h.is_valid() {
-        if let Some(name) = doc.text_styles.iter().find(|s| s.handle == h).map(|s| s.name.clone()) {
+        if let Some(name) = doc
+            .text_styles
+            .iter()
+            .find(|s| s.handle == h)
+            .map(|s| s.name.clone())
+        {
             doc.header.current_text_style_name = name;
         }
     }
     let h = doc.header.current_dimstyle_handle;
     if h.is_valid() {
-        if let Some(name) = doc.dim_styles.iter().find(|s| s.handle == h).map(|s| s.name.clone()) {
+        if let Some(name) = doc
+            .dim_styles
+            .iter()
+            .find(|s| s.handle == h)
+            .map(|s| s.name.clone())
+        {
             doc.header.current_dimstyle_name = name;
         }
     }
@@ -2093,9 +2206,7 @@ pub(crate) fn set_drawing_variable(doc: &mut CadDocument, name: &str, value: &st
     let root = crate::scene::annotative::root_named_dict_handle(doc);
     let variable_dictionary = crate::scene::annotative::as_dict(doc, root)
         .and_then(|dictionary| dictionary.get("AcDbVariableDictionary"))
-        .filter(|handle| {
-            matches!(doc.objects.get(handle), Some(ObjectType::Dictionary(_)))
-        })
+        .filter(|handle| matches!(doc.objects.get(handle), Some(ObjectType::Dictionary(_))))
         .unwrap_or_else(|| {
             let handle = doc.allocate_handle();
             let mut dictionary = Dictionary::new();
@@ -2194,8 +2305,14 @@ pub(crate) fn normalize_dimension_arrow_handles(
 fn sync_current_styles_on_save(doc: &mut CadDocument) {
     use codec::objects::ObjectType;
 
-    // Dangling hard pointers cause Rhino to drop dimensions using the style.
-    let block_handles = doc.block_records.iter().map(|record| record.handle).collect();
+    // The renderer uses a closed filled arrow when a referenced block is
+    // missing. Persist that same default instead of a dangling hard pointer:
+    // Rhino otherwise drops every dimension using the affected DIMSTYLE.
+    let block_handles: rustc_hash::FxHashSet<_> = doc
+        .block_records
+        .iter()
+        .map(|record| record.handle)
+        .collect();
     for style in doc.dim_styles.iter_mut() {
         normalize_dimension_arrow_handles(style, &block_handles);
     }
@@ -2297,12 +2414,10 @@ pub(crate) fn is_entity_corrupt(e: &EntityType) -> bool {
                 || p.vertices.iter().any(|v| !finite_vec3(&v.location))
         }
         E::Polyline3D(p) => {
-            p.vertices.len() >= MAX_VERTS
-                || p.vertices.iter().any(|v| !finite_vec3(&v.position))
+            p.vertices.len() >= MAX_VERTS || p.vertices.iter().any(|v| !finite_vec3(&v.position))
         }
         E::Polyline(p) => {
-            p.vertices.len() >= MAX_VERTS
-                || p.vertices.iter().any(|v| !finite_vec3(&v.location))
+            p.vertices.len() >= MAX_VERTS || p.vertices.iter().any(|v| !finite_vec3(&v.location))
         }
         E::Line(l) => !finite_vec3(&l.start) || !finite_vec3(&l.end),
         // Zero-radius curves are valid and have bounded kernel tessellation.
@@ -2416,7 +2531,7 @@ fn fix_viewport_status_flags(doc: &mut CadDocument) {
             // If bit 0 is not set but bit 15 is, this is an external-format viewport:
             // treat bit 15 as "on" and bit 14 as "locked".
             if (bits & 0x0001) == 0 && (bits & 0x8000) != 0 {
-                vp.status.is_on = true;
+                vp.turn_on();
                 vp.status.locked = (bits & 0x4000) != 0;
             }
         }
@@ -2656,7 +2771,10 @@ mod layer_roundtrip_tests {
 
     #[test]
     fn dwg_preserves_new_layer() {
-        assert!(roundtrip_layers("dwg", 1), "DWG dropped the new layer (issue #67)");
+        assert!(
+            roundtrip_layers("dwg", 1),
+            "DWG dropped the new layer (issue #67)"
+        );
     }
 
     #[test]
@@ -2668,7 +2786,10 @@ mod layer_roundtrip_tests {
     // the last are dropped on a handle-based DWG save (issue #67).
     #[test]
     fn dwg_preserves_multiple_new_layers() {
-        assert!(roundtrip_layers("dwg", 3), "DWG dropped colliding new layers (issue #67)");
+        assert!(
+            roundtrip_layers("dwg", 3),
+            "DWG dropped colliding new layers (issue #67)"
+        );
     }
 
     // #252: an entity added (as a plugin does) on a layer that no LAYER command
@@ -2699,7 +2820,11 @@ mod layer_roundtrip_tests {
         );
         let ent = loaded
             .get_entity(h)
-            .or_else(|| loaded.entities().find(|e| matches!(e, EntityType::Point(_))))
+            .or_else(|| {
+                loaded
+                    .entities()
+                    .find(|e| matches!(e, EntityType::Point(_)))
+            })
             .expect("point entity missing after round-trip");
         assert_eq!(
             ent.common().layer,
@@ -2730,9 +2855,15 @@ mod corrupt_guard_tests {
     #[test]
     fn knotless_spline_with_too_few_points_is_lowered_and_saves_as_dwg() {
         let mut doc = CadDocument::new();
-        doc.add_entity(EntityType::Spline(knotless_spline(3, 2))).unwrap();
-        doc.add_entity(EntityType::Spline(knotless_spline(3, 1))).unwrap();
-        assert_eq!(purge_corrupt_entities(&mut doc), 1, "the lone point is dropped");
+        doc.add_entity(EntityType::Spline(knotless_spline(3, 2)))
+            .unwrap();
+        doc.add_entity(EntityType::Spline(knotless_spline(3, 1)))
+            .unwrap();
+        assert_eq!(
+            purge_corrupt_entities(&mut doc),
+            1,
+            "the lone point is dropped"
+        );
         let spline = doc
             .entities()
             .find_map(|entity| match entity {
@@ -2743,10 +2874,8 @@ mod corrupt_guard_tests {
         assert_eq!(spline.degree, 1);
         assert_eq!(spline.knots, vec![0.0, 0.0, 1.0, 1.0]);
 
-        let path = std::env::temp_dir().join(format!(
-            "ocs_knotless_spline_{}.dwg",
-            std::process::id()
-        ));
+        let path =
+            std::env::temp_dir().join(format!("ocs_knotless_spline_{}.dwg", std::process::id()));
         save_as_version(&doc, &path, codec::DxfVersion::AC1032).expect("save");
         let _ = std::fs::remove_file(&path);
     }
@@ -2755,7 +2884,8 @@ mod corrupt_guard_tests {
     // the spline repair has to happen when any load is finalized.
     #[test]
     fn knotless_spline_is_repaired_by_every_load_path() {
-        const DXF: &str = "0\nSECTION\n2\nENTITIES\n0\nSPLINE\n8\n0\n70\n0\n71\n3\n72\n0\n73\n2\n74\n0\n\
+        const DXF: &str =
+            "0\nSECTION\n2\nENTITIES\n0\nSPLINE\n8\n0\n70\n0\n71\n3\n72\n0\n73\n2\n74\n0\n\
 10\n0\n20\n0\n30\n0\n10\n1\n20\n1\n30\n0\n0\nENDSEC\n0\nEOF\n";
         let dir = std::env::temp_dir();
         let source = dir.join(format!("ocs_knotless_load_{}.dxf", std::process::id()));
@@ -2909,5 +3039,126 @@ mod corrupt_guard_tests {
     fn keeps_a_plain_insert() {
         let i = codec::entities::Insert::new("BLOCK", Vector3::ZERO);
         assert!(!is_entity_corrupt(&EntityType::Insert(i)));
+    }
+}
+
+#[cfg(test)]
+mod pre_r2000_layer_plot_tests {
+    use super::*;
+    use codec::tables::layer::Layer as DocLayer;
+    use codec::types::DxfVersion;
+
+    fn drawing_with_layers() -> CadDocument {
+        let mut doc = CadDocument::new();
+        crate::io::linetypes::populate_document(&mut doc);
+        for name in ["COARSE", "FINE"] {
+            let mut layer = DocLayer::new(name);
+            layer.handle = doc.allocate_handle();
+            doc.layers.add(layer).unwrap();
+        }
+        doc
+    }
+
+    /// Tests run in parallel, so each gets its own file.
+    fn saved_path(test: &str, version: DxfVersion) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!(
+            "ocs_plotflag_{test}_{}_{}.dwg",
+            version.as_str(),
+            std::process::id()
+        ))
+    }
+
+    /// The LAYER record only grew a plot flag in R2000. Reading an R14 drawing
+    /// must therefore leave every layer plottable — reading the missing bit as
+    /// "don't plot" blanked the whole sheet in PLOT, the preview and QUICKPRINT
+    /// while the drawing still looked right on screen (display and plot
+    /// visibility are separate flags).
+    #[test]
+    fn an_r14_drawing_reads_back_with_every_layer_plottable() {
+        let doc = drawing_with_layers();
+        let path = saved_path("r14_bytes", DxfVersion::AC1014);
+        save_as_version(&doc, &path, DxfVersion::AC1014).expect("save R14 DWG");
+        let bytes = std::fs::read(&path).expect("read R14 DWG");
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(&bytes[..6], b"AC1014", "writer did not emit an R14 header");
+
+        let loaded = load_bytes("r14.dwg", bytes).expect("load R14 DWG");
+        assert_eq!(loaded.version, DxfVersion::AC1014);
+        assert!(
+            loaded.layers.iter().all(|layer| layer.is_plottable),
+            "an R14 layer came back unplottable: {:?}",
+            loaded
+                .layers
+                .iter()
+                .filter(|layer| !layer.is_plottable)
+                .map(|layer| layer.name.clone())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    /// R13 carries the same four-bit LAYER record as R14, and a path-based open
+    /// runs its fixes through `finalize_loaded_outcome` rather than
+    /// `load_bytes`, so this covers that second entry point too.
+    #[test]
+    fn an_r13_drawing_reads_back_with_every_layer_plottable() {
+        let doc = drawing_with_layers();
+        let path = saved_path("r13_path", DxfVersion::AC1012);
+        save_as_version(&doc, &path, DxfVersion::AC1012).expect("save R13 DWG");
+        let loaded = load_file(&path).expect("load R13 DWG");
+        let _ = std::fs::remove_file(&path);
+        assert!(
+            loaded.layers.iter().all(|layer| layer.is_plottable),
+            "an R13 layer came back unplottable"
+        );
+    }
+
+    /// From R2000 on the flag is in the file, so what the file says wins — a
+    /// layer stored unplottable (DEFPOINTS, say) must stay unplottable.
+    #[test]
+    fn a_modern_drawing_keeps_the_plot_flag_it_stored() {
+        let mut doc = drawing_with_layers();
+        doc.layers.get_mut("FINE").unwrap().is_plottable = false;
+        let path = saved_path("modern", DxfVersion::AC1032);
+        save_as_version(&doc, &path, DxfVersion::AC1032).expect("save R2018 DWG");
+        let loaded = load_file(&path).expect("load R2018 DWG");
+        let _ = std::fs::remove_file(&path);
+        assert!(!loaded.layers.get("FINE").unwrap().is_plottable);
+        assert!(loaded.layers.get("COARSE").unwrap().is_plottable);
+    }
+
+    /// The plot pass keeps a wire only when it is marked plottable, so an R14
+    /// drawing whose layers came back unplottable plotted a blank sheet while
+    /// every entity still drew on screen. Lock the whole chain here: load an
+    /// R14 drawing and check the wires the plot paths consume.
+    #[test]
+    fn every_wire_of_an_r14_drawing_stays_plottable() {
+        use codec::entities::Line;
+        use codec::types::Vector3;
+        use codec::EntityType;
+
+        let mut doc = drawing_with_layers();
+        for (index, layer) in ["COARSE", "FINE"].into_iter().enumerate() {
+            let x = index as f64 * 10.0;
+            let mut line =
+                Line::from_points(Vector3::new(x, 0.0, 0.0), Vector3::new(x + 5.0, 5.0, 0.0));
+            line.common.layer = layer.to_string();
+            doc.add_entity(EntityType::Line(line)).expect("add line");
+        }
+        let path = saved_path("r14_wires", DxfVersion::AC1014);
+        save_as_version(&doc, &path, DxfVersion::AC1014).expect("save R14 DWG");
+        let bytes = std::fs::read(&path).expect("read R14 DWG");
+        let _ = std::fs::remove_file(&path);
+
+        let mut scene = crate::scene::Scene::new();
+        scene.document = load_bytes("r14.dwg", bytes).expect("load R14 DWG");
+        let (wires, _) = scene.plot_wire_groups(None);
+        assert!(!wires.is_empty(), "the R14 drawing tessellated to no wires");
+        let dropped = wires.iter().filter(|wire| !wire.plot_visible).count();
+        assert_eq!(
+            dropped,
+            0,
+            "{dropped} of {} wires would be dropped from the plot",
+            wires.len()
+        );
     }
 }

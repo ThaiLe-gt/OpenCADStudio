@@ -65,15 +65,37 @@ pub enum LogLevel {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum SolidPrimitive {
     /// Axis-aligned box from its center and full extents.
-    Box { center: [f64; 3], size: [f64; 3] },
+    Box {
+        center: [f64; 3],
+        size: [f64; 3],
+    },
     /// Right triangular prism from its minimum corner and extents.
-    Wedge { origin: [f64; 3], size: [f64; 3] },
+    Wedge {
+        origin: [f64; 3],
+        size: [f64; 3],
+    },
     /// Cylinder standing on the plane through `center`.
-    Cylinder { center: [f64; 3], radius: f64, height: f64 },
-    Sphere { center: [f64; 3], radius: f64 },
-    Torus { center: [f64; 3], major: f64, minor: f64 },
+    Cylinder {
+        center: [f64; 3],
+        radius: f64,
+        height: f64,
+    },
+    Sphere {
+        center: [f64; 3],
+        radius: f64,
+    },
+    Torus {
+        center: [f64; 3],
+        major: f64,
+        minor: f64,
+    },
     /// Regular pyramid with `sides` base edges.
-    Pyramid { center: [f64; 3], radius: f64, height: f64, sides: u32 },
+    Pyramid {
+        center: [f64; 3],
+        radius: f64,
+        height: f64,
+        sides: u32,
+    },
 }
 
 /// How two solids combine.
@@ -159,12 +181,20 @@ pub enum TableOperation {
     /// Create a dimension style, optionally copying an existing one first.
     /// `properties` is a JSON object of DimStyle fields (see the Python docs);
     /// handles and xref fields are managed by the host and refused.
-    DimStyleCreate { name: String, copy_from: Option<String>, properties: String },
+    DimStyleCreate {
+        name: String,
+        copy_from: Option<String>,
+        properties: String,
+    },
     /// Change only the DimStyle fields the JSON object `properties` names.
     DimStyleModify { name: String, properties: String },
     /// Rename a text or dimension style; references to it follow. `Standard`
     /// is never renamed and a case-only change is refused.
-    StyleRename { kind: TableStyleKind, from: String, to: String },
+    StyleRename {
+        kind: TableStyleKind,
+        from: String,
+        to: String,
+    },
     /// Delete a text or dimension style that is neither current nor in use.
     /// `Standard` is never deleted.
     StyleDelete { kind: TableStyleKind, name: String },
@@ -200,9 +230,17 @@ pub enum TableOperation {
     /// Create a simple linetype. `pattern` is signed lengths in drawing units:
     /// positive is a dash, negative a gap, zero a dot (2-12 elements with at
     /// least one dash or dot and one gap). Returns the linetype's handle.
-    LinetypeCreate { name: String, description: String, pattern: Vec<f64> },
+    LinetypeCreate {
+        name: String,
+        description: String,
+        pattern: Vec<f64>,
+    },
     /// Change a simple linetype's description or pattern in place.
-    LinetypeModify { name: String, description: Option<String>, pattern: Option<Vec<f64>> },
+    LinetypeModify {
+        name: String,
+        description: Option<String>,
+        pattern: Option<Vec<f64>>,
+    },
     /// Rename a linetype; layers and entities that use it follow.
     LinetypeRename { from: String, to: String },
     /// Delete a linetype that no layer, entity, dimension style or the current
@@ -257,7 +295,10 @@ pub struct TextStyleConfig {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum SolidOperation {
     /// Build a new solid on `layer` (layer `0` when `None`).
-    Create { primitive: SolidPrimitive, layer: Option<String> },
+    Create {
+        primitive: SolidPrimitive,
+        layer: Option<String>,
+    },
     /// Apply a rigid transform, given as a column-major 4x4 matrix, to an
     /// existing solid. Scaling and shear are refused.
     Transform { handle: Handle, matrix: [f64; 16] },
@@ -265,12 +306,25 @@ pub enum SolidOperation {
     /// ellipse, closed polyline or spline, ...). The new region goes on
     /// `layer`, or on the source's layer when `None`; `delete_source` erases
     /// the profile afterwards, as the REGION command does.
-    RegionFromProfile { source: Handle, layer: Option<String>, delete_source: bool },
+    RegionFromProfile {
+        source: Handle,
+        layer: Option<String>,
+        delete_source: bool,
+    },
     /// Build a plane surface from one closed planar profile entity.
-    SurfaceFromProfile { source: Handle, layer: Option<String>, delete_source: bool },
+    SurfaceFromProfile {
+        source: Handle,
+        layer: Option<String>,
+        delete_source: bool,
+    },
     /// Extrude a planar profile along `direction`: a solid when the profile is
     /// closed, a surface when it is open.
-    Extrude { source: Handle, direction: [f64; 3], layer: Option<String>, delete_source: bool },
+    Extrude {
+        source: Handle,
+        direction: [f64; 3],
+        layer: Option<String>,
+        delete_source: bool,
+    },
     /// Combine two solids into a new one. Both operands are consumed unless
     /// `keep_operands`; the result goes on `layer` or the first operand's
     /// layer. The kernel refuses some cases (coincident faces, cuts it has no
@@ -280,7 +334,12 @@ pub enum SolidOperation {
     /// `origin`, `width` drawing units wide, keeping the picture's aspect.
     /// PNG, JPEG and BMP are stored as read; other formats are re-encoded as
     /// PNG. The frame goes on `layer` (layer `0` when `None`).
-    EmbedPicture { path: String, origin: [f64; 3], width: f64, layer: Option<String> },
+    EmbedPicture {
+        path: String,
+        origin: [f64; 3],
+        width: f64,
+        layer: Option<String>,
+    },
     Boolean {
         first: Handle,
         second: Handle,
@@ -302,21 +361,41 @@ pub enum HostSettingValue {
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub enum HostNotification {
-    InputLine { line: String },
+    InputLine {
+        line: String,
+    },
     Cancel,
-    DocumentChanged { version: u64 },
-    SelectionChanged { handles: Vec<Handle> },
+    DocumentChanged {
+        version: u64,
+    },
+    SelectionChanged {
+        handles: Vec<Handle>,
+    },
     Raw(Vec<u8>),
     /// V4 snapshot changed for a specific tab. Discriminant 5.
-    DocumentChangedV4 { tab_id: u64, version: u64 },
+    DocumentChangedV4 {
+        tab_id: u64,
+        version: u64,
+    },
     /// V4 tab closed notification. Discriminant 6.
-    DocumentTabClosed { tab_id: u64 },
+    DocumentTabClosed {
+        tab_id: u64,
+    },
     /// V4 selection changed for a specific tab. Discriminant 7.
-    SelectionChangedV4 { tab_id: u64, handles: Vec<Handle> },
+    SelectionChangedV4 {
+        tab_id: u64,
+        handles: Vec<Handle>,
+    },
     /// V7 active interactive-command state for a tab. Discriminant 8.
-    CommandStateChanged { tab_id: u64, command: Option<String> },
+    CommandStateChanged {
+        tab_id: u64,
+        command: Option<String>,
+    },
     /// V7 drawing epoch, broadcast even without an open shared view. Discriminant 9.
-    DrawingChanged { tab_id: u64, epoch: u64 },
+    DrawingChanged {
+        tab_id: u64,
+        epoch: u64,
+    },
     /// Fallback for notification variants added in future minor revisions.
     /// Carries the raw bincode payload so an older peer can ignore it without
     /// failing deserialization.
@@ -329,57 +408,44 @@ impl Serialize for HostNotification {
         match self {
             HostNotification::InputLine { line } => {
                 bytes.push(0);
-                bincode::serialize_into(&mut bytes, line)
-                    .map_err(serde::ser::Error::custom)?;
+                bincode::serialize_into(&mut bytes, line).map_err(serde::ser::Error::custom)?;
             }
             HostNotification::Cancel => bytes.push(1),
             HostNotification::DocumentChanged { version } => {
                 bytes.push(2);
-                bincode::serialize_into(&mut bytes, version)
-                    .map_err(serde::ser::Error::custom)?;
+                bincode::serialize_into(&mut bytes, version).map_err(serde::ser::Error::custom)?;
             }
             HostNotification::SelectionChanged { handles } => {
                 bytes.push(3);
-                bincode::serialize_into(&mut bytes, handles)
-                    .map_err(serde::ser::Error::custom)?;
+                bincode::serialize_into(&mut bytes, handles).map_err(serde::ser::Error::custom)?;
             }
             HostNotification::Raw(data) => {
                 bytes.push(4);
-                bincode::serialize_into(&mut bytes, data)
-                    .map_err(serde::ser::Error::custom)?;
+                bincode::serialize_into(&mut bytes, data).map_err(serde::ser::Error::custom)?;
             }
             HostNotification::DocumentChangedV4 { tab_id, version } => {
                 bytes.push(5);
-                bincode::serialize_into(&mut bytes, tab_id)
-                    .map_err(serde::ser::Error::custom)?;
-                bincode::serialize_into(&mut bytes, version)
-                    .map_err(serde::ser::Error::custom)?;
+                bincode::serialize_into(&mut bytes, tab_id).map_err(serde::ser::Error::custom)?;
+                bincode::serialize_into(&mut bytes, version).map_err(serde::ser::Error::custom)?;
             }
             HostNotification::DocumentTabClosed { tab_id } => {
                 bytes.push(6);
-                bincode::serialize_into(&mut bytes, tab_id)
-                    .map_err(serde::ser::Error::custom)?;
+                bincode::serialize_into(&mut bytes, tab_id).map_err(serde::ser::Error::custom)?;
             }
             HostNotification::SelectionChangedV4 { tab_id, handles } => {
                 bytes.push(7);
-                bincode::serialize_into(&mut bytes, tab_id)
-                    .map_err(serde::ser::Error::custom)?;
-                bincode::serialize_into(&mut bytes, handles)
-                    .map_err(serde::ser::Error::custom)?;
+                bincode::serialize_into(&mut bytes, tab_id).map_err(serde::ser::Error::custom)?;
+                bincode::serialize_into(&mut bytes, handles).map_err(serde::ser::Error::custom)?;
             }
             HostNotification::CommandStateChanged { tab_id, command } => {
                 bytes.push(8);
-                bincode::serialize_into(&mut bytes, tab_id)
-                    .map_err(serde::ser::Error::custom)?;
-                bincode::serialize_into(&mut bytes, command)
-                    .map_err(serde::ser::Error::custom)?;
+                bincode::serialize_into(&mut bytes, tab_id).map_err(serde::ser::Error::custom)?;
+                bincode::serialize_into(&mut bytes, command).map_err(serde::ser::Error::custom)?;
             }
             HostNotification::DrawingChanged { tab_id, epoch } => {
                 bytes.push(9);
-                bincode::serialize_into(&mut bytes, tab_id)
-                    .map_err(serde::ser::Error::custom)?;
-                bincode::serialize_into(&mut bytes, epoch)
-                    .map_err(serde::ser::Error::custom)?;
+                bincode::serialize_into(&mut bytes, tab_id).map_err(serde::ser::Error::custom)?;
+                bincode::serialize_into(&mut bytes, epoch).map_err(serde::ser::Error::custom)?;
             }
             HostNotification::Unknown(raw) => bytes.extend_from_slice(raw),
         }
@@ -434,14 +500,28 @@ impl<'de> Deserialize<'de> for HostNotification {
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub enum PluginNotification {
-    Output { text: String },
-    Error { text: String },
-    Prompt { text: String },
-    Progress { percent: u8 },
-    Log { level: LogLevel, text: String },
+    Output {
+        text: String,
+    },
+    Error {
+        text: String,
+    },
+    Prompt {
+        text: String,
+    },
+    Progress {
+        percent: u8,
+    },
+    Log {
+        level: LogLevel,
+        text: String,
+    },
     Raw(Vec<u8>),
     /// V4 REPL status update. Discriminant 6.
-    ReplStatus { status: String, message: String },
+    ReplStatus {
+        status: String,
+        message: String,
+    },
     /// Fallback for notification variants added in future minor revisions.
     /// Carries the raw bincode payload so an older peer can ignore it without
     /// failing deserialization.
@@ -454,42 +534,33 @@ impl Serialize for PluginNotification {
         match self {
             PluginNotification::Output { text } => {
                 bytes.push(0);
-                bincode::serialize_into(&mut bytes, text)
-                    .map_err(serde::ser::Error::custom)?;
+                bincode::serialize_into(&mut bytes, text).map_err(serde::ser::Error::custom)?;
             }
             PluginNotification::Error { text } => {
                 bytes.push(1);
-                bincode::serialize_into(&mut bytes, text)
-                    .map_err(serde::ser::Error::custom)?;
+                bincode::serialize_into(&mut bytes, text).map_err(serde::ser::Error::custom)?;
             }
             PluginNotification::Prompt { text } => {
                 bytes.push(2);
-                bincode::serialize_into(&mut bytes, text)
-                    .map_err(serde::ser::Error::custom)?;
+                bincode::serialize_into(&mut bytes, text).map_err(serde::ser::Error::custom)?;
             }
             PluginNotification::Progress { percent } => {
                 bytes.push(3);
-                bincode::serialize_into(&mut bytes, percent)
-                    .map_err(serde::ser::Error::custom)?;
+                bincode::serialize_into(&mut bytes, percent).map_err(serde::ser::Error::custom)?;
             }
             PluginNotification::Log { level, text } => {
                 bytes.push(4);
-                bincode::serialize_into(&mut bytes, level)
-                    .map_err(serde::ser::Error::custom)?;
-                bincode::serialize_into(&mut bytes, text)
-                    .map_err(serde::ser::Error::custom)?;
+                bincode::serialize_into(&mut bytes, level).map_err(serde::ser::Error::custom)?;
+                bincode::serialize_into(&mut bytes, text).map_err(serde::ser::Error::custom)?;
             }
             PluginNotification::Raw(data) => {
                 bytes.push(5);
-                bincode::serialize_into(&mut bytes, data)
-                    .map_err(serde::ser::Error::custom)?;
+                bincode::serialize_into(&mut bytes, data).map_err(serde::ser::Error::custom)?;
             }
             PluginNotification::ReplStatus { status, message } => {
                 bytes.push(6);
-                bincode::serialize_into(&mut bytes, status)
-                    .map_err(serde::ser::Error::custom)?;
-                bincode::serialize_into(&mut bytes, message)
-                    .map_err(serde::ser::Error::custom)?;
+                bincode::serialize_into(&mut bytes, status).map_err(serde::ser::Error::custom)?;
+                bincode::serialize_into(&mut bytes, message).map_err(serde::ser::Error::custom)?;
             }
             PluginNotification::Unknown(raw) => bytes.extend_from_slice(raw),
         }
@@ -519,8 +590,8 @@ impl<'de> Deserialize<'de> for PluginNotification {
                 .map(|percent| PluginNotification::Progress { percent })
                 .map_err(serde::de::Error::custom),
             4 => {
-                let (level, text): (LogLevel, String) = bincode::deserialize(rest)
-                    .map_err(serde::de::Error::custom)?;
+                let (level, text): (LogLevel, String) =
+                    bincode::deserialize(rest).map_err(serde::de::Error::custom)?;
                 Ok(PluginNotification::Log { level, text })
             }
             5 => bincode::deserialize(rest)
@@ -641,7 +712,10 @@ pub enum PreviewWire {
 impl PreviewWire {
     /// Create a polyline preview wire with default host cyan color.
     pub fn new(points: Vec<[f64; 3]>) -> Self {
-        Self::Polyline { points, color: None }
+        Self::Polyline {
+            points,
+            color: None,
+        }
     }
 
     /// Optional RGBA color (0.0 to 1.0) specified for this preview wire.
@@ -833,11 +907,12 @@ pub trait HostApi {
     fn plugin_state_any(&self, plugin_id: &str) -> Option<&(dyn Any + Send + Sync)>;
     fn plugin_state_any_mut(&mut self, plugin_id: &str) -> Option<&mut (dyn Any + Send + Sync)>;
     /// Get the state for `plugin_id`, inserting `init()`'s result if absent.
+    /// Returns `None` when this host cannot store state (e.g. out-of-process).
     fn ensure_plugin_state_any(
         &mut self,
         plugin_id: &'static str,
         init: &mut dyn FnMut() -> Box<dyn Any + Send + Sync>,
-    ) -> &mut (dyn Any + Send + Sync);
+    ) -> Option<&mut (dyn Any + Send + Sync)>;
 
     // ── DocumentReader (added in API v3; appended at the end to keep vtable
     // indices stable for API v2 plugins) ─────────────────────────────────────
@@ -868,9 +943,7 @@ pub trait HostApi {
     /// Returns the optional `command_id` used to correlate the notification
     /// with a running command, and the notification payload. Long-running
     /// plugins should call this periodically to drain the bounded queue.
-    fn try_recv_notification(
-        &mut self,
-    ) -> Option<(Option<u64>, HostNotification)> {
+    fn try_recv_notification(&mut self) -> Option<(Option<u64>, HostNotification)> {
         None
     }
 
@@ -948,7 +1021,9 @@ pub trait HostApi {
     }
 
     /// Current ordered selection in this session's tab (API v7).
-    fn selection(&self) -> Vec<Handle> { Vec::new() }
+    fn selection(&self) -> Vec<Handle> {
+        Vec::new()
+    }
 
     /// Replace this tab's selection with exactly these handles, in order.
     /// Missing or duplicate handles reject the request (API v7).
@@ -1159,17 +1234,20 @@ pub fn plugin_state_mut<'a, T: Any + Send + Sync>(
 }
 
 /// Typed get-or-insert of per-tab plugin state stored under `plugin_id`.
+///
+/// Returns `None` when this host cannot hold state (out-of-process plugins)
+/// or when existing state under `plugin_id` has a different type.
 pub fn ensure_plugin_state<'a, T: Any + Send + Sync>(
     host: &'a mut dyn HostApi,
     plugin_id: &'static str,
     init: impl FnOnce() -> T,
-) -> &'a mut T {
+) -> Option<&'a mut T> {
     let mut init = Some(init);
-    let any = host.ensure_plugin_state_any(plugin_id, &mut || {
-        Box::new((init.take().expect("init called once"))())
+    let any = host.ensure_plugin_state_any(plugin_id, &mut || match init.take() {
+        Some(make) => Box::new(make()),
+        None => Box::new(()),
     });
-    any.downcast_mut::<T>()
-        .expect("plugin state type mismatch for plugin_id")
+    any?.downcast_mut::<T>()
 }
 
 #[cfg(feature = "host")]

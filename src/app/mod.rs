@@ -11,24 +11,23 @@ pub(crate) mod config;
 pub use automation::{export_headless, serve};
 mod annotation_data;
 mod command_driver;
+pub(crate) use command_driver::{copy_to_clipboard_kernel, paste_entities_kernel, PasteSpace};
 pub(crate) mod commands;
 pub(crate) mod dim_viewport;
-#[cfg(test)]
-mod viewport_dimension_tests;
 #[cfg(test)]
 mod dimension_preview_tests;
 mod document;
 mod drafting_settings;
 pub(crate) mod expr_eval;
-mod options_session;
 mod find_replace;
 pub(crate) mod helpers;
 mod history;
 mod layers;
 mod model_ops;
+mod mtext_editor;
 mod navigation;
 mod node_graph;
-mod mtext_editor;
+mod options_session;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod plugin_host;
 mod presspull_ops;
@@ -43,6 +42,8 @@ mod text_inline;
 mod tolerance_dialog;
 mod update;
 mod view;
+#[cfg(test)]
+mod viewport_dimension_tests;
 mod visibility;
 
 pub use style_ops::StyleKind;
@@ -472,10 +473,6 @@ pub(super) struct OpenCADStudio {
     discussions: Vec<crate::discussions::DiscussionEntry>,
     /// True while the boot-time Discussions refresh is still in flight.
     discussions_loading: bool,
-    /// Block references whose properties panel shows per-axis Scale X/Y/Z even
-    /// though the three factors are currently equal — the user unchecked the
-    /// "Uniform scale" box for them (#427). Keyed by entity handle.
-    props_asym_scale: std::collections::HashSet<u64>,
     /// Collapsed Properties-panel section titles. This belongs to the app,
     /// rather than an individual document tab, so the same view preference is
     /// used by every currently open drawing/project.
@@ -563,6 +560,14 @@ pub(super) struct OpenCADStudio {
     block_definition: Option<crate::ui::window::block_definition::BlockDefinitionState>,
     /// PDF dialogs' working copies; `None` while closed.
     pdf_attach: Option<crate::ui::window::pdf_dialogs::PdfAttachState>,
+    point_cloud_attach: Option<crate::ui::window::pdf_dialogs::PointCloudAttachState>,
+    /// ATTDEF dialog and Edit Attribute Definition dialog; `None` while closed.
+    attdef_dialog: Option<crate::ui::window::attdef_dialog::AttdefDialogState>,
+    attdef_edit: Option<crate::ui::window::attdef_dialog::AttdefEditState>,
+    /// Field dialog working copy; `None` while closed.
+    field_dialog: Option<crate::ui::window::field_dialog::FieldDialogState>,
+    point_cloud_color_map: Option<crate::ui::window::pdf_dialogs::PointCloudColorMapState>,
+    pc_section: Option<crate::ui::window::pdf_dialogs::PcSectionState>,
     underlay_layers: Option<crate::ui::window::pdf_dialogs::UnderlayLayersState>,
     pdf_import_settings: Option<crate::modules::insert::pdf_import::PdfImportSettings>,
     pdf_import_file: Option<crate::ui::window::pdf_dialogs::PdfImportFileState>,
@@ -617,8 +622,19 @@ pub(super) struct OpenCADStudio {
     polar_increment_deg: f32,
     /// Reverse the mouse-wheel zoom direction when true (ZOOMWHEEL = 1).
     zoom_wheel_reversed: bool,
-    /// Mouse-wheel zoom sensitivity, clamped to 3..=100 (ZOOMFACTOR).
+    /// Scroll pans and Ctrl+scroll zooms (touchpads); see `scroll_intent`.
+    touchpad_pan: bool,
+    /// Interface scale in percent, applied through the window scale factor.
+    ui_scale_percent: u16,
+    /// Mouse-wheel zoom sensitivity (ZOOMFACTOR), held inside
+    /// `settings::ZOOM_FACTOR_MIN..=settings::ZOOM_FACTOR_MAX`. `SETVAR`
+    /// only sets the range the system variable itself has; the Options
+    /// window reaches the rest.
     zoom_factor: i32,
+    /// The Options field behind `zoom_factor`. A text field is edited as
+    /// text — cleared, half-typed — so the buffer is what the user sees and
+    /// the value follows only once it parses.
+    zoom_factor_input: String,
     /// Crosshair size setting (CURSORSIZE, 1..=100).
     cursor_size: i32,
     /// Selection-box size setting (PICKBOX, 0..=50).
@@ -641,6 +657,14 @@ pub(super) struct OpenCADStudio {
     crosshair_color: Option<[u8; 3]>,
     /// Editable Options buffer for the crosshair colour.
     crosshair_color_input: String,
+    /// Explicit object-snap marker colour; `None` keeps the automatic one.
+    snap_marker_color: Option<[u8; 3]>,
+    /// Explicit command-line text colour; `None` keeps the theme's.
+    command_text_color: Option<[u8; 3]>,
+    /// Editable Options buffer for the command-line text colour.
+    command_text_color_input: String,
+    /// Editable Options buffer for the snap marker colour.
+    snap_marker_color_input: String,
     /// Defer the ISOLINES mesh rebuild until the slider is released.
     isolines_awaiting_regen: bool,
     /// Edit buffer for the SNAPANG field on the Options Drafting page. Kept
@@ -666,8 +690,14 @@ pub(super) struct OpenCADStudio {
     pub grid_beyond_limits: bool,
     /// Dynamic input overlay (F12): show coordinate tooltip near cursor.
     dyn_input: bool,
+    /// Dynamic input mode (DYNMODE): 0=off, 1=pointer, 2=dimensional, 3=both.
+    dyn_mode: i16,
     /// Currently visible page in the application Options dialog.
     options_tab: crate::ui::window::options::OptionsTab,
+    /// Saved graphics options (backend, compat renderer); read at launch, so
+    /// edits here only take effect after a restart.
+    #[cfg(not(target_arch = "wasm32"))]
+    graphics_prefs: crate::gpu_backend::GraphicsPrefs,
     /// The Options window's commit point (see `options_session`).
     options_saved: Option<options_session::OptionsSnapshot>,
     /// Close was pressed with unapplied changes; the discard guard is up.
@@ -734,6 +764,14 @@ pub(super) struct OpenCADStudio {
     block_mru: Vec<String>,
     /// Insertion frequency per block name (uppercase key → count), capped.
     block_freq: std::collections::HashMap<String, u32>,
+    /// BLOCKMRULIST: how many recent blocks the palette keeps (0–100).
+    pub(crate) block_mru_list: u8,
+    /// BLOCKREDEFINEMODE (0–2).
+    pub(crate) block_redefine_mode: u8,
+    /// BLOCKNAVIGATE: the Libraries tab's start folder ("." for none).
+    pub(crate) block_navigate: String,
+    /// INSNAME: the default block name for -INSERT (session only).
+    pub(crate) insname: String,
     /// Last time block-usage was flushed to disk (debounce per 2.4).
     #[cfg(not(target_arch = "wasm32"))]
     block_usage_last_persist: Option<std::time::Instant>,
@@ -857,6 +895,16 @@ pub(super) struct OpenCADStudio {
     /// Whether the Browser panel is shown. Off until BROWSER opens it, so
     /// the default layout is unchanged for existing users.
     pub(crate) show_browser: bool,
+    /// Point Cloud Manager palette (POINTCLOUDMANAGER).
+    pub(crate) pc_manager: crate::ui::window::pc_manager::PcManager,
+    pub(crate) count_palette: crate::ui::window::count_palette::CountPalette,
+    /// Sheet Set Manager palette, the open sheet sets and their dialogs.
+    pub(crate) sheet_set: crate::ui::window::sheet_set::SheetSetManager,
+    /// A sheet opened from the manager: its drawing (path key) and layout,
+    /// switched to once the drawing has loaded.
+    pub(crate) sheet_set_pending_layout: Option<(String, String)>,
+    /// The subset / set Import Layout as Sheet adds to, while its file picker is open.
+    pub(crate) sheet_set_import_parent: Option<String>,
     /// Which viewport background the colour wheel is editing, or `None` when
     /// it is closed. One slot, because only one wheel can be open at a time.
     pub(crate) bg_picker: Option<BgTarget>,
@@ -1051,6 +1099,8 @@ pub(super) struct OpenCADStudio {
     check_missing_fonts: bool,
     /// Custom font source base URL; empty selects the community repository.
     font_source_url: String,
+    /// Template a new drawing starts from (QNEW); empty = blank.
+    qnew_template: String,
     /// Editable copy of `font_source_url` shown in the missing-fonts prompt.
     font_source_input: String,
     donation_prompt_version: String,
@@ -1122,6 +1172,14 @@ pub(super) struct OpenCADStudio {
     /// Snapshot of the dialog's settings taken when it opened, restored by the
     /// `<previous>` list entry.
     plot_prev: Option<crate::ui::window::plot::PlotDialogState>,
+    /// Tab/layout that last owned the Plot dialog. Reopening Plot in the same
+    /// context keeps the user's last paper, scale, CTB and output choices
+    /// instead of reapplying the layout page setup over them.
+    plot_prev_context: Option<(usize, String)>,
+    /// Printer whose capability reply is allowed to reconcile the current
+    /// sheet. Set only after an explicit printer/page-setup choice; merely
+    /// opening Plot must never replace the drawing's stored paper size.
+    plot_reconcile_printer_media: Option<String>,
     /// Full source settings behind the fields currently shown in Plot.
     plot_setup_template: Option<codec::objects::PlotSettings>,
     /// Paper layouts shown by Print All, in tab order with their selection.
@@ -1360,6 +1418,7 @@ pub(super) struct OpenCADStudio {
     /// drawings in a file manager produces exactly that (one process per file,
     /// all arriving at once), which makes this queue load-bearing, not polish.
     pub(super) pending_opens: std::collections::VecDeque<PathBuf>,
+    pub(super) pending_startup_script_lines: Vec<String>,
     /// One global interaction-index build at a time. Large drawings can each
     /// hold millions of entries, so file-open bursts must not multiply peak
     /// CPU and memory by the number of tabs.
@@ -1503,8 +1562,10 @@ pub(super) struct OpenCADStudio {
 /// What triggered the "unsaved changes" dialog.
 #[derive(Debug, Clone)]
 pub(super) enum PendingClose {
-    /// User tried to close the tab at this index.
-    Tab(usize),
+    /// User tried to close the tab with this document id. Ids stay valid
+    /// while the dialog is open; a vector index would go stale the moment
+    /// another tab closes and Discard would remove the wrong tab.
+    Tab(u64),
     /// User tried to quit the application.
     Quit,
 }
@@ -1618,8 +1679,8 @@ pub enum ColorPickTarget {
     PropertiesField(String),
     /// Current creation colour (ribbon).
     Ribbon,
-    /// A layer's colour, by panel row index.
-    Layer(usize),
+    /// A layer's colour, by layer name.
+    Layer(String),
     /// A saved layer-state layer's colour, by editor row index.
     LayerState(usize),
     /// The MText editor's selection (or global) colour.
@@ -1745,8 +1806,7 @@ impl ClipboardDeps {
                 if !objects.is_empty() {
                     let mut annotation_scales = Vec::new();
                     for (_, object) in &objects {
-                        let codec::objects::ObjectType::ObjectContextData(context) = object
-                        else {
+                        let codec::objects::ObjectType::ObjectContextData(context) = object else {
                             continue;
                         };
                         if annotation_scales
@@ -1877,10 +1937,7 @@ impl ClipboardDeps {
     /// Snapshot every block definition the `entities` reference through an
     /// INSERT, walking nested INSERTs transitively. Model/paper space and
     /// xref blocks are skipped — those aren't portable definitions.
-    fn capture_blocks(
-        doc: &codec::CadDocument,
-        entities: &[codec::EntityType],
-    ) -> Vec<BlockDef> {
+    fn capture_blocks(doc: &codec::CadDocument, entities: &[codec::EntityType]) -> Vec<BlockDef> {
         use codec::EntityType;
         use rustc_hash::FxHashSet;
         let mut seen: FxHashSet<String> = FxHashSet::default();
@@ -1966,12 +2023,19 @@ pub enum ModalKind {
     DrawingUnits,
     BlockDefinition,
     PdfAttach,
+    PointCloudAttach,
+    PointCloudColorMap,
+    PcSection,
     UnderlayLayers,
     PdfImportSettings,
     PdfImportFile,
     XrefAttach,
     WriteBlock,
     GeometricTolerance,
+    AttDef,
+    AttDefEdit,
+    CountInvalidArea,
+    Field,
     DraftingSettings,
     AutoConstrainSettings,
     LayerStateEditor,
@@ -2019,6 +2083,8 @@ pub enum ModalKind {
     GpuWarning,
     /// Reference Manager help window (toolbar Help button).
     XrefHelp,
+    /// Sheet set wizard, properties and sheet / subset forms.
+    SheetSet,
 }
 
 /// A property group controlled by a layer state's restore mask.
@@ -2291,6 +2357,15 @@ pub enum Message {
     OptionsOpen,
     /// Switch the visible page in Options.
     OptionsTabChanged(crate::ui::window::options::OptionsTab),
+    /// Options > Graphics: pin a backend (applies at next launch).
+    #[cfg(not(target_arch = "wasm32"))]
+    GraphicsBackendChanged(crate::gpu_backend::BackendChoice),
+    /// Options > Graphics: force the packed compatibility renderer.
+    #[cfg(not(target_arch = "wasm32"))]
+    GraphicsCompatToggled(bool),
+    /// Options > Graphics: prefer OpenGL on older GPUs.
+    #[cfg(not(target_arch = "wasm32"))]
+    GraphicsLegacyGlToggled(bool),
     /// Set CURSORSIZE from the Display-page slider.
     CursorSizeChanged(i32),
     /// Set PICKBOX from the Selection-page slider.
@@ -2305,6 +2380,13 @@ pub enum Message {
     LineweightDisplayScaleChanged(i32),
     /// Edit the optional crosshair RGB value; blank restores automatic contrast.
     CrosshairColorChanged(String),
+    SnapMarkerColorChanged(String),
+    CommandTextColorChanged(String),
+    /// Options → Files: the default template for new drawings.
+    QnewTemplateChanged(String),
+    QnewTemplateBrowse,
+    /// NEW: the picked template a new drawing starts from (`None` = cancelled).
+    NewFromTemplate(Option<std::path::PathBuf>),
     /// Set the default type/version used when first saving a new drawing.
     DefaultSaveFormatChanged(String),
     /// Select one of Iced's built-in themes or the editable Custom theme.
@@ -2374,8 +2456,16 @@ pub enum Message {
     CommandLineFadeChanged(i32),
     /// Toggle reversing the mouse-wheel zoom direction (ZOOMWHEEL).
     ZoomWheelReversedChanged(bool),
-    /// Change how far one wheel notch zooms (ZOOMFACTOR, 3..=100).
+    TouchpadPanChanged(bool),
+    /// Interface scale in percent (Options > Display).
+    UiScaleChanged(u16),
+    /// Change how far one wheel notch zooms, from the Options slider
+    /// (ZOOMFACTOR).
     ZoomFactorChanged(i32),
+    /// Edit the Options zoom-factor field; committed when it holds a number,
+    /// which is how a value above the system variable's own range is set
+    /// (ZOOMFACTOR).
+    ZoomFactorInputChanged(String),
     /// Options → User Preferences: right-click behaviour (SHORTCUTMENU).
     RightClickModeChanged(settings::RightClickMode),
     /// Options → User Preferences: time-sensitive hold threshold, ms.
@@ -2493,8 +2583,12 @@ pub enum Message {
         to: usize,
         after: bool,
     },
-    /// Close the given tab index.
-    TabClose(usize),
+    /// Close the tab with this document id. Carries the stable id, not a
+    /// vector index: iced dispatches every message built from one view
+    /// snapshot before rebuilding it, so an index captured alongside other
+    /// messages can already be stale (and point at a different tab) by the
+    /// time it is handled.
+    TabClose(u64),
     /// Save every drawing that already has a file path.
     DocTabSaveAll,
     /// Close every non-Start drawing tab.
@@ -2585,8 +2679,11 @@ pub enum Message {
     /// Pop the trailing character off the command-line input — backspace
     /// counterpart to `CommandAppendChar`.
     CommandBackspace,
-    /// TAB pressed: move focus to the next dynamic-input field (wraps).
+    /// TAB pressed: move focus to the next dynamic-input field or
+    /// autocomplete suggestion.
     DynTabNext,
+    /// Shift+TAB: move to the previous contextual autocomplete suggestion.
+    DynTabPrev,
     /// Split the active Model viewport in two. `true` → horizontal divider
     /// (top / bottom); `false` → vertical divider (left / right).
     SplitModelViewport(bool),
@@ -2657,11 +2754,11 @@ pub enum Message {
     ToggleXrefManager,
     /// Rescan the active drawing's references into the palette.
     XrefManagerRefresh,
-    /// Toggle one palette row (entry index) in the multi-selection set.
-    XrefManagerSelect(usize),
+    /// Toggle one palette row (stable row id) in the multi-selection set.
+    XrefManagerSelect(crate::ui::window::xref_manager::XrefRowId),
     /// Right-click on a palette row: single-select it when outside the
     /// selection (the context menu then acts on the selection).
-    XrefRowRightClick(usize),
+    XrefRowRightClick(crate::ui::window::xref_manager::XrefRowId),
     /// Flip the palette's list/tree presentation.
     XrefManagerToggleTree,
     /// Start a reference-table column divider drag (column index).
@@ -2698,40 +2795,43 @@ pub enum Message {
     XrefManagerToggleExpand(u64),
     /// Selection-scoped palette operation (detach/unload/reload/overlay/pathtype).
     XrefManagerOp(crate::ui::window::xref_manager::XrefPaletteOp),
-    /// Row-scoped palette operation: selects row `index`, then applies the
-    /// operation to it.
-    XrefRowOp(usize, crate::ui::window::xref_manager::XrefPaletteOp),
+    /// Row-scoped palette operation: selects the row by stable id, then
+    /// applies the operation to it.
+    XrefRowOp(
+        crate::ui::window::xref_manager::XrefRowId,
+        crate::ui::window::xref_manager::XrefPaletteOp,
+    ),
     /// Prefill the command line for Find & Replace across references
     /// (`XREF Path Find <old> <new>`); the CLI parses and runs it.
     XrefFindReplacePrompt,
-    /// Pick a new path for a specific row index.
-    XrefRowPathPick(usize),
-    /// Prefill the command line for Find & Replace for a specific row index.
-    XrefRowFindReplacePrompt(usize),
+    /// Pick a new path for a specific row (stable id).
+    XrefRowPathPick(crate::ui::window::xref_manager::XrefRowId),
+    /// Prefill the command line for Find & Replace for a specific row id.
+    XrefRowFindReplacePrompt(crate::ui::window::xref_manager::XrefRowId),
     XrefRowChangePathEnter,
     XrefRowChangePathLeave,
-    LayerToggleVisible(usize),
-    LayerToggleLock(usize),
-    LayerToggleFreeze(usize),
-    LayerTogglePlot(usize),
+    LayerToggleVisible(String),
+    LayerToggleLock(String),
+    LayerToggleFreeze(String),
+    LayerTogglePlot(String),
     /// Sort the Layer Manager table by a clicked column header.
     LayerSort(crate::ui::window::layers::LayerSortCol),
-    /// Toggle per-viewport freeze: (layer_index, vp_col_index)
-    LayerToggleVpFreeze(usize, usize),
+    /// Toggle per-viewport freeze: (layer_name, vp_col_index)
+    LayerToggleVpFreeze(String, usize),
     LayerNew,
     LayerDelete,
     /// Confirm deleting a non-empty layer (erases its objects too).
     LayerDeleteConfirm,
     LayerSetCurrent,
-    LayerSelect(usize),
-    LayerRenameStart(usize),
+    LayerSelect(String),
+    LayerRenameStart(String),
     LayerRenameEdit(String),
-    LayerColorPickerToggle(usize),
+    LayerColorPickerToggle(String),
     LayerColorMorePalette,
     LayerColorSet(codec::types::Color),
     LayerLinetypeSet(String),
     LayerLineweightSet(LineWeight),
-    LayerTransparencyEdit(usize, String),
+    LayerTransparencyEdit(String, String),
     LayerRenameCommit,
     // ── Layer State Manager ─────────────────────────────────────────────
     LayerStateManagerOpen,
@@ -3653,6 +3753,15 @@ pub enum Message {
     /// Completion of a PDF/preview/print job performed outside the UI thread.
     /// The boolean restores the Plot dialog after a preview.
     BackgroundIoFinished(Result<String, String>, bool),
+    /// A background worker thread panicked or stopped without reporting a
+    /// result. Surfaced on the command line instead of taking the whole
+    /// process down with it.
+    BackgroundTaskFailed {
+        /// Which operation the worker was running (e.g. "STL export").
+        context: String,
+        /// Panic message (or channel-failure description) from the worker.
+        detail: String,
+    },
     /// Send current layout to the system printer (via lp / lpr).
     PrintToPrinter,
     /// Callback from the async printer job.
@@ -3686,6 +3795,8 @@ pub enum Message {
     // ── Plot Style Table ─────────────────────────────────────────────────
     /// Open file dialog to load a CTB/STB plot style table.
     PlotStyleLoad,
+    /// LINETYPE Load: the picked `.lin` file's text, `None` when cancelled.
+    LinetypeLoaded(Option<String>),
     /// Callback when the user picks (or cancels) a CTB/STB file.
     /// The Load… picker finished: a table, nothing (cancelled), or why the
     /// file could not be read.
@@ -3927,6 +4038,12 @@ pub enum Message {
     PdfImportPick,
     /// An edit in one of the PDF dialogs.
     PdfDialog(crate::ui::window::pdf_dialogs::PdfDialogMsg),
+    AttdefDialog(crate::ui::window::attdef_dialog::AttdefDialogMsg),
+    FieldDialog(crate::ui::window::field_dialog::FieldDialogMsg),
+    /// A click or search in the Point Cloud Manager.
+    PcManager(crate::ui::window::pc_manager::PcManagerMsg),
+    Count(crate::ui::window::count_palette::CountMsg),
+    SheetSet(crate::ui::window::sheet_set::SheetSetMsg),
     PdfImportPickResult(Result<(std::path::PathBuf, std::sync::Arc<Vec<u8>>), String>),
     /// Result of the PDFATTACH file picker.
     PdfAttachPickResult(Result<(std::path::PathBuf, std::sync::Arc<Vec<u8>>), String>),
@@ -3938,6 +4055,11 @@ pub enum Message {
     XAttachPickResult(Result<std::path::PathBuf, String>),
     /// ATTACH: pick a drawing, image or PDF to reference.
     AttachPick,
+    /// DWFATTACH / DGNATTACH: pick the file (the result goes the ATTACH way).
+    UnderlayAttachPick(codec::entities::UnderlayType),
+    /// POINTCLOUDATTACH: pick the scan or project (the result goes the
+    /// ATTACH way).
+    PointCloudAttachPick,
     /// The Reference slide-out's xref fading: amount dragged, drag done,
     /// switch.
     XrefFadeSlide(u8),
@@ -4076,7 +4198,6 @@ impl OpenCADStudio {
             videos_loading: false,
             discussions: Vec::new(),
             discussions_loading: false,
-            props_asym_scale: std::collections::HashSet::new(),
             collapsed_property_sections: rustc_hash::FxHashSet::default(),
             start_section: StartSection::default(),
             start_action_w: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
@@ -4122,6 +4243,12 @@ impl OpenCADStudio {
             drawing_units: None,
             block_definition: None,
             pdf_attach: None,
+            point_cloud_attach: None,
+            attdef_dialog: None,
+            attdef_edit: None,
+            field_dialog: None,
+            point_cloud_color_map: None,
+            pc_section: None,
             underlay_layers: None,
             pdf_import_settings: None,
             pdf_import_file: None,
@@ -4139,7 +4266,10 @@ impl OpenCADStudio {
             polar_mode: false,
             polar_increment_deg: 45.0,
             zoom_wheel_reversed: false,
+            touchpad_pan: false,
+            ui_scale_percent: 100,
             zoom_factor: 60,
+            zoom_factor_input: 60.to_string(),
             cursor_size: 5,
             pick_box: 3,
             double_click_block_refedit: false,
@@ -4151,6 +4281,10 @@ impl OpenCADStudio {
             cursor_type: settings::CursorType::Crosshair,
             crosshair_color: None,
             crosshair_color_input: String::new(),
+            snap_marker_color: None,
+            snap_marker_color_input: String::new(),
+            command_text_color: None,
+            command_text_color_input: String::new(),
             isolines_awaiting_regen: false,
             snap_angle_input: "0".to_string(),
             lineweight_display_scale: 100,
@@ -4164,7 +4298,10 @@ impl OpenCADStudio {
             grid_adaptive: true,
             grid_beyond_limits: true,
             dyn_input: true,
+            dyn_mode: 3,
             options_tab: crate::ui::window::options::OptionsTab::General,
+            #[cfg(not(target_arch = "wasm32"))]
+            graphics_prefs: crate::gpu_backend::load_prefs(),
             options_saved: None,
             options_close_confirm: false,
             spacemouse: {
@@ -4205,6 +4342,10 @@ impl OpenCADStudio {
             commandline_fade_ms: 3000,
             block_mru: Vec::new(),
             block_freq: std::collections::HashMap::new(),
+            block_mru_list: 50,
+            block_redefine_mode: 1,
+            block_navigate: ".".to_string(),
+            insname: String::new(),
             #[cfg(not(target_arch = "wasm32"))]
             block_usage_last_persist: None,
             awaiting_vports: false,
@@ -4245,6 +4386,11 @@ impl OpenCADStudio {
             graph_undo_open: false,
             show_external_references: false,
             show_browser: false,
+            pc_manager: Default::default(),
+            count_palette: Default::default(),
+            sheet_set: Default::default(),
+            sheet_set_pending_layout: None,
+            sheet_set_import_parent: None,
             bg_picker: None,
             block_palette: Default::default(),
             xref_manager: Default::default(),
@@ -4326,6 +4472,7 @@ impl OpenCADStudio {
             default_assoc_prompted: false,
             check_missing_fonts: true,
             font_source_url: String::new(),
+            qnew_template: String::new(),
             font_source_input: String::new(),
             donation_prompt_version: String::new(),
             read_only: false,
@@ -4355,6 +4502,8 @@ impl OpenCADStudio {
             plot_orientation: crate::io::paper_catalog::Orientation::Landscape,
             plot_dialog: crate::ui::window::plot::PlotDialogState::default(),
             plot_prev: None,
+            plot_prev_context: None,
+            plot_reconcile_printer_media: None,
             plot_setup_template: None,
             print_all_layouts: Vec::new(),
             print_all_options: false,
@@ -4372,6 +4521,7 @@ impl OpenCADStudio {
             missing_fonts_downloading: false,
             suppressed_missing_fonts: rustc_hash::FxHashSet::default(),
             pending_opens: std::collections::VecDeque::new(),
+            pending_startup_script_lines: Vec::new(),
             active_interaction_index: None,
             queued_interaction_indices: std::collections::VecDeque::new(),
             pending_close: None,
@@ -4717,20 +4867,25 @@ impl OpenCADStudio {
             s.command_line.push_warning(&notice);
             crate::scene::pipeline::report_gpu_line(&format!("[gpu] {notice}"));
         }
-        let cli_open: Task<Message> = if !cfg.files.is_empty() {
+        let has_files = !cfg.files.is_empty();
+        let cli_open: Task<Message> = if has_files {
             Task::batch(
                 cfg.files
                     .into_iter()
                     .map(|p| Task::done(Message::OpenExternal(p))),
             )
-        } else if cfg.new {
+        } else if cfg.new || !cfg.script_lines.is_empty() {
             Task::done(Message::TabNew)
         } else {
             Task::none()
         };
-        // Startup command script: each line dispatched as if typed at the
-        // command line, in order, after any file open is requested.
+        // Startup command script: if files were passed to open, defer the
+        // script lines until the document finishes opening. Otherwise, dispatch
+        // them on the newly created drawing tab.
         let script: Task<Message> = if cfg.script_lines.is_empty() {
+            Task::none()
+        } else if has_files {
+            s.pending_startup_script_lines = cfg.script_lines;
             Task::none()
         } else {
             Task::batch(
@@ -4857,6 +5012,7 @@ pub fn run() -> iced::Result {
         ..iced::Settings::default()
     })
     .subscription(OpenCADStudio::subscription)
+    .scale_factor(|state: &OpenCADStudio, _| f32::from(state.ui_scale_percent) / 100.0)
     .title(|state: &OpenCADStudio, window_id: window::Id| {
         let _ = window_id; // all dialogs are in-canvas modals now
         if let Some(tab) = state.tabs.get(state.active_tab) {

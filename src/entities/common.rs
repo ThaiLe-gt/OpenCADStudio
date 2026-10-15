@@ -68,6 +68,10 @@ thread_local! {
     /// the same place.
     static FIXED_TEXT_HEIGHTS: std::cell::RefCell<rustc_hash::FxHashMap<String, f64>> =
         std::cell::RefCell::new(rustc_hash::FxHashMap::default());
+    /// Resolved font of every text style, for text measured without the
+    /// document at hand (justification changes, attribute placement).
+    static STYLE_FONTS: std::cell::RefCell<rustc_hash::FxHashMap<String, String>> =
+        std::cell::RefCell::new(rustc_hash::FxHashMap::default());
 }
 
 /// Record which text styles fix their height, from the drawing's style table.
@@ -81,6 +85,24 @@ pub fn set_fixed_text_heights(document: &codec::CadDocument) {
             }
         }
     });
+    STYLE_FONTS.with(|cell| {
+        let mut map = cell.borrow_mut();
+        map.clear();
+        for style in document.text_styles.iter() {
+            let font =
+                crate::entities::text_support::resolve_text_style(&style.name, document).font_name;
+            map.insert(style.name.to_ascii_lowercase(), font);
+        }
+    });
+}
+
+/// The resolved font of `style` (Standard when unnamed); empty when unknown.
+pub fn style_font(style: &str) -> String {
+    let key = match style.trim() {
+        "" => "standard".to_string(),
+        name => name.to_ascii_lowercase(),
+    };
+    STYLE_FONTS.with(|cell| cell.borrow().get(&key).cloned().unwrap_or_default())
 }
 
 /// The height `style` fixes, or `None` when it leaves the height to the entity.
@@ -122,7 +144,7 @@ pub fn without_negative_zero(text: String) -> String {
 
 fn format_signed_length(value: f64) -> String {
     let ctx = unit_context();
-    let prec = ctx.luprec.max(0) as usize;
+    let prec = ctx.luprec.max(0).min(15) as usize;
     match ctx.lunits {
         1 => format!("{:.*e}", prec, value),
         3 => {
@@ -196,7 +218,7 @@ pub fn format_angle(value_rad: f64) -> String {
 
 fn format_signed_angle(value_rad: f64) -> String {
     let ctx = unit_context();
-    let prec = ctx.auprec.max(0) as usize;
+    let prec = ctx.auprec.max(0).min(15) as usize;
     match ctx.aunits {
         1 => dms(value_rad.to_degrees(), prec),
         2 => {
@@ -673,11 +695,7 @@ pub fn num_prop(label: &str, field: &'static str, value: f64, editable: bool) ->
 
 /// A ◀ / ▶ index navigator row (e.g. a polyline's Current Vertex). `display` is
 /// the label shown between the arrows (e.g. "2 / 7").
-pub fn stepper_prop(
-    label: &str,
-    field: &'static str,
-    display: impl Into<String>,
-) -> Property {
+pub fn stepper_prop(label: &str, field: &'static str, display: impl Into<String>) -> Property {
     Property {
         label: label.into(),
         field,
@@ -730,9 +748,7 @@ fn parse_angle_deg_unbounded(value: &str) -> Option<f64> {
     let i = rest.find(['°', 'd', 'D'])?;
     let d: f64 = rest[..i].trim().parse().ok()?;
     let mut total = d;
-    let tail = rest[i..]
-        .trim_start_matches(['°', 'd', 'D'])
-        .trim();
+    let tail = rest[i..].trim_start_matches(['°', 'd', 'D']).trim();
     if !tail.is_empty() {
         let (mpart, spart) = match tail.find('\'') {
             Some(j) => (&tail[..j], &tail[j + 1..]),
@@ -930,25 +946,34 @@ pub(crate) fn tapered_band_points(
     let seg_count = if is_closed { n } else { n.saturating_sub(1) };
     let mut pts: Vec<[f64; 3]> = Vec::with_capacity(seg_count + 1);
     let mut widths: Vec<f32> = Vec::with_capacity(seg_count + 1);
-    let mut push = |x: f64, y: f64, w: f32| {
-        let (wx, wy, wz) = to_wcs(x, y);
-        pts.push([wx, wy, wz]);
+    let mut push = |xy: Option<(f64, f64)>, w: f32| {
+        // `None` is the NaN separator that breaks the band.
+        pts.push(xy.map_or([f64::NAN; 3], |(x, y)| to_wcs(x, y).into()));
         widths.push(w);
     };
+    let mut prev_end_width: Option<f64> = None;
     for i in 0..seg_count {
         let (p0, bulge, sw0, ew0) = verts[i];
         let (p1, _, _, _) = verts[(i + 1) % n];
-        if i == 0 {
-            push(p0[0], p0[1], sw0 as f32);
+        match prev_end_width {
+            None => push(Some((p0[0], p0[1])), sw0 as f32),
+            // A segment starting at another width than the last one ended
+            // steps there: break the band and restart it (#1628).
+            Some(prev) if (prev - sw0).abs() > 1e-9 => {
+                push(None, 0.0);
+                push(Some((p0[0], p0[1])), sw0 as f32);
+            }
+            Some(_) => {}
         }
+        prev_end_width = Some(ew0);
         if bulge.abs() < 1e-9 {
-            push(p1[0], p1[1], ew0 as f32);
+            push(Some((p1[0], p1[1])), ew0 as f32);
         } else if let Some(arc) = BulgeArc::from_bulge(p0, p1, bulge) {
             let samples = arc.tessellate_angle(kernel::tessellation::DEFAULT_ANGLE);
             let segments = samples.len().saturating_sub(1).max(1);
             for (index, s) in samples.into_iter().enumerate().skip(1) {
                 let t = index as f64 / segments as f64;
-                push(s[0], s[1], (sw0 + (ew0 - sw0) * t) as f32);
+                push(Some((s[0], s[1])), (sw0 + (ew0 - sw0) * t) as f32);
             }
         }
     }
@@ -1262,6 +1287,35 @@ mod length_format_tests {
                 );
             }
         }
+    }
+
+    /// LUPREC / AUPREC reach the formatters straight from the header, where
+    /// `SETVAR` or a carried file can hold any `i16`. `format_area` already
+    /// caps itself at 15; `format_length` and `format_angle` printed the raw
+    /// count on every call, so precision 30_000 bloated each formatted value
+    /// to ~30 KB on the properties hot path.
+    #[test]
+    fn huge_precision_cannot_bloat_formatting_output() {
+        let original = unit_context();
+        let length = with_units(2, 30_000, 12.3456);
+        let mut ctx = unit_context();
+        ctx.aunits = 0;
+        ctx.auprec = 30_000;
+        set_unit_context(ctx);
+        let angle = format_angle(1.0);
+        let area = format_area(12.3456);
+        set_unit_context(original);
+        assert!(
+            length.len() < 64,
+            "format_length produced {} chars",
+            length.len()
+        );
+        assert!(
+            angle.len() < 64,
+            "format_angle produced {} chars",
+            angle.len()
+        );
+        assert!(area.len() < 64, "format_area produced {} chars", area.len());
     }
 }
 

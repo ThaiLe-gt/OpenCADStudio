@@ -6,7 +6,6 @@ pub mod defaults;
 mod donate;
 pub mod draw;
 pub mod fence;
-pub mod units;
 pub mod groups;
 pub mod inquiry;
 pub mod layers;
@@ -14,6 +13,7 @@ pub mod modify;
 pub mod properties;
 mod report;
 pub mod select;
+pub mod units;
 
 use crate::modules::{CadModule, RibbonGroup, RibbonItem};
 
@@ -31,7 +31,7 @@ impl CadModule for DrawModule {
         use crate::modules::annotate::{
             angular_dim, leader_cmd, linear_dim, mleader_cmd, mtext, radius_dim, text,
         };
-        use crate::modules::insert::{create_block, insert_block};
+        use crate::modules::insert::{attedit, create_block, edit_block, insert_block};
         use clipboard::{copy_clip, cut, paste};
         use draw::{arc, circle, ellipse, hatch, line, polyline, shapes};
         use groups::{group, ungroup};
@@ -200,9 +200,13 @@ impl CadModule for DrawModule {
                 },
                 RibbonGroup {
                     title: "Block",
+                    // Slide-out: Define / Manage / Synchronize Attributes and
+                    // Set Base Point.
                     tools: vec![
-                        RibbonItem::LargeTool(create_block::tool()),
-                        RibbonItem::LargeTool(insert_block::tool()),
+                        insert_block::gallery(),
+                        RibbonItem::Tool(create_block::tool()),
+                        RibbonItem::Tool(edit_block::tool()),
+                        RibbonItem::Tool(attedit::tool()),
                     ],
                 },
                 RibbonGroup {

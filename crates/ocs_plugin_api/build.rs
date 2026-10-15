@@ -68,10 +68,7 @@ fn generate_type_registry(out_dir: &Path) {
     let types: Vec<(&str, TraceFn)> = vec![
         ("EntityType", trace::<codec::EntityType>),
         ("ObjectType", trace::<codec::objects::ObjectType>),
-        (
-            "HeaderVariables",
-            trace::<codec::document::HeaderVariables>,
-        ),
+        ("HeaderVariables", trace::<codec::document::HeaderVariables>),
         ("SummaryInfo", trace::<codec::document::SummaryInfo>),
         ("LineType", trace::<codec::LineType>),
         ("TextStyle", trace::<codec::TextStyle>),
@@ -88,10 +85,7 @@ fn generate_type_registry(out_dir: &Path) {
             trace::<codec::objects::BlockVisibilityParameter>,
         ),
         ("FieldDef", trace::<codec::document::FieldDef>),
-        (
-            "DgnLsDefinition",
-            trace::<codec::objects::DgnLsDefinition>,
-        ),
+        ("DgnLsDefinition", trace::<codec::objects::DgnLsDefinition>),
         ("DgnLsComponent", trace::<codec::objects::DgnLsComponent>),
         (
             "NotificationCollection",
@@ -163,6 +157,10 @@ fn generate_type_registry(out_dir: &Path) {
             trace_simple::<codec::objects::AssocConstraintNodeData>,
         ),
         (
+            "AssocCurveValue",
+            trace_simple::<codec::objects::AssocCurveValue>,
+        ),
+        (
             "AssocEvalValue",
             trace_simple::<codec::objects::AssocEvalValue>,
         ),
@@ -178,10 +176,7 @@ fn generate_type_registry(out_dir: &Path) {
             "AssocViewObjectActionParamKind",
             trace_simple::<codec::objects::AssocViewObjectActionParamKind>,
         ),
-        (
-            "AcisVersion",
-            trace_simple::<codec::entities::AcisVersion>,
-        ),
+        ("AcisVersion", trace_simple::<codec::entities::AcisVersion>),
         (
             "AssociativeData",
             trace_simple::<codec::objects::AssociativeData>,
@@ -361,10 +356,7 @@ fn generate_type_registry(out_dir: &Path) {
             "PlotPaperUnits",
             trace_simple::<codec::objects::PlotPaperUnits>,
         ),
-        (
-            "PlotRotation",
-            trace_simple::<codec::objects::PlotRotation>,
-        ),
+        ("PlotRotation", trace_simple::<codec::objects::PlotRotation>),
         ("PlotType", trace_simple::<codec::objects::PlotType>),
         (
             "PreviewFormat",
@@ -399,14 +391,8 @@ fn generate_type_registry(out_dir: &Path) {
             "SolidHistoryOperation",
             trace_simple::<codec::objects::SolidHistoryOperation>,
         ),
-        (
-            "SurfaceData",
-            trace_simple::<codec::entities::SurfaceData>,
-        ),
-        (
-            "SurfaceKind",
-            trace_simple::<codec::entities::SurfaceKind>,
-        ),
+        ("SurfaceData", trace_simple::<codec::entities::SurfaceData>),
+        ("SurfaceKind", trace_simple::<codec::entities::SurfaceKind>),
         (
             "SurfaceSmoothType",
             trace_simple::<codec::entities::SurfaceSmoothType>,
@@ -521,7 +507,7 @@ fn generate_entity_coverage(out_dir: &Path, registry: &TypeRegistry) {
     use std::collections::HashSet;
     let policy: EntityCoveragePolicy =
         serde_json::from_str(include_str!("entity_coverage_policy.json"))
-        .expect("valid entity coverage policy");
+            .expect("valid entity coverage policy");
     let variants = &registry.types[&TypeId::new("EntityType")].variants;
     let variant_names: HashSet<&str> = variants.iter().map(|v| v.name.as_str()).collect();
     for name in policy
@@ -810,7 +796,7 @@ fn generate_entity_coverage(out_dir: &Path, registry: &TypeRegistry) {
                             | "vertices"
                     )
             ) {
-                    "transaction_geometry"
+                "transaction_geometry"
             } else {
                 "type_conversion_only"
             };
@@ -838,8 +824,17 @@ fn generate_entity_coverage(out_dir: &Path, registry: &TypeRegistry) {
                 optional: false,
                 is_sequence: false,
                 snapshot_readable: true,
-                validation: if writable { "transaction_geometry" } else { "none" }.into(),
-                model_access: if writable { ModelAccess::ReadWrite } else { ModelAccess::ReadOnly },
+                validation: if writable {
+                    "transaction_geometry"
+                } else {
+                    "none"
+                }
+                .into(),
+                model_access: if writable {
+                    ModelAccess::ReadWrite
+                } else {
+                    ModelAccess::ReadOnly
+                },
             });
         }
         assert!(
@@ -860,7 +855,7 @@ fn generate_entity_coverage(out_dir: &Path, registry: &TypeRegistry) {
         out_dir.join("entity_coverage.json"),
         serde_json::to_string_pretty(&catalog).unwrap(),
     )
-        .expect("write entity coverage");
+    .expect("write entity coverage");
 }
 
 fn trace<T>(tracer: &mut Tracer, samples: &Samples)
@@ -906,10 +901,7 @@ fn add_enum_samples(tracer: &mut Tracer, samples: &mut Samples) {
         samples,
         &codec::entities::SmoothSurfaceType::QuadraticBSpline,
     );
-    let _ = tracer.trace_value(
-        samples,
-        &codec::entities::SmoothSurfaceType::CubicBSpline,
-    );
+    let _ = tracer.trace_value(samples, &codec::entities::SmoothSurfaceType::CubicBSpline);
     let _ = tracer.trace_value(samples, &codec::entities::SmoothSurfaceType::Bezier);
 
     let _ = tracer.trace_value(samples, &codec::entities::AttachmentPoint::TopLeft);
@@ -934,14 +926,8 @@ fn add_enum_samples(tracer: &mut Tracer, samples: &mut Samples) {
         samples,
         &codec::xdata::XDataValue::ControlString(String::new()),
     );
-    let _ = tracer.trace_value(
-        samples,
-        &codec::xdata::XDataValue::LayerName(String::new()),
-    );
-    let _ = tracer.trace_value(
-        samples,
-        &codec::xdata::XDataValue::BinaryData(Vec::new()),
-    );
+    let _ = tracer.trace_value(samples, &codec::xdata::XDataValue::LayerName(String::new()));
+    let _ = tracer.trace_value(samples, &codec::xdata::XDataValue::BinaryData(Vec::new()));
     let _ = tracer.trace_value(
         samples,
         &codec::xdata::XDataValue::Handle(codec::Handle::default()),
@@ -991,14 +977,8 @@ fn add_enum_samples(tracer: &mut Tracer, samples: &mut Samples) {
 
     // Proxy reference kinds pulled in by XRecord.object_references
     let _ = tracer.trace_value(samples, &codec::objects::ProxyReferenceKind::Undefined);
-    let _ = tracer.trace_value(
-        samples,
-        &codec::objects::ProxyReferenceKind::SoftOwnership,
-    );
-    let _ = tracer.trace_value(
-        samples,
-        &codec::objects::ProxyReferenceKind::HardOwnership,
-    );
+    let _ = tracer.trace_value(samples, &codec::objects::ProxyReferenceKind::SoftOwnership);
+    let _ = tracer.trace_value(samples, &codec::objects::ProxyReferenceKind::HardOwnership);
     let _ = tracer.trace_value(samples, &codec::objects::ProxyReferenceKind::SoftPointer);
     let _ = tracer.trace_value(samples, &codec::objects::ProxyReferenceKind::HardPointer);
 
@@ -1284,7 +1264,7 @@ fn generate_version_info(out_dir: &Path) {
         "acadrust_source": opencadcodec.source.as_ref().map(|s| s.to_string()),
         "rustc_version": rustc_version,
         "api_version": 7,
-        "api_version_min_supported": 2,
+        "api_version_min_supported": 3,
         "build_timestamp": build_timestamp,
     });
     fs::write(out_dir.join("version_info.json"), info.to_string()).unwrap();

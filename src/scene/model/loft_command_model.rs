@@ -1,11 +1,11 @@
 //! LOFT command/history integration. Geometry and validation live in the kernel.
 
+use super::sweep_model::embedded_path;
+use crate::command::{ExtrudeMode, LoftOptions, LoftSectionSelection};
 use codec::entities::{EmbeddedEntity, Point, Surface, SurfaceData, SurfaceKind};
 use codec::objects::{SolidHistoryLoft, SolidHistoryLoftParameters, SolidHistoryNodeBase};
 use codec::{EntityType, Handle};
 use kernel::brep::Body;
-use crate::command::{ExtrudeMode, LoftOptions, LoftSectionSelection};
-use super::sweep_model::embedded_path;
 
 fn embedded_section(entity: &EntityType) -> Option<EmbeddedEntity> {
     match entity {
@@ -16,8 +16,8 @@ fn embedded_section(entity: &EntityType) -> Option<EmbeddedEntity> {
 }
 
 pub fn is_section(entity: &EntityType) -> bool {
-    embedded_section(entity).is_some_and(|entity|
-        kernel::acis::loft_section_geometry(&[entity]).is_ok())
+    embedded_section(entity)
+        .is_some_and(|entity| kernel::acis::loft_section_geometry(&[entity]).is_ok())
 }
 
 pub fn is_guide_or_path(entity: &EntityType) -> bool {
@@ -58,7 +58,9 @@ pub fn record(
                 })
                 .collect::<Result<Vec<_>, _>>()?,
         };
-        if let kernel::brep::LoftSection::Profile { closed, .. } = kernel::acis::loft_section_geometry(&members)? {
+        if let kernel::brep::LoftSection::Profile { closed, .. } =
+            kernel::acis::loft_section_geometry(&members)?
+        {
             surface |= !closed;
         }
         section_counts.push(members.len());
@@ -109,7 +111,9 @@ pub fn build_body(
     mode: ExtrudeMode,
     options: LoftOptions,
 ) -> Result<Body, String> {
-    kernel::acis::rebuild_loft_with_options(&record(sections, guides, path, available, mode, options)?)
+    kernel::acis::rebuild_loft_with_options(&record(
+        sections, guides, path, available, mode, options,
+    )?)
 }
 
 pub fn surface_entity(record: &SolidHistoryLoft) -> EntityType {
@@ -143,5 +147,5 @@ pub fn surface_entity(record: &SolidHistoryLoft) -> EntityType {
         guide_curves: Vec::new(),
         path_curve: None,
     };
-    EntityType::Surface(surface)
+    EntityType::Surface(Box::new(surface))
 }

@@ -1,10 +1,8 @@
 use super::*;
-use codec::entities::{
-    CenterMarkAssociation, CenterMarkSource, CenterMarkSourceKind,
-};
+use codec::entities::{CenterMarkAssociation, CenterMarkSource, CenterMarkSourceKind};
 use codec::types::Vector3;
-use kernel::geom2d::{closest_point, Arc as KernelArc, BulgeArc, Curve};
 use glam::DVec3;
+use kernel::geom2d::{closest_point, Arc as KernelArc, BulgeArc, Curve};
 
 fn vector(point: DVec3) -> Vector3 {
     Vector3::new(point.x, point.y, point.z)

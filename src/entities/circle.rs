@@ -1,10 +1,8 @@
-use codec::entities::Circle;
 use crate::t;
+use codec::entities::Circle;
 
 use crate::command::EntityTransform;
-use crate::entities::common::{
-    center_grip, edit_prop as edit, parse_f64, square_grip,
-};
+use crate::entities::common::{center_grip, edit_prop as edit, parse_f64, square_grip};
 use crate::entities::traits::RenderConvertible;
 use crate::scene::convert::acad_to_render::{extrusion_wall_tris, RenderEntity, RenderObject};
 use crate::scene::model::object::{GripApply, GripDef, PropSection};
@@ -203,11 +201,8 @@ fn apply_geom_prop(circle: &mut Circle, field: &str, value: &str) {
         "area" if v > 0.0 => circle.radius = (v / PI).sqrt(),
         "normal_x" | "normal_y" | "normal_z" => {
             let center = circle.center_wcs();
-            let mut normal = kernel::space::Vec3::new(
-                circle.normal.x,
-                circle.normal.y,
-                circle.normal.z,
-            );
+            let mut normal =
+                kernel::space::Vec3::new(circle.normal.x, circle.normal.y, circle.normal.z);
             match field {
                 "normal_x" => normal.x = v,
                 "normal_y" => normal.y = v,
@@ -286,10 +281,7 @@ impl crate::entities::traits::Grippable for Circle {
         apply_grip(self, grip_id, apply);
     }
 
-    fn grip_menu(
-        &self,
-        grip_id: usize,
-    ) -> Vec<crate::scene::model::object::GripMenuItem> {
+    fn grip_menu(&self, grip_id: usize) -> Vec<crate::scene::model::object::GripMenuItem> {
         use crate::scene::model::object::{GripMenuAction, GripMenuItem};
         let mut items = vec![GripMenuItem {
             label: "Stretch",

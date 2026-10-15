@@ -1,10 +1,10 @@
 // Annotate module — dimension, text, leader, table, and markup tools.
 
 pub mod aligned_dim;
-
+pub mod angular_dim;
 pub mod annotation_scale;
 pub mod arc_length_dim;
-pub mod angular_dim;
+pub mod count_cmd;
 pub mod data_extract;
 pub mod data_link;
 pub mod ddedit;
@@ -16,6 +16,7 @@ pub mod dimedit;
 pub mod dimjogline;
 pub mod dimspace;
 pub mod dimtedit;
+pub mod field_cmd;
 pub mod jogged_radius_dim;
 pub mod leader_cmd;
 pub mod linear_dim;
@@ -285,9 +286,7 @@ impl CadModule for AnnotateModule {
                             icon: crate::modules::IconKind::Svg(include_bytes!(
                                 "../../../assets/icons/add_scale.svg"
                             )),
-                            event: crate::modules::ModuleEvent::Command(
-                                "OBJECTSCALE".to_string(),
-                            ),
+                            event: crate::modules::ModuleEvent::Command("OBJECTSCALE".to_string()),
                         }),
                         RibbonItem::Tool(crate::modules::ToolDef {
                             id: "ANNORESET",
@@ -295,9 +294,7 @@ impl CadModule for AnnotateModule {
                             icon: crate::modules::IconKind::Svg(include_bytes!(
                                 "../../../assets/icons/sync.svg"
                             )),
-                            event: crate::modules::ModuleEvent::Command(
-                                "ANNORESET".to_string(),
-                            ),
+                            event: crate::modules::ModuleEvent::Command("ANNORESET".to_string()),
                         }),
                     ],
                 },

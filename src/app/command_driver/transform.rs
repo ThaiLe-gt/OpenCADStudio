@@ -1,7 +1,11 @@
 use super::*;
 
 impl OpenCADStudio {
-    pub(super) fn handle_transform_selected(&mut self, mut handles: Vec<Handle>, transform: crate::command::EntityTransform) -> Option<Task<Message>> {
+    pub(super) fn handle_transform_selected(
+        &mut self,
+        mut handles: Vec<Handle>,
+        transform: crate::command::EntityTransform,
+    ) -> Option<Task<Message>> {
         let i = self.active_tab;
         handles.retain(|handle| !self.tabs[i].scene.is_layer_locked(*handle));
         if handles.is_empty() {
@@ -34,7 +38,11 @@ impl OpenCADStudio {
         None
     }
 
-    pub(super) fn handle_copy_selected(&mut self, mut handles: Vec<Handle>, transform: crate::command::EntityTransform) -> Option<Task<Message>> {
+    pub(super) fn handle_copy_selected(
+        &mut self,
+        mut handles: Vec<Handle>,
+        transform: crate::command::EntityTransform,
+    ) -> Option<Task<Message>> {
         let i = self.active_tab;
         handles.retain(|handle| !self.tabs[i].scene.is_layer_locked(*handle));
         if handles.is_empty() {
@@ -88,10 +96,9 @@ impl OpenCADStudio {
             // it's delta-safe like a single transform.
             let pending = self.begin_undo(i, label, handles.len(), true);
             // Step 1: translate so src1 is at origin
-            self.tabs[i].scene.transform_entities(
-                &handles,
-                &crate::command::EntityTransform::Translate(-src1),
-            );
+            self.tabs[i]
+                .scene
+                .transform_entities(&handles, &crate::command::EntityTransform::Translate(-src1));
             // Step 2: uniform scale (only when != 1)
             if (scale - 1.0).abs() > 1e-4 {
                 self.tabs[i].scene.transform_entities(
@@ -114,10 +121,9 @@ impl OpenCADStudio {
                 );
             }
             // Step 4: translate to dst1
-            self.tabs[i].scene.transform_entities(
-                &handles,
-                &crate::command::EntityTransform::Translate(dst1),
-            );
+            self.tabs[i]
+                .scene
+                .transform_entities(&handles, &crate::command::EntityTransform::Translate(dst1));
             self.tabs[i].dirty = true;
             self.tabs[i].scene.deselect_all();
             for h in &handles {
@@ -136,7 +142,11 @@ impl OpenCADStudio {
         }
     }
 
-    pub(super) fn handle_stretch_window(&mut self, mut handles: Vec<Handle>, windows: Vec<(glam::DVec3, glam::DVec3)>) {
+    pub(super) fn handle_stretch_window(
+        &mut self,
+        mut handles: Vec<Handle>,
+        windows: Vec<(glam::DVec3, glam::DVec3)>,
+    ) {
         let i = self.active_tab;
         // Accumulate every entity touched by any crossing window. Keep STRETCH
         // in its selection stage; Enter is what advances to the base point.
@@ -249,7 +259,12 @@ impl OpenCADStudio {
         self.tabs[i].active_cmd = Some(Box::new(cmd));
     }
 
-    pub(super) fn handle_stretch_entities(&mut self, mut handles: Vec<Handle>, windows: Vec<(glam::DVec3, glam::DVec3)>, delta: glam::DVec3) -> Option<Task<Message>> {
+    pub(super) fn handle_stretch_entities(
+        &mut self,
+        mut handles: Vec<Handle>,
+        windows: Vec<(glam::DVec3, glam::DVec3)>,
+        delta: glam::DVec3,
+    ) -> Option<Task<Message>> {
         let i = self.active_tab;
         handles.retain(|handle| !self.tabs[i].scene.is_layer_locked(*handle));
         if handles.is_empty() {
@@ -296,15 +311,10 @@ impl OpenCADStudio {
                         }
                     }
                     codec::EntityType::LwPolyline(polyline) => {
-                        if let Some(world) =
-                            crate::entities::curve::lwpolyline_world_xy(polyline)
-                        {
+                        if let Some(world) = crate::entities::curve::lwpolyline_world_xy(polyline) {
                             for (index, vertex) in world.vertices.iter().enumerate() {
                                 if in_win(vertex.location.x, vertex.location.y) {
-                                    driven_refs.push(ParametricRef::point(
-                                        *handle,
-                                        index as i32,
-                                    ));
+                                    driven_refs.push(ParametricRef::point(*handle, index as i32));
                                 }
                             }
                         }
@@ -312,10 +322,7 @@ impl OpenCADStudio {
                     codec::EntityType::Polyline2D(polyline) => {
                         for (index, vertex) in polyline.vertices.iter().enumerate() {
                             if in_win(vertex.location.x, vertex.location.y) {
-                                driven_refs.push(ParametricRef::point(
-                                    *handle,
-                                    index as i32,
-                                ));
+                                driven_refs.push(ParametricRef::point(*handle, index as i32));
                             }
                         }
                     }
@@ -324,9 +331,7 @@ impl OpenCADStudio {
                     {
                         driven_refs.push(ParametricRef::center(*handle));
                     }
-                    codec::EntityType::Arc(arc)
-                        if in_win(arc.center.x, arc.center.y) =>
-                    {
+                    codec::EntityType::Arc(arc) if in_win(arc.center.x, arc.center.y) => {
                         driven_refs.push(ParametricRef::center(*handle));
                     }
                     _ => {}
@@ -354,8 +359,7 @@ impl OpenCADStudio {
                     }
                 }
                 codec::EntityType::LwPolyline(p) => {
-                    let Some(mut world) = crate::entities::curve::lwpolyline_world_xy(p)
-                    else {
+                    let Some(mut world) = crate::entities::curve::lwpolyline_world_xy(p) else {
                         continue;
                     };
                     for v in &mut world.vertices {

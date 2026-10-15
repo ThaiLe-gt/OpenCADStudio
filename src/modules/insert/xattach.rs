@@ -189,7 +189,11 @@ impl XAttachCommand {
     /// Show `wires` (the reference's model space) while placing it.
     pub fn with_preview(mut self, wires: Vec<WireModel>, unit: f64) -> Self {
         self.preview = wires;
-        self.unit = if unit.is_finite() && unit != 0.0 { unit } else { 1.0 };
+        self.unit = if unit.is_finite() && unit != 0.0 {
+            unit
+        } else {
+            1.0
+        };
         self
     }
 
@@ -204,7 +208,11 @@ impl XAttachCommand {
         let base = self.point.unwrap_or(cursor);
         match self.step {
             Step::Insert | Step::Preset(_) => {
-                let scale = if self.scale_fixed { self.scale } else { self.preview_scale };
+                let scale = if self.scale_fixed {
+                    self.scale
+                } else {
+                    self.preview_scale
+                };
                 (cursor, scale, rotation)
             }
             Step::XScale | Step::Corner | Step::XyzX => {
@@ -285,7 +293,11 @@ impl XAttachCommand {
 }
 
 fn parse_number(text: &str) -> Option<f64> {
-    text.trim().replace(',', ".").parse::<f64>().ok().filter(|v| v.is_finite())
+    text.trim()
+        .replace(',', ".")
+        .parse::<f64>()
+        .ok()
+        .filter(|v| v.is_finite())
 }
 
 impl CadCommand for XAttachCommand {
@@ -303,9 +315,7 @@ impl CadCommand for XAttachCommand {
                 "Specify insertion point or [Scale/X/Y/Z/Rotate/PScale/PX/PY/PZ/PRotate]:"
             }
             Step::Preset(preset) => preset.prompt(),
-            Step::XScale => {
-                "Enter X scale factor, specify opposite corner, or [Corner/XYZ] <1>:"
-            }
+            Step::XScale => "Enter X scale factor, specify opposite corner, or [Corner/XYZ] <1>:",
             Step::Corner => "Specify opposite corner:",
             Step::YScale => "Enter Y scale factor <use X scale factor>:",
             Step::XyzX => "Specify X scale factor or [Corner] <1>:",
@@ -467,9 +477,7 @@ impl CadCommand for XAttachCommand {
 
     fn on_enter(&mut self) -> CmdResult {
         match self.step {
-            Step::Insert => {
-                CmdResult::ReportError("Point or option keyword required.".to_string())
-            }
+            Step::Insert => CmdResult::ReportError("Point or option keyword required.".to_string()),
             Step::Preset(_) => {
                 self.step = Step::Insert;
                 CmdResult::NeedPoint
@@ -513,7 +521,11 @@ impl CadCommand for XAttachCommand {
         let unit = self.unit;
         let plane = self.plane;
         let place = |p: DVec3| {
-            let (x, y, z) = (p.x * scale[0] * unit, p.y * scale[1] * unit, p.z * scale[2] * unit);
+            let (x, y, z) = (
+                p.x * scale[0] * unit,
+                p.y * scale[1] * unit,
+                p.z * scale[2] * unit,
+            );
             plane.to_world(origin + DVec3::new(x * cos - y * sin, x * sin + y * cos, z))
         };
         self.preview.iter().map(|wire| wire.mapped(place)).collect()
@@ -543,10 +555,7 @@ pub fn unique_block_name(stem: &str, taken: &[impl AsRef<str>]) -> String {
     let mut n = 1u32;
     loop {
         let candidate = format!("{stem}_{n}");
-        if !upper_taken
-            .iter()
-            .any(|t| *t == candidate.to_uppercase())
-        {
+        if !upper_taken.iter().any(|t| *t == candidate.to_uppercase()) {
             return candidate;
         }
         n += 1;
@@ -590,10 +599,7 @@ pub fn is_self_attach(
     let candidate = if is_absolute_xref_path(&joined) {
         joined
     } else if let Some(parent) = host_file.parent() {
-        parent
-            .join(&joined)
-            .to_string_lossy()
-            .replace('\\', "/")
+        parent.join(&joined).to_string_lossy().replace('\\', "/")
     } else {
         joined
     };
@@ -746,7 +752,10 @@ mod tests {
             resolve_xref_store_path("C:/Lib/plan.dwg", Some(base)),
             "C:/Lib/plan.dwg"
         );
-        assert_eq!(resolve_xref_store_path("refs/plan.dwg", None), "refs/plan.dwg");
+        assert_eq!(
+            resolve_xref_store_path("refs/plan.dwg", None),
+            "refs/plan.dwg"
+        );
     }
 
     #[test]
@@ -780,9 +789,15 @@ mod tests {
     #[test]
     fn x_scale_then_default_y_and_rotation() {
         let mut cmd = XAttachCommand::with_path("C:/refs/plan.dwg".to_string());
-        assert!(matches!(cmd.on_point(DVec3::new(10.0, 20.0, 0.0)), CmdResult::NeedPoint));
+        assert!(matches!(
+            cmd.on_point(DVec3::new(10.0, 20.0, 0.0)),
+            CmdResult::NeedPoint
+        ));
         assert!(cmd.prompt().contains("Enter X scale factor"));
-        assert!(matches!(cmd.on_text_input("-2"), Some(CmdResult::NeedPoint)));
+        assert!(matches!(
+            cmd.on_text_input("-2"),
+            Some(CmdResult::NeedPoint)
+        ));
         assert!(cmd.prompt().contains("Enter Y scale factor"));
         assert!(matches!(cmd.on_enter(), CmdResult::NeedPoint));
         assert!(cmd.prompt().contains("Specify rotation angle <0>"));
@@ -799,7 +814,10 @@ mod tests {
     fn zero_scale_is_refused() {
         let mut cmd = XAttachCommand::with_path("C:/refs/plan.dwg".to_string());
         cmd.on_point(DVec3::ZERO);
-        assert!(matches!(cmd.on_text_input("0"), Some(CmdResult::ReportError(_))));
+        assert!(matches!(
+            cmd.on_text_input("0"),
+            Some(CmdResult::ReportError(_))
+        ));
         assert!(cmd.prompt().contains("Enter X scale factor"));
     }
 
@@ -822,7 +840,10 @@ mod tests {
     fn corner_pick_sets_x_and_y() {
         let mut cmd = XAttachCommand::with_path("C:/refs/plan.dwg".to_string());
         cmd.on_point(DVec3::ZERO);
-        assert!(matches!(cmd.on_point(DVec3::new(5.0, 7.0, 0.0)), CmdResult::NeedPoint));
+        assert!(matches!(
+            cmd.on_point(DVec3::new(5.0, 7.0, 0.0)),
+            CmdResult::NeedPoint
+        ));
         let ins = committed(Some(cmd.on_enter()));
         assert!((ins.x_scale() - 5.0).abs() < 1e-9);
         assert!((ins.y_scale() - 7.0).abs() < 1e-9);

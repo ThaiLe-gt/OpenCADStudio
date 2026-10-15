@@ -122,8 +122,7 @@ pub(crate) fn radial_direction(center: DVec3, location: DVec3) -> Option<DVec3> 
 }
 
 impl CadCommand for RadiusDimensionCommand {
-    fn set_working_plane(&mut self, _plane: WorkingPlane) {
-    }
+    fn set_working_plane(&mut self, _plane: WorkingPlane) {}
 
     fn name(&self) -> &'static str {
         "DIMRADIUS"
@@ -137,7 +136,9 @@ impl CadCommand for RadiusDimensionCommand {
             return t!("DIMRADIUS  Specify text angle (degrees):").into_owned();
         }
         match self.step {
-            Step::SelectObject => t!("DIMRADIUS  Select arc, circle, or polyline arc:").into_owned(),
+            Step::SelectObject => {
+                t!("DIMRADIUS  Select arc, circle, or polyline arc:").into_owned()
+            }
             Step::DimLine(_) => {
                 t!("DIMRADIUS  Specify dimension line location  [Mtext/Text/Angle]:").into_owned()
             }
@@ -147,14 +148,12 @@ impl CadCommand for RadiusDimensionCommand {
     fn on_point(&mut self, pt: DVec3) -> CmdResult {
         match self.step {
             Step::SelectObject => CmdResult::NeedPoint,
-            Step::DimLine(source) => {
-                CmdResult::CommitDimension {
-                    entity: self.build_dimension(source, pt),
-                    association: DimensionAssociationInput::Infer(self.source_handle),
-                    preserve_base_style: false,
-                    continue_command: false,
-                }
-            }
+            Step::DimLine(source) => CmdResult::CommitDimension {
+                entity: self.build_dimension(source, pt),
+                association: DimensionAssociationInput::Infer(self.source_handle),
+                preserve_base_style: false,
+                continue_command: false,
+            },
         }
     }
 
@@ -246,13 +245,11 @@ impl CadCommand for RadiusDimensionCommand {
                 self.awaiting_text = true;
                 Some(CmdResult::NeedPoint)
             }
-            "M" | "MTEXT" => {
-                Some(CmdResult::SuspendForMTextInput {
-                    pos: self.editor_anchor(),
-                    initial: self.text_override.clone().unwrap_or_default(),
-                    height: 2.5,
-                })
-            }
+            "M" | "MTEXT" => Some(CmdResult::SuspendForMTextInput {
+                pos: self.editor_anchor(),
+                initial: self.text_override.clone().unwrap_or_default(),
+                height: 2.5,
+            }),
             "A" | "ANGLE" => {
                 self.awaiting_angle = true;
                 Some(CmdResult::NeedPoint)
@@ -329,7 +326,9 @@ impl CadCommand for RadiusDimensionCommand {
         let Step::DimLine(source) = self.step else {
             return None;
         };
-        Some(vec![DimensionPreview::current_style(self.build_dimension(source, cursor))])
+        Some(vec![DimensionPreview::current_style(
+            self.build_dimension(source, cursor),
+        )])
     }
 }
 
@@ -350,6 +349,7 @@ fn preview_wire(points: Vec<Vec3>) -> WireModel {
         world_width: 0.0,
         depth_override: None,
         display_visible: true,
+        snap_only: false,
         plot_visible: true,
         fill_is_3d: false,
         fill_is_2d_solid: false,
@@ -375,7 +375,11 @@ fn preview_wire(points: Vec<Vec3>) -> WireModel {
         plinegen: true,
         fill_tris: vec![],
         fill_tris_low: Vec::new(),
+
+        ..Default::default()
     }
 }
 
-inventory::submit!(crate::command::CommandRegistration { names: &["DIMRADIUS"] });
+inventory::submit!(crate::command::CommandRegistration {
+    names: &["DIMRADIUS"]
+});

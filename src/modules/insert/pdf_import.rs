@@ -16,8 +16,8 @@
 // raster images PNG files referenced by IMAGE objects.
 
 use codec::entities::{
-    Arc, AttachmentPoint, BoundaryEdge, BoundaryPath, Circle, Hatch, LwPolyline, MText, PolylineEdge,
-    Solid, Spline, Underlay, UnderlayType,
+    Arc, AttachmentPoint, BoundaryEdge, BoundaryPath, Circle, Hatch, LwPolyline, MText,
+    PolylineEdge, Solid, Spline, Underlay, UnderlayType,
 };
 use codec::types::{Color, Handle, LineWeight, Vector2, Vector3};
 use codec::EntityType;
@@ -160,7 +160,11 @@ pub fn image_dir(pdf: &str) -> Option<std::path::PathBuf> {
         return Some(folder.to_path_buf());
     }
     let parent = std::path::Path::new(pdf).parent()?;
-    Some(if setting.is_empty() { parent.to_path_buf() } else { parent.join(folder) })
+    Some(if setting.is_empty() {
+        parent.to_path_buf()
+    } else {
+        parent.join(folder)
+    })
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -311,7 +315,8 @@ impl CadCommand for PdfImportCommand {
         match self.step {
             Step::Select => "Select PDF underlay or [File] <File>:".to_string(),
             Step::Area => {
-                "Specify first corner of area to import or [Polygonal/All/Settings] <All>:".to_string()
+                "Specify first corner of area to import or [Polygonal/All/Settings] <All>:"
+                    .to_string()
             }
             Step::Opposite => "Specify opposite corner:".to_string(),
             Step::Polygon if self.points.is_empty() => "Specify first point:".to_string(),
@@ -435,7 +440,12 @@ impl CadCommand for PdfImportCommand {
         let ring: Vec<DVec3> = match self.step {
             Step::Opposite => {
                 let a = self.points[0];
-                vec![a, DVec3::new(pt.x, a.y, a.z), pt, DVec3::new(a.x, pt.y, a.z)]
+                vec![
+                    a,
+                    DVec3::new(pt.x, a.y, a.z),
+                    pt,
+                    DVec3::new(a.x, pt.y, a.z),
+                ]
             }
             Step::Polygon if !self.points.is_empty() => {
                 let mut ring = self.points.clone();
@@ -446,7 +456,12 @@ impl CadCommand for PdfImportCommand {
         };
         let mut points: Vec<[f64; 3]> = ring.iter().map(|p| p.to_array()).collect();
         points.push(points[0]);
-        Some(WireModel::solid_f64("pdf_import_area".into(), points, WireModel::CYAN, false))
+        Some(WireModel::solid_f64(
+            "pdf_import_area".into(),
+            points,
+            WireModel::CYAN,
+            false,
+        ))
     }
 }
 
@@ -671,7 +686,8 @@ fn join_strokes(strokes: Vec<Stroke>, join: bool) -> Vec<Stroke> {
                 o.layer == chain.layer && o.color == chain.color && o.weight == chain.weight
             };
             if let Some(i) = open.iter().position(|o| {
-                fits(o) && (same_point(o.points[0], end) || same_point(*o.points.last().unwrap(), end))
+                fits(o)
+                    && (same_point(o.points[0], end) || same_point(*o.points.last().unwrap(), end))
             }) {
                 let mut next = open.remove(i);
                 if !same_point(next.points[0], end) {
@@ -682,7 +698,8 @@ fn join_strokes(strokes: Vec<Stroke>, join: bool) -> Vec<Stroke> {
                 chain.bulges.extend(next.bulges);
             } else if let Some(i) = open.iter().position(|o| {
                 fits(o)
-                    && (same_point(*o.points.last().unwrap(), start) || same_point(o.points[0], start))
+                    && (same_point(*o.points.last().unwrap(), start)
+                        || same_point(o.points[0], start))
             }) {
                 let mut prev = open.remove(i);
                 if !same_point(*prev.points.last().unwrap(), start) {
@@ -935,7 +952,8 @@ pub fn convert(
                     (None, Some(rgb)) if settings.fills => {
                         let layer = naming.layer(pdf_layer, Kind::Fill);
                         let color = color_on(&layer, color_of(rgb));
-                        for mut entity in fill_entities(path, settings.hatches, &world2, &world3, z) {
+                        for mut entity in fill_entities(path, settings.hatches, &world2, &world3, z)
+                        {
                             let common = entity.common_mut();
                             (common.layer, common.color, common.transparency) =
                                 (layer.clone(), color, fill_transparency);
@@ -950,16 +968,24 @@ pub fn convert(
         if settings.text {
             for text in &page.texts {
                 let cap = text.cap_height.max(0.0);
-                let probe = [text.origin[0] + text.width / 2.0, text.origin[1] + cap / 2.0];
+                let probe = [
+                    text.origin[0] + text.width / 2.0,
+                    text.origin[1] + cap / 2.0,
+                ];
                 if !in_area(probe) && !in_area(text.origin) {
                     continue;
                 }
                 let style = format!("PDF {}", text.font);
                 if !result.text_styles.iter().any(|(name, _)| *name == style) {
-                    result.text_styles.push((style.clone(), font_file_for(&text.font)));
+                    result
+                        .text_styles
+                        .push((style.clone(), font_file_for(&text.font)));
                 }
                 let (dx, dy) = (-text.rotation.sin(), text.rotation.cos());
-                let mid = [text.origin[0] + dx * cap / 2.0, text.origin[1] + dy * cap / 2.0];
+                let mid = [
+                    text.origin[0] + dx * cap / 2.0,
+                    text.origin[1] + dy * cap / 2.0,
+                ];
                 let mut mtext = MText::new();
                 mtext.value = text.text.trim_end().to_string();
                 mtext.insertion_point = world3(mid);
@@ -986,8 +1012,12 @@ pub fn convert(
             };
             for image in &page.images {
                 let mid = [
-                    image.origin[0] + (image.u[0] * image.width as f64 + image.v[0] * image.height as f64) / 2.0,
-                    image.origin[1] + (image.u[1] * image.width as f64 + image.v[1] * image.height as f64) / 2.0,
+                    image.origin[0]
+                        + (image.u[0] * image.width as f64 + image.v[0] * image.height as f64)
+                            / 2.0,
+                    image.origin[1]
+                        + (image.u[1] * image.width as f64 + image.v[1] * image.height as f64)
+                            / 2.0,
                 ];
                 if !in_area(mid) {
                     continue;
@@ -1019,7 +1049,9 @@ pub fn convert(
         if !stroke.closed && stroke.points.len() == 2 && stroke.bulges[0] != 0.0 {
             let (a, b) = (world2(stroke.points[0]), world2(stroke.points[1]));
             let bulge = stroke.bulges[0] * turn;
-            if let Some(ba) = crate::entities::common::BulgeArc::from_bulge([a.x, a.y], [b.x, b.y], bulge) {
+            if let Some(ba) =
+                crate::entities::common::BulgeArc::from_bulge([a.x, a.y], [b.x, b.y], bulge)
+            {
                 let (start, end) = if bulge > 0.0 {
                     (ba.start_angle, ba.end_angle)
                 } else {
@@ -1075,11 +1107,18 @@ fn spline_of(sp: &SubPath, world3: &dyn Fn([f64; 2]) -> Vector3) -> Spline {
             Segment::Line(a, b) => (
                 *a,
                 [a[0] + (b[0] - a[0]) / 3.0, a[1] + (b[1] - a[1]) / 3.0],
-                [a[0] + (b[0] - a[0]) * 2.0 / 3.0, a[1] + (b[1] - a[1]) * 2.0 / 3.0],
+                [
+                    a[0] + (b[0] - a[0]) * 2.0 / 3.0,
+                    a[1] + (b[1] - a[1]) * 2.0 / 3.0,
+                ],
                 *b,
             ),
         };
-        let pts = if i == 0 { vec![p0, p1, p2, p3] } else { vec![p1, p2, p3] };
+        let pts = if i == 0 {
+            vec![p0, p1, p2, p3]
+        } else {
+            vec![p1, p2, p3]
+        };
         controls.extend(pts.into_iter().map(world3));
     }
     let spans = sp.segments.len();
@@ -1140,7 +1179,11 @@ fn fill_entities(
     for sp in &path.subpaths {
         let mut ring: Vec<Vector2> = Vec::new();
         for seg in &sp.segments {
-            let steps = if matches!(seg, Segment::Cubic(..)) { 8 } else { 1 };
+            let steps = if matches!(seg, Segment::Cubic(..)) {
+                8
+            } else {
+                1
+            };
             for k in 0..steps {
                 ring.push(world2(bezier(seg, k as f64 / steps as f64)));
             }
@@ -1150,7 +1193,9 @@ fn fill_entities(
         }
         let mut boundary = BoundaryPath::external();
         boundary.flags.set_polyline(true);
-        boundary.edges.push(BoundaryEdge::Polyline(PolylineEdge::new(ring, true)));
+        boundary
+            .edges
+            .push(BoundaryEdge::Polyline(PolylineEdge::new(ring, true)));
         hatch.add_path(boundary);
     }
     if hatch.paths.is_empty() {

@@ -14,9 +14,9 @@
 // All arithmetic is kept in f64 (picked points stay full precision; downcasting
 // to f32 loses several hundredths of a unit at survey-scale coordinates).
 
+use crate::t;
 use codec::{EntityType, Handle};
 use glam::DVec3;
-use crate::t;
 
 use crate::command::{CadCommand, CmdResult, WorkingPlane};
 use crate::modules::{IconKind, ModuleEvent, ToolDef};
@@ -77,6 +77,7 @@ impl MeasureGeomCommand {
             world_width: 0.0,
             depth_override: None,
             display_visible: true,
+            snap_only: false,
             plot_visible: true,
             fill_is_3d: false,
             fill_is_2d_solid: false,
@@ -102,6 +103,8 @@ impl MeasureGeomCommand {
             plinegen: true,
             fill_tris: vec![],
             fill_tris_low: Vec::new(),
+
+            ..Default::default()
         }
     }
 
@@ -126,7 +129,8 @@ impl MeasureGeomCommand {
         let angle_xy = dy.atan2(dx).to_degrees();
         let aprec = crate::entities::common::unit_context().auprec.max(0) as usize;
         let dist_s = crate::entities::common::format_length(dist);
-        let angle_xy_s = crate::entities::common::without_negative_zero(format!("{angle_xy:.aprec$}"));
+        let angle_xy_s =
+            crate::entities::common::without_negative_zero(format!("{angle_xy:.aprec$}"));
         let dx_s = crate::entities::common::format_length(dx);
         let dy_s = crate::entities::common::format_length(dy);
         let dz_s = crate::entities::common::format_length(dz);
@@ -143,7 +147,10 @@ impl MeasureGeomCommand {
 
     /// AREA readout: shoelace area (f64, relative to first vertex) + perimeter.
     fn area_msg(plane: WorkingPlane, points: &[DVec3]) -> String {
-        let points = points.iter().map(|point| plane.to_local(*point)).collect::<Vec<_>>();
+        let points = points
+            .iter()
+            .map(|point| plane.to_local(*point))
+            .collect::<Vec<_>>();
         let n = points.len();
         let origin = points[0];
         let mut area_sum = 0.0f64;

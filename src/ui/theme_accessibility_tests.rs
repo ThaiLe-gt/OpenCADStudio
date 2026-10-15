@@ -477,14 +477,16 @@ fn test_block_palette_contrast() {
         // a hardcoded foreground, these equality checks fail on every theme
         // whose surface text is not pure white.
         let (normal_bg, normal_fg) = block_card_colors(theme, false, BtnStatus::Active);
+        // Cards sit on the dock's base surface, so they take the weak pair
+        // to read as cards.
         assert_eq!(
-            normal_bg, p.background.base.color,
-            "Theme {:?} block card normal background drifted from base pair",
+            normal_bg, p.background.weak.color,
+            "Theme {:?} block card normal background drifted from weak pair",
             theme
         );
         assert_eq!(
-            normal_fg, p.background.base.text,
-            "Theme {:?} block card normal label must use base text (was hardcoded WHITE)",
+            normal_fg, p.background.weak.text,
+            "Theme {:?} block card normal label must use weak text (was hardcoded WHITE)",
             theme
         );
 
@@ -502,11 +504,11 @@ fn test_block_palette_contrast() {
             theme
         );
 
-        // Default-branch statuses (Active/Disabled/Focused/...) share the base pair.
+        // Default-branch statuses (Active/Disabled/Focused/...) share the weak pair.
         let (_, disabled_fg) = block_card_colors(theme, false, BtnStatus::Disabled);
         assert_eq!(
-            disabled_fg, p.background.base.text,
-            "Theme {:?} block card default-state label must use base text",
+            disabled_fg, p.background.weak.text,
+            "Theme {:?} block card default-state label must use weak text",
             theme
         );
 
@@ -514,8 +516,16 @@ fn test_block_palette_contrast() {
         // hover — the background does not switch on hover while placing.
         for status in [BtnStatus::Active, BtnStatus::Hovered, BtnStatus::Pressed] {
             let (bg, fg) = block_card_colors(theme, true, status);
-            assert_eq!(bg, p.primary.base.color, "Theme {:?} placing card bg must be primary.base", theme);
-            assert_eq!(fg, p.primary.base.text, "Theme {:?} placing card label must be primary.base.text", theme);
+            assert_eq!(
+                bg, p.primary.base.color,
+                "Theme {:?} placing card bg must be primary.base",
+                theme
+            );
+            assert_eq!(
+                fg, p.primary.base.text,
+                "Theme {:?} placing card label must be primary.base.text",
+                theme
+            );
         }
 
         // ── 2. Card label contrast: normal / hover / pressed ──
@@ -524,7 +534,8 @@ fn test_block_palette_contrast() {
         assert!(
             normal_contrast >= 4.5,
             "Theme {:?} block card label ({:.2}:1) fails WCAG AA on card background",
-            theme, normal_contrast
+            theme,
+            normal_contrast
         );
 
         let (hover_bg, hover_fg) = block_card_colors(theme, false, BtnStatus::Hovered);
@@ -532,7 +543,8 @@ fn test_block_palette_contrast() {
         assert!(
             hover_contrast >= 4.5,
             "Theme {:?} block card hovered label ({:.2}:1) fails WCAG AA on hovered background",
-            theme, hover_contrast
+            theme,
+            hover_contrast
         );
 
         let (pressed_bg, pressed_fg) = block_card_colors(theme, false, BtnStatus::Pressed);
@@ -540,7 +552,8 @@ fn test_block_palette_contrast() {
         assert!(
             pressed_contrast >= 4.5,
             "Theme {:?} block card pressed label ({:.2}:1) fails WCAG AA on pressed background",
-            theme, pressed_contrast
+            theme,
+            pressed_contrast
         );
 
         // ── 3. Placing card contrast ──
@@ -551,7 +564,8 @@ fn test_block_palette_contrast() {
         assert!(
             placing_contrast >= 3.0,
             "Theme {:?} placing block card label ({:.2}:1) fails button threshold (>=3.0:1)",
-            theme, placing_contrast
+            theme,
+            placing_contrast
         );
         // Placing + hover must not silently drop contrast (bg is sticky).
         let (placing_hover_bg, placing_hover_fg) =
@@ -560,7 +574,8 @@ fn test_block_palette_contrast() {
         assert!(
             placing_hover_contrast >= 3.0,
             "Theme {:?} placing+hover block card label ({:.2}:1) fails button threshold (>=3.0:1)",
-            theme, placing_hover_contrast
+            theme,
+            placing_hover_contrast
         );
 
         // ── 4. Card border is theme-driven (no invisible borders) ──
@@ -585,7 +600,8 @@ fn test_block_palette_contrast() {
         assert!(
             icon_rest_contrast >= 4.5,
             "Theme {:?} block palette icon button ({:.2}:1) fails WCAG AA on dock background",
-            theme, icon_rest_contrast
+            theme,
+            icon_rest_contrast
         );
         // Hovered/pressed buttons sit on the `strong` surface with its text.
         for status in [BtnStatus::Hovered, BtnStatus::Pressed] {
@@ -599,7 +615,8 @@ fn test_block_palette_contrast() {
             assert!(
                 c >= 4.5,
                 "Theme {:?} hovered icon button ({:.2}:1) fails WCAG AA on hovered background",
-                theme, c
+                theme,
+                c
             );
         }
 
@@ -607,7 +624,10 @@ fn test_block_palette_contrast() {
         // Rendered as `base.text` at 0.72 alpha over the dock `base`
         // background → secondary text threshold >= 3.0:1. (The old hardcoded
         // 0.55-gray failed this on light themes.)
-        let empty_text = composite_over(p.background.base.text.scale_alpha(0.72), p.background.base.color);
+        let empty_text = composite_over(
+            p.background.base.text.scale_alpha(0.72),
+            p.background.base.color,
+        );
         let empty_contrast = wcag_contrast(empty_text, p.background.base.color);
         assert!(
             empty_contrast >= 3.0,
@@ -631,4 +651,3 @@ fn test_block_palette_contrast() {
         }
     }
 }
-

@@ -1,5 +1,4 @@
 /// Stable, language-neutral entity capability schema.
-
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -458,12 +458,7 @@ fn split_template(value: &str) -> (&str, &str) {
 
 /// Apply a dimension override row. A changed override lays automatic text
 /// out afresh, so e.g. a new DIMTAD moves it off the stored position.
-pub fn set_property(
-    doc: &mut CadDocument,
-    handle: Handle,
-    field: &str,
-    value: &str,
-) -> bool {
+pub fn set_property(doc: &mut CadDocument, handle: Handle, field: &str, value: &str) -> bool {
     let applied = apply_property(doc, handle, field, value);
     if applied {
         if let Some(EntityType::Dimension(dimension)) = doc.get_entity_mut(handle) {
@@ -473,12 +468,7 @@ pub fn set_property(
     applied
 }
 
-fn apply_property(
-    doc: &mut CadDocument,
-    handle: Handle,
-    field: &str,
-    value: &str,
-) -> bool {
+fn apply_property(doc: &mut CadDocument, handle: Handle, field: &str, value: &str) -> bool {
     let trimmed = value.trim();
     if field == "dim_center_type" {
         let current = inherited_real(doc, handle, DIMCEN);
@@ -727,10 +717,9 @@ fn apply_property(
             "dim_text_outside_align" | "dim_text_inside_align" | "dim_line_inside" => {
                 yes(trimmed).map(|value| i16::from(value == 0))
             }
-            "dim_ext_line_fixed"
-            | "dim_text_inside"
-            | "dim_line_forced"
-            | "dim_alt_enabled" => yes(trimmed),
+            "dim_ext_line_fixed" | "dim_text_inside" | "dim_line_forced" | "dim_alt_enabled" => {
+                yes(trimmed)
+            }
             "dim_decimal_separator" => trimmed.chars().next().map(|character| character as i16),
             "dim_units" => match trimmed.to_ascii_lowercase().as_str() {
                 "scientific" => Some(1),

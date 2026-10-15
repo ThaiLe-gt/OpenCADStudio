@@ -5,11 +5,13 @@ use crate::scene::model::mesh_model::MeshLodSet;
 use crate::scene::model::presspull_model::{self, PresspullTarget, PresspullTargetKind};
 use crate::scene::model::{solid_history, sweep_model};
 use codec::entities::{AcisData, EmbeddedEntity, Solid3D, Surface, SurfaceKind, Wire};
-use codec::objects::{DynamicBlockData, ObjectType, SolidHistoryNodeBase, SolidHistoryOperation, SolidHistorySweep};
+use codec::objects::{
+    DynamicBlockData, ObjectType, SolidHistoryNodeBase, SolidHistoryOperation, SolidHistorySweep,
+};
 use codec::types::Vector3;
 use codec::{EntityType, Handle};
-use kernel::brep::{self, Body, PlanarFaceProfile, PresspullMode};
 use glam::DVec3;
+use kernel::brep::{self, Body, PlanarFaceProfile, PresspullMode};
 
 struct PreparedPresspull {
     owner: Option<Handle>,
@@ -189,7 +191,7 @@ impl super::OpenCADStudio {
                                         "PRESSPULL: the surface parameters could not be retained.",
                                     )?;
                             }
-                            EntityType::Surface(surface)
+                            EntityType::Surface(Box::new(surface))
                         };
                         (body, history, entity)
                     }

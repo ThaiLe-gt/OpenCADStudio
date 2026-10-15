@@ -8,8 +8,8 @@
 //!
 //! Lift and tessellation failures are reported as an incomplete result.
 
-use kernel::acis::lift;
 use codec::entities::acis::SatDocument;
+use kernel::acis::lift;
 use kernel::brep;
 
 use crate::scene::convert::solid3d_tess::{body_transform, finalize_mesh};
@@ -31,23 +31,14 @@ pub fn tessellate_sat(
     if bodies.is_empty() {
         return None;
     }
+    // The kernel's lift already applies each body's transform record; its
+    // scale still sets the tessellation tolerance.
     let mut placed_bodies = Vec::with_capacity(bodies.len());
     for body in bodies {
         let source = body.provenance.source()?;
         let transform = body_transform(document, source.index() as usize).ok()?;
         let placement_scale = transform.map_or(1.0, |(_, _, scale)| scale.abs());
-        let placed = if let Some((matrix, translation, scale)) = transform {
-            let placement = brep::Placement {
-                x_axis: [scale * matrix[0], scale * matrix[1], scale * matrix[2]],
-                y_axis: [scale * matrix[3], scale * matrix[4], scale * matrix[5]],
-                z_axis: [scale * matrix[6], scale * matrix[7], scale * matrix[8]],
-                origin: translation,
-            };
-            brep::transform(&body, &placement)?
-        } else {
-            body
-        };
-        placed_bodies.push((placed, placement_scale));
+        placed_bodies.push((body, placement_scale));
     }
     let bodies = placed_bodies;
     let resolution = if facet_res.is_finite() && facet_res > 0.0 {
@@ -76,8 +67,7 @@ pub fn tessellate_sat(
         .filter_map(|record| {
             let owner = record.token_pointer(2)?.0;
             let handle = record.token(3)?.as_integer()?;
-            (owner >= 0 && handle > 0)
-                .then(|| (owner, codec::Handle::new(handle as u64)))
+            (owner >= 0 && handle > 0).then(|| (owner, codec::Handle::new(handle as u64)))
         })
         .collect();
     let face_colors: std::collections::HashMap<i32, [f32; 4]> = document
@@ -103,20 +93,22 @@ pub fn tessellate_sat(
     // parameters leaves a hole, the same as one that never lifted — so both
     // are counted before calling the mesh whole.
     let mut undrawn = 0usize;
-    let source_fit = if document.header.spatial_resolution.is_finite()
-        && document.header.spatial_resolution > 0.0
-    {
-        document.header.spatial_resolution
+    // The header's tolerance line is `<mm per unit> <resabs> <resnor>`: the
+    // codec's `spatial_resolution` is the unit scale (1, or 25.4 for inches)
+    // and its `normal_tolerance` is resabs, the file's absolute tolerance.
+    // Fitting to the unit scale let every edge wander a whole unit, and on a
+    // bad pcurve that meant minutes of refinement (#1538).
+    let resabs = document.header.normal_tolerance;
+    let source_fit = if resabs.is_finite() && resabs > 0.0 && resabs < 1e-2 {
+        resabs
     } else {
         DEFAULT_FIT_TOLERANCE
     };
     for (body, placement_scale) in &bodies {
-        let mut tolerance = brep::mesh::TessellationTolerance::new(
-            max_angle,
-            source_fit * placement_scale,
-        )
-        .with_uv_isolines(isolines[0], isolines[1])
-        .with_planar_isolines(planar_isolines);
+        let mut tolerance =
+            brep::mesh::TessellationTolerance::new(max_angle, source_fit * placement_scale)
+                .with_uv_isolines(isolines[0], isolines[1])
+                .with_planar_isolines(planar_isolines);
         if let Some(deflection) = chordal_deflection {
             tolerance = tolerance.with_chordal_deflection(deflection);
         }
@@ -257,5 +249,4 @@ mod tests {
         let moved = placed([0.0, 0.0, 0.0], quarter_turn());
         assert_eq!(moved, [10.0, 20.0, 30.0]);
     }
-
 }

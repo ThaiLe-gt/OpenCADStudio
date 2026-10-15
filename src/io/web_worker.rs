@@ -67,10 +67,7 @@ pub(super) async fn parse_document(
                     let bytes = Uint8Array::new(&value).to_vec();
                     let payload: (
                         u16,
-                        Result<
-                            codec::ReadOutcome,
-                            (String, Option<codec::ReadStats>),
-                        >,
+                        Result<codec::ReadOutcome, (String, Option<codec::ReadStats>)>,
                         Option<String>,
                         bool,
                         Vec<EntityRuntimeFields>,
@@ -84,10 +81,7 @@ pub(super) async fn parse_document(
                     }
                     match payload.1 {
                         Ok(mut outcome) => {
-                            restore_entity_runtime_fields(
-                                &mut outcome.document,
-                                payload.4,
-                            );
+                            restore_entity_runtime_fields(&mut outcome.document, payload.4);
                             Ok((outcome, payload.2))
                         }
                         Err((message, read_stats)) => Err(super::OpenLoadError {
@@ -185,9 +179,8 @@ pub(super) async fn sha256_document(bytes: &[u8]) -> Result<String, super::OpenL
     let worker = Worker::new_with_options(WORKER_URL, &options)
         .map_err(|error| super::OpenLoadError::from(js_error(error)))?;
 
-    let (sender, receiver) = iced::futures::channel::oneshot::channel::<
-        Result<String, super::OpenLoadError>,
-    >();
+    let (sender, receiver) =
+        iced::futures::channel::oneshot::channel::<Result<String, super::OpenLoadError>>();
     let sender = Rc::new(RefCell::new(Some(sender)));
     let message_sender = sender.clone();
     let completed_worker = worker.clone();

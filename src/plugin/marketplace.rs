@@ -331,10 +331,14 @@ pub fn install(release: &Release, repository: &str) -> Result<String, String> {
 
     if ocs_plugin_api::version_info::uses_acadrust_gate(manifest.api_version) {
         let Some(source) = manifest.acadrust_source.as_deref() else {
-            return Err("Release has no opencadcodec source; cannot verify ABI compatibility".to_string());
+            return Err(
+                "Release has no opencadcodec source; cannot verify ABI compatibility".to_string(),
+            );
         };
         if source.is_empty() {
-            return Err("Release has no opencadcodec source; cannot verify ABI compatibility".to_string());
+            return Err(
+                "Release has no opencadcodec source; cannot verify ABI compatibility".to_string(),
+            );
         }
         if !ocs_plugin_api::version_info::acadrust_sources_compatible(
             source,

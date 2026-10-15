@@ -206,6 +206,12 @@ pub(super) struct DocumentTab {
     pub(super) dyn_active: usize,
     pub(super) history: HistoryState,
     pub(super) active_layer: String,
+    /// Block references whose properties panel shows per-axis Scale X/Y/Z even
+    /// though the three factors are currently equal — the user unchecked the
+    /// "Uniform scale" box for them (#427). Per-tab: fresh documents restart
+    /// handle numbering, so an app-global set keyed by raw handle leaks one
+    /// tab's opt-out into another tab reusing the value (#47).
+    pub(super) props_asym_scale: std::collections::HashSet<u64>,
     /// Node graph shown by the command line's graph button.
     pub(super) graph: crate::ui::node_graph::Graph,
     /// Currently active UCS. `None` means WCS (identity transform).
@@ -221,6 +227,8 @@ pub(super) struct DocumentTab {
     pub(super) paper_bg_color: Option<[f32; 4]>,
     /// Active REFEDIT session, if any.
     pub(super) refedit_session: Option<RefEditSession>,
+    /// COUNT mode, while it is on.
+    pub(crate) count: Option<crate::ui::window::count_palette::CountMode>,
     /// Open BEDIT block tabs. Definitions are edited live; each tab owns its
     /// entry snapshot and camera so nested blocks can remain open independently.
     pub(super) block_edits: Vec<BlockEditSession>,
@@ -266,6 +274,9 @@ pub(super) struct DocumentTab {
     /// `suspended_cmd` was parked by a transparent command (`'ZOOM`) and is
     /// restored as soon as the transparent one ends.
     pub(super) transparent_resume: bool,
+    /// Model-space corners of the last crossing window drawn with no command
+    /// running: STRETCH on that selection stretches through it (#1068).
+    pub(super) last_crossing_window: Option<([f64; 2], [f64; 2])>,
 }
 
 impl DocumentTab {
@@ -504,8 +515,7 @@ impl DocumentTab {
                     false,
                 ),
             };
-            if let Some(codec::EntityType::Viewport(vp)) = self.scene.document.get_entity_mut(h)
-            {
+            if let Some(codec::EntityType::Viewport(vp)) = self.scene.document.get_entity_mut(h) {
                 vp.ucs_origin = o;
                 vp.ucs_x_axis = x;
                 vp.ucs_y_axis = y;
@@ -644,6 +654,7 @@ impl DocumentTab {
             dyn_active: 0,
             history: HistoryState::default(),
             active_layer: "0".to_string(),
+            props_asym_scale: std::collections::HashSet::new(),
             graph: Default::default(),
             active_ucs: None,
             sketch_session: None,
@@ -651,6 +662,7 @@ impl DocumentTab {
             bg_color: None,
             paper_bg_color: None,
             refedit_session: None,
+            count: None,
             block_edits: Vec::new(),
             active_block_edit: None,
             active_mleader_style: "Standard".to_string(),
@@ -666,6 +678,7 @@ impl DocumentTab {
             plugin_state: HashMap::new(),
             suspended_cmd: None,
             transparent_resume: false,
+            last_crossing_window: None,
         }
     }
 
@@ -897,4 +910,6 @@ pub(super) struct PendingHistorySnapshot {
     pub(super) dirty_before: bool,
     pub(super) structure_before: CadDocument,
     pub(super) recorder: Arc<codec::document::EntityChangeRecorder>,
+    /// Kept as an undo step even when nothing changed.
+    pub(super) keep_empty: bool,
 }

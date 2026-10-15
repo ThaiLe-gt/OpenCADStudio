@@ -64,19 +64,19 @@ impl OpenCADStudio {
             .filter(|value| !value.trim().is_empty())
             .map(str::to_owned)
             .unwrap_or_else(|| {
-                crate::t!("Select objects, then press Enter to finish (Esc cancels).")
-                    .into_owned()
+                crate::t!("Select objects, then press Enter to finish (Esc cancels).").into_owned()
             });
         // Label the request on screen: the message list must say WHO is
         // waiting and for what, and the line stays pinned (non-fading) for
         // as long as the request is open — see `pending_pick_label`.
-        let request_id = req["request_id"]
-            .as_str()
-            .unwrap_or_default()
-            .to_owned();
+        let request_id = req["request_id"].as_str().unwrap_or_default().to_owned();
         let label = crate::tf!(
             "[user_select · {}] {}  ({})",
-            if request_id.is_empty() { "client" } else { &request_id },
+            if request_id.is_empty() {
+                "client"
+            } else {
+                &request_id
+            },
             prompt,
             crate::t!("Enter confirms, Esc cancels"),
         )
@@ -107,8 +107,7 @@ impl OpenCADStudio {
             return;
         };
         if !confirmed {
-            self.command_line
-                .push_info(crate::t!("*Cancel*").as_ref());
+            self.command_line.push_info(crate::t!("*Cancel*").as_ref());
             self.command_line.push_info(
                 crate::tf!(
                     "user_select {}: the request was answered with no objects.",
@@ -256,13 +255,14 @@ impl OpenCADStudio {
             .filter(|value| !value.trim().is_empty())
             .map(str::to_owned)
             .unwrap_or_else(|| crate::t!("Pick a point, then click (Esc cancels).").into_owned());
-        let request_id = req["request_id"]
-            .as_str()
-            .unwrap_or_default()
-            .to_owned();
+        let request_id = req["request_id"].as_str().unwrap_or_default().to_owned();
         let label = crate::tf!(
             "[getpoint · {}] {}  ({})",
-            if request_id.is_empty() { "client" } else { &request_id },
+            if request_id.is_empty() {
+                "client"
+            } else {
+                &request_id
+            },
             prompt,
             crate::t!("Click confirms, Esc cancels"),
         )
@@ -288,7 +288,11 @@ impl OpenCADStudio {
         };
         // Drop the snap marker the pending pick was showing — no command is
         // running, so nothing else would clear it after the session ends.
-        if let Some(i) = self.tabs.iter().position(|tab| tab.id == session.document_id) {
+        if let Some(i) = self
+            .tabs
+            .iter()
+            .position(|tab| tab.id == session.document_id)
+        {
             self.tabs[i].snap_result = None;
         }
         let (cancelled, result) = match point {
@@ -339,13 +343,7 @@ impl OpenCADStudio {
     /// settle. `cancelled` flips the final status to "cancelled". The
     /// request_id + op check keeps a stale answer from writing into someone
     /// else's result slot.
-    fn finish_interactive(
-        &mut self,
-        op: &str,
-        request_id: &str,
-        cancelled: bool,
-        result: Value,
-    ) {
+    fn finish_interactive(&mut self, op: &str, request_id: &str, cancelled: bool, result: Value) {
         if let Some(pending) = self
             .control
             .pending

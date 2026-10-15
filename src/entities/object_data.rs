@@ -6,8 +6,8 @@
 //! entity geometry continues through the normal render pipeline.
 
 use codec::objects::{
-    AssociativeData, BlockEvalValue, DynamicBlockData, ObjectType,
-    SolidHistoryNodeBase, SolidHistoryOperation,
+    AssociativeData, BlockEvalValue, DynamicBlockData, ObjectType, SolidHistoryNodeBase,
+    SolidHistoryOperation,
 };
 use codec::{CadDocument, EntityType, Handle};
 
@@ -107,11 +107,7 @@ pub fn render_settings(cache: &ObjectDataCache) -> &[Handle] {
     &cache.render_settings
 }
 
-pub fn update_light_entity(
-    cache: &mut ObjectDataCache,
-    handle: Handle,
-    exists: bool,
-) {
+pub fn update_light_entity(cache: &mut ObjectDataCache, handle: Handle, exists: bool) {
     let lights = std::sync::Arc::make_mut(&mut cache.light_entities);
     if exists {
         if !lights.contains(&handle) {
@@ -149,7 +145,7 @@ fn entity_history_handle(entity: &EntityType) -> Option<Handle> {
     .filter(|handle| handle.is_valid())
 }
 
-fn history_operation_name(operation: &SolidHistoryOperation) -> &'static str {
+pub(crate) fn history_operation_name(operation: &SolidHistoryOperation) -> &'static str {
     match operation {
         SolidHistoryOperation::Unknown => "Unknown",
         SolidHistoryOperation::Box(_) => "Box",
@@ -228,6 +224,8 @@ fn embedded_name(value: Option<&codec::entities::EmbeddedEntity>) -> &'static st
         Some(codec::entities::EmbeddedEntity::Ellipse(_)) => "Ellipse",
         Some(codec::entities::EmbeddedEntity::Spline(_)) => "Spline",
         Some(codec::entities::EmbeddedEntity::LwPolyline(_)) => "Polyline",
+        // A 2D / 3D polyline profile the modeler keeps as a wire body.
+        Some(codec::entities::EmbeddedEntity::Body { .. }) => "Polyline",
         Some(codec::entities::EmbeddedEntity::Region(_)) => "Region",
         Some(codec::entities::EmbeddedEntity::Ray(_)) => "Ray",
         Some(codec::entities::EmbeddedEntity::XLine(_)) => "XLine",
@@ -313,7 +311,7 @@ fn history_operation_text(operation: &SolidHistoryOperation) -> String {
             value.base_face
         ),
         SolidHistoryOperation::Sweep(value) | SolidHistoryOperation::Extrusion(value) => format!(
-            "{}; sweep {}; path {}; direction {:.6},{:.6},{:.6}; draft {:.6}; scale {:.6}; twist {:.6}; align {:.6}; bank {}; intersections {}",
+            "{}; sweep {}; path {}; direction {:.6},{:.6},{:.6}; draft {:.6}; scale {:.6}; twist {:.6}; align {:.6}; align start {}; bank {}",
             history_base_text(&value.base),
             embedded_name(value.sweep_entity.as_ref()),
             embedded_name(value.path_entity.as_ref()),
@@ -324,8 +322,8 @@ fn history_operation_text(operation: &SolidHistoryOperation) -> String {
             value.scale_factor,
             value.twist_angle,
             value.align_angle,
-            value.bank,
-            value.check_intersections
+            value.align_start,
+            value.bank
         ),
         SolidHistoryOperation::Loft(value) => format!(
             "{}; cross sections {}; guides {}",
@@ -359,8 +357,7 @@ fn solid_history_sections(
     let Some(history_handle) = entity_history_handle(entity) else {
         return Vec::new();
     };
-    let Some(ObjectType::DynamicBlock(history_object)) =
-        document.objects.get(&history_handle)
+    let Some(ObjectType::DynamicBlock(history_object)) = document.objects.get(&history_handle)
     else {
         return vec![PropSection {
             title: "Solid History".to_string(),
@@ -769,8 +766,7 @@ fn dynamic_block_sections(
                 .filter(|object| {
                     !matches!(
                         object.data,
-                        DynamicBlockData::SolidHistory(_)
-                            | DynamicBlockData::SolidHistoryNode(_)
+                        DynamicBlockData::SolidHistory(_) | DynamicBlockData::SolidHistoryNode(_)
                     )
                 })
                 .map(|object| {
@@ -901,6 +897,7 @@ fn associative_data_name(data: &AssociativeData) -> &'static str {
         AssociativeData::ArrayParameters(_) => "Array Parameters",
         AssociativeData::ArrayActionBody(_) => "Array Action",
         AssociativeData::ArrayModifyActionBody(_) => "Array Modify Action",
+        AssociativeData::SmartCenterActionBody(_) => "Center Mark/Line Action",
         AssociativeData::DimensionAssociation(_) => "Dimension Association",
         AssociativeData::PersSubentManagerStatic(_) => "Static Subentity Manager",
         AssociativeData::ViewRepActionBody(_) => "View Representation Action",
@@ -1025,9 +1022,7 @@ where
     result
 }
 
-fn class_object_section(
-    data: &codec::objects::ClassObjectData,
-) -> Option<PropSection> {
+fn class_object_section(data: &codec::objects::ClassObjectData) -> Option<PropSection> {
     use codec::objects::ClassObjectData;
 
     let section = match data {
@@ -1432,11 +1427,7 @@ fn class_object_section(
                     "Ramps",
                     bounded_join(
                         value.color_ramps.iter().map(|ramp| {
-                            format!(
-                                "v{} [{}]",
-                                ramp.class_version,
-                                ramp.color_schemes.join(", ")
-                            )
+                            format!("{} v{} ({} colours)", ramp.name, ramp.class_version, ramp.colors.len())
                         }),
                         32,
                     ),
@@ -1445,11 +1436,7 @@ fn class_object_section(
                     "Classification Ramps",
                     bounded_join(
                         value.classification_color_ramps.iter().map(|ramp| {
-                            format!(
-                                "v{} [{}]",
-                                ramp.class_version,
-                                ramp.color_schemes.join(", ")
-                            )
+                            format!("{} v{} ({} colours)", ramp.name, ramp.class_version, ramp.colors.len())
                         }),
                         32,
                     ),
@@ -2063,9 +2050,7 @@ fn class_object_section(
     Some(section)
 }
 
-fn semantic_property_text(
-    value: &codec::objects::SemanticPropertyValue,
-) -> String {
+fn semantic_property_text(value: &codec::objects::SemanticPropertyValue) -> String {
     use codec::objects::SemanticPropertyValue;
     match value {
         SemanticPropertyValue::Text(value) => preview_text(value, 512),
@@ -2080,9 +2065,7 @@ fn semantic_property_text(
     }
 }
 
-fn auxiliary_object_property(
-    object: &ObjectType,
-) -> Option<Property> {
+fn auxiliary_object_property(object: &ObjectType) -> Option<Property> {
     use codec::objects::DataObjectData;
 
     let (label, value) = match object {
@@ -2280,9 +2263,7 @@ fn build_document_sections(document: &CadDocument) -> Vec<PropSection> {
                             "Design Point",
                             format!(
                                 "{:.8}, {:.8}, {:.8}",
-                                value.design_point.x,
-                                value.design_point.y,
-                                value.design_point.z
+                                value.design_point.x, value.design_point.y, value.design_point.z
                             ),
                         ),
                         ro(
@@ -2305,9 +2286,7 @@ fn build_document_sections(document: &CadDocument) -> Vec<PropSection> {
                             "Up",
                             format!(
                                 "{:.8}, {:.8}, {:.8}",
-                                value.up_direction.x,
-                                value.up_direction.y,
-                                value.up_direction.z
+                                value.up_direction.x, value.up_direction.y, value.up_direction.z
                             ),
                         ),
                         ro(
@@ -2385,11 +2364,7 @@ fn build_document_sections(document: &CadDocument) -> Vec<PropSection> {
                                 "Entries",
                                 bounded_join(
                                     list.lights.iter().map(|light| {
-                                        format!(
-                                            "{}={}",
-                                            light.name,
-                                            handle_text(light.handle)
-                                        )
+                                        format!("{}={}", light.name, handle_text(light.handle))
                                     }),
                                     64,
                                 ),
@@ -2409,9 +2384,7 @@ fn build_document_sections(document: &CadDocument) -> Vec<PropSection> {
                                 "Date / Time",
                                 format!(
                                     "Julian {}; {} ms; DST {}",
-                                    sun.julian_day,
-                                    sun.milliseconds,
-                                    sun.is_daylight_savings_on
+                                    sun.julian_day, sun.milliseconds, sun.is_daylight_savings_on
                                 ),
                             ),
                             ro(
@@ -2656,8 +2629,7 @@ fn build_document_sections(document: &CadDocument) -> Vec<PropSection> {
                                 "Display",
                                 format!(
                                     "predefined first {}; high-level info {}",
-                                    global.predefined_presets_first,
-                                    global.high_level_info
+                                    global.predefined_presets_first, global.high_level_info
                                 ),
                             ),
                         ],
@@ -2674,10 +2646,7 @@ fn build_document_sections(document: &CadDocument) -> Vec<PropSection> {
     }
 
     if !document.dgn_ls_definitions.is_empty() {
-        let mut definitions = document
-            .dgn_ls_definitions
-            .values()
-            .collect::<Vec<_>>();
+        let mut definitions = document.dgn_ls_definitions.values().collect::<Vec<_>>();
         definitions.sort_by_key(|definition| definition.handle.value());
         let omitted = definitions.len().saturating_sub(128);
         let mut props = definitions

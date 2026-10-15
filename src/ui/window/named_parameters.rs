@@ -392,12 +392,10 @@ mod tests {
             ConstraintKind, ParametricRef, ParametricScope,
         };
         let mut scene = Scene::new();
-        let line = scene.add_entity(codec::EntityType::Line(
-            codec::entities::Line::from_points(
-                codec::types::Vector3::new(0.0, 0.0, 0.0),
-                codec::types::Vector3::new(10.0, 0.0, 0.0),
-            ),
-        ));
+        let line = scene.add_entity(codec::EntityType::Line(codec::entities::Line::from_points(
+            codec::types::Vector3::new(0.0, 0.0, 0.0),
+            codec::types::Vector3::new(10.0, 0.0, 0.0),
+        )));
         scene
             .parametric_constraint_set_mut(ParametricScope::ModelSpace)
             .add(

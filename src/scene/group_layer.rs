@@ -114,6 +114,13 @@ impl Scene {
                 }
                 self.record_undo_object_before(gh, None);
             }
+            for member in group.entities.clone() {
+                if let Some(entity) = self.document.get_entity_mut(member) {
+                    if !entity.common().reactors.contains(&gh) {
+                        entity.common_mut().reactors.push(gh);
+                    }
+                }
+            }
             self.document.objects.insert(gh, ObjectType::Group(group));
             if let Some(ObjectType::Dictionary(dict)) =
                 self.document.objects.get_mut(&group_dict_handle)
@@ -178,10 +185,7 @@ impl Scene {
     /// Return `handles` plus every member of a selectable group containing one
     /// of them. Selection and rollover highlighting share this expansion so the
     /// preview matches what a click will select.
-    pub fn handles_expanded_for_selectable_groups(
-        &self,
-        handles: &[Handle],
-    ) -> HashSet<Handle> {
+    pub fn handles_expanded_for_selectable_groups(&self, handles: &[Handle]) -> HashSet<Handle> {
         let mut expanded: HashSet<Handle> = handles.iter().copied().collect();
         let wanted: HashSet<Handle> = handles.iter().copied().collect();
         for obj in self.document.objects.values() {

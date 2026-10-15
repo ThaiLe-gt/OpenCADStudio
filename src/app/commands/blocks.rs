@@ -38,8 +38,10 @@ impl OpenCADStudio {
         base: glam::DVec3,
     ) -> usize {
         // Clone + dep-capture live in the shared kernel; storage stays here.
-        let (entities, deps) =
-            super::super::command_driver::copy_to_clipboard_kernel(&self.tabs[i].scene.document, handles);
+        let (entities, deps) = super::super::command_driver::copy_to_clipboard_kernel(
+            &self.tabs[i].scene.document,
+            handles,
+        );
         let count = entities.len();
         self.clipboard_base = base;
         self.clipboard = entities;
@@ -489,25 +491,52 @@ impl OpenCADStudio {
                 self.active_modal = Some(crate::app::ModalKind::WriteBlock);
             }
 
+            // INSERT opens the Blocks palette on the drawing's blocks;
+            // -INSERT runs on the command line.
             "INSERT" => {
+                self.command_line
+                    .push_output("*Insert a block from the Blocks palette");
+                self.open_blocks_palette(Some(crate::ui::window::block_palette::Tab::Current));
+            }
+
+            "-INSERT" => {
+                use crate::command::CadCommand;
+                use crate::modules::insert::insert_block::InsertBlockCommand;
                 let blocks = self.tabs[i].scene.custom_block_names();
-                if blocks.is_empty() {
-                    self.command_line.push_error(
-                        crate::t!("No user-defined blocks found in this drawing.").as_ref(),
-                    );
-                } else {
-                    use crate::modules::insert::insert_block::InsertBlockCommand;
-                    let ranked = self.ranked_block_names(&blocks);
-                    let snapshot = self.block_usage_snapshot();
-                    let cmd = InsertBlockCommand::new_with_usage(
-                        ranked,
-                        snapshot,
-                        self.cliprompt_lines.clamp(0, 50) as u8,
-                    );
-                    self.command_line.push_info(&cmd.prompt());
-                    let opts = cmd.options();
-                    self.command_line.set_step_options(opts.clone());
-                    self.tabs[i].active_cmd = Some(Box::new(cmd));
+                let ranked = self.ranked_block_names(&blocks);
+                let snapshot = self.block_usage_snapshot();
+                let cmd = InsertBlockCommand::classic(
+                    ranked,
+                    snapshot,
+                    self.cliprompt_lines.clamp(0, 50) as u8,
+                    self.block_catalog(),
+                    self.insname.clone(),
+                );
+                self.command_line.push_info(&cmd.prompt());
+                self.command_line.set_step_options(cmd.options());
+                self.tabs[i].active_cmd = Some(Box::new(cmd));
+            }
+
+            // A drawing named at -INSERT's block prompt: brought in as a
+            // block, then placed.
+            cmd if cmd.starts_with("_-INSERTFILE ") => {
+                use crate::command::CadCommand;
+                use crate::modules::insert::insert_block::InsertBlockCommand;
+                let path =
+                    std::path::PathBuf::from(cmd["_-INSERTFILE ".len()..].trim().trim_matches('"'));
+                match self.import_file_as_block(path) {
+                    Ok(name) => {
+                        let units = self
+                            .block_catalog()
+                            .units
+                            .remove(&name.to_ascii_uppercase())
+                            .unwrap_or_default();
+                        let preview = self.tabs[i].scene.block_preview_wires(&name);
+                        let cmd = InsertBlockCommand::classic_for_block(name, preview, units);
+                        self.command_line.push_info(&cmd.prompt());
+                        self.tabs[i].active_cmd = Some(Box::new(cmd));
+                    }
+                    Err(e) => self.command_line.push_error(e.as_str()),
                 }
             }
 
@@ -620,11 +649,10 @@ impl OpenCADStudio {
                             .iter()
                             .any(|a| a.tag.eq_ignore_ascii_case(tag))
                         {
-                            ins.attributes
-                                .push(codec::entities::AttributeEntity::new(
-                                    tag.clone(),
-                                    default.clone(),
-                                ));
+                            ins.attributes.push(codec::entities::AttributeEntity::new(
+                                tag.clone(),
+                                default.clone(),
+                            ));
                         }
                     }
                     synced += 1;
@@ -667,15 +695,32 @@ impl OpenCADStudio {
                 );
             }
 
-            // BLOCKPALETTE / BLOCKSPALETTE — toggle the docked Insert Block panel.
-            "BLOCKPALETTE" | "BLOCKSPALETTE" => {
-                self.show_block_palette ^= true;
-                if self.show_block_palette {
-                    // Always open expanded so the panel is immediately usable;
-                    // the user can still collapse it via the pin (Auto) button.
-                    self.dock_expanded = Some(crate::ui::dock::PanelId::BlockPalette);
-                    self.refresh_block_palette();
-                }
+            // BLOCKSPALETTE opens the Blocks palette; BLOCKSPALETTECLOSE
+            // closes it. `_BLOCKSPALETTE <tab>` opens it on a tab.
+            "BLOCKPALETTE" | "BLOCKSPALETTE" => self.open_blocks_palette(None),
+            "BLOCKSPALETTECLOSE" => {
+                self.show_block_palette = false;
+                self.block_palette.placing = None;
+            }
+            // A block picked in the ribbon gallery.
+            cmd if cmd.starts_with("_BLOCKINSERT ") => {
+                let name = cmd["_BLOCKINSERT ".len()..].trim().to_string();
+                return Some(
+                    self.palette_insert(
+                        crate::ui::window::block_palette::Item::Current(name),
+                        None,
+                    ),
+                );
+            }
+            cmd if cmd.starts_with("_BLOCKSPALETTE ") => {
+                use crate::ui::window::block_palette::Tab;
+                let tab = match cmd["_BLOCKSPALETTE ".len()..].trim() {
+                    "RECENT" => Tab::Recent,
+                    "FAVORITES" => Tab::Favorites,
+                    "LIBRARIES" => Tab::Libraries,
+                    _ => Tab::Current,
+                };
+                self.open_blocks_palette(Some(tab));
             }
 
             // ATTMAN / BATTMAN — the Block Attribute Manager. Rather than a
@@ -700,18 +745,40 @@ impl OpenCADStudio {
             }
             // A file named after it skips the picker.
             cmd if cmd.starts_with("_PDFIMPORTFILE ") => {
-                let path = cmd["_PDFIMPORTFILE ".len()..].trim().trim_matches('"').to_string();
+                let path = cmd["_PDFIMPORTFILE ".len()..]
+                    .trim()
+                    .trim_matches('"')
+                    .to_string();
                 match std::fs::read(&path) {
                     Ok(bytes) => {
-                        crate::scene::model::pdf_raster::register_source(&path, std::sync::Arc::new(bytes));
+                        crate::scene::model::pdf_raster::register_source(
+                            &path,
+                            std::sync::Arc::new(bytes),
+                        );
                         self.open_pdf_import_file(&path);
                     }
                     Err(_) => self.command_line.push_error(&format!("{path} not found.")),
                 }
             }
-            "PDFCLIP" => {
+            "PDFCLIP" | "DWFCLIP" | "DGNCLIP" => {
                 use crate::command::CadCommand;
-                let command = crate::modules::insert::pdf_clip::PdfClipCommand::new();
+                let kind = match cmd {
+                    "DWFCLIP" => codec::entities::UnderlayType::Dwf,
+                    "DGNCLIP" => codec::entities::UnderlayType::Dgn,
+                    _ => codec::entities::UnderlayType::Pdf,
+                };
+                let command = crate::modules::insert::pdf_clip::PdfClipCommand::for_kind(kind);
+                self.command_line.push_info(&command.prompt());
+                self.tabs[i].active_cmd = Some(Box::new(command));
+            }
+            "POINTCLOUDCROP" | "POINTCLOUDUNCROP" => {
+                use crate::command::CadCommand;
+                use crate::modules::insert::pc_crop::PointCloudCropCommand;
+                let command = if cmd == "POINTCLOUDUNCROP" {
+                    PointCloudCropCommand::uncrop()
+                } else {
+                    PointCloudCropCommand::new()
+                };
                 self.command_line.push_info(&command.prompt());
                 self.tabs[i].active_cmd = Some(Box::new(command));
             }
@@ -760,7 +827,10 @@ impl OpenCADStudio {
             // PDFATTACH picks the file; -PDFATTACH asks for it on the command
             // line. A path after either names the file at once.
             cmd if matches!(
-                cmd.split_whitespace().next().map(|v| v.to_ascii_uppercase()).as_deref(),
+                cmd.split_whitespace()
+                    .next()
+                    .map(|v| v.to_ascii_uppercase())
+                    .as_deref(),
                 Some("PDFATTACH") | Some("-PDFATTACH")
             ) =>
             {
@@ -809,14 +879,12 @@ impl OpenCADStudio {
                 } else {
                     format!("{}/new_block.dwg", default_folder.replace('\\', "/"))
                 };
-                self.wblock = Some(
-                    crate::ui::window::wblock::WblockState::new(
-                        existing_blocks,
-                        handles,
-                        default_unit,
-                        default_path,
-                    ),
-                );
+                self.wblock = Some(crate::ui::window::wblock::WblockState::new(
+                    existing_blocks,
+                    handles,
+                    default_unit,
+                    default_path,
+                ));
                 self.active_modal = Some(crate::app::ModalKind::WriteBlock);
             }
 
@@ -1029,8 +1097,7 @@ impl OpenCADStudio {
                                 self.tabs[i].xref_unloaded.remove(key);
                                 self.tabs[i].xref_stat_cache.remove(key);
                             }
-                            let handles: rustc_hash::FxHashSet<codec::types::Handle> = self.tabs
-                                [i]
+                            let handles: rustc_hash::FxHashSet<codec::types::Handle> = self.tabs[i]
                                 .scene
                                 .document
                                 .block_records
@@ -1720,7 +1787,10 @@ mod tests {
             app.dock_expanded == Some(crate::ui::dock::PanelId::BlockPalette),
             "palette must open expanded, not as the collapsed bar"
         );
+        // BLOCKSPALETTE only opens; BLOCKSPALETTECLOSE closes.
         let _ = app.run_command_line("BLOCKSPALETTE");
+        assert!(app.show_block_palette);
+        let _ = app.run_command_line("BLOCKSPALETTECLOSE");
         assert!(!app.show_block_palette);
     }
 
@@ -1875,12 +1945,8 @@ mod tests {
             .objects
             .insert(h, ObjectType::ImageDefinition(def));
         // Reference it so collect_entries lists it.
-        let mut img = codec::entities::RasterImage::new(
-            "img.png",
-            codec::types::Vector3::ZERO,
-            8.0,
-            8.0,
-        );
+        let mut img =
+            codec::entities::RasterImage::new("img.png", codec::types::Vector3::ZERO, 8.0, 8.0);
         img.definition_handle = Some(h);
         app.tabs[i]
             .scene
@@ -1910,12 +1976,8 @@ mod tests {
             .document
             .objects
             .insert(h, ObjectType::ImageDefinition(def));
-        let mut img = codec::entities::RasterImage::new(
-            "img.png",
-            codec::types::Vector3::ZERO,
-            8.0,
-            8.0,
-        );
+        let mut img =
+            codec::entities::RasterImage::new("img.png", codec::types::Vector3::ZERO, 8.0, 8.0);
         img.definition_handle = Some(h);
         app.tabs[i]
             .scene
@@ -2016,9 +2078,7 @@ mod tests {
             .unwrap();
         let mut line = codec::entities::Line::new();
         line.common.layer = "WALLS".to_string();
-        xref_doc
-            .add_entity(codec::EntityType::Line(line))
-            .unwrap();
+        xref_doc.add_entity(codec::EntityType::Line(line)).unwrap();
         let bytes = crate::io::save_to_bytes(&xref_doc, "dwg", xref_doc.version).unwrap();
         let xref_path = dir.join("plan.dwg");
         std::fs::write(&xref_path, &bytes).unwrap();
@@ -2051,9 +2111,7 @@ mod tests {
         let mut line = codec::entities::Line::new();
         line.common.plotstyle_flags = 0b11;
         line.common.plotstyle_handle = Some(xref_doc.allocate_handle());
-        xref_doc
-            .add_entity(codec::EntityType::Line(line))
-            .unwrap();
+        xref_doc.add_entity(codec::EntityType::Line(line)).unwrap();
         let bytes = crate::io::save_to_bytes(&xref_doc, "dwg", xref_doc.version).unwrap();
         let xref_path = dir.join("plan.dwg");
         std::fs::write(&xref_path, &bytes).unwrap();
@@ -2294,9 +2352,7 @@ mod tests {
             .unwrap();
         let mut line = codec::entities::Line::new();
         line.common.layer = "WALLS".to_string();
-        xref_doc
-            .add_entity(codec::EntityType::Line(line))
-            .unwrap();
+        xref_doc.add_entity(codec::EntityType::Line(line)).unwrap();
         let bytes = crate::io::save_to_bytes(&xref_doc, "dwg", xref_doc.version).unwrap();
         let xref_path = dir.join("plan.dwg");
         std::fs::write(&xref_path, &bytes).unwrap();

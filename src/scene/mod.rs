@@ -36,16 +36,16 @@ pub use dimension_assoc::{ReferenceStatus, ResolvedReference};
 pub use page_setup::{apply_default_page_setup, document_page_setups, rotated_margins};
 mod dwg_native_constraints;
 mod entity;
+pub use camera_ops::named_view_center;
 pub use entity::CreateBlockOptions;
+mod group_layer;
 #[cfg(test)]
 mod hatch_boundary;
-mod group_layer;
 mod layout;
 mod limits;
 mod modify;
+pub(crate) use modify::remap_copied_reactors;
 mod mspace;
-pub mod viewport_ref;
-pub mod viewport_dimension_pick;
 pub mod named_parameters;
 mod page_setup;
 mod paper;
@@ -53,6 +53,8 @@ mod preview;
 mod project;
 mod scene_markers;
 mod selection;
+pub mod viewport_dimension_pick;
+pub mod viewport_ref;
 pub(crate) use selection::{pe_url_description_of, pe_url_of};
 pub mod parametric_constraints;
 mod parametric_solve;
@@ -60,7 +62,7 @@ mod parametric_solve;
 pub(crate) use boundary::{
     boundary_entities, boundary_entities_from_sources, boundary_faces, boundary_polyline_entities,
     exact_hatch_paths, hatch_boundary_rings, hatch_path_directions, hatch_path_ring,
-    ring_source_handles, separated_hatch_path_groups, BoundarySource,
+    remap_hatch_associations, ring_source_handles, separated_hatch_path_groups, BoundarySource,
 };
 
 // Parallel tessellation free functions live in `convert::tess` (alongside the
@@ -115,9 +117,9 @@ pub(crate) fn tessellate_entity(
                 // including holes, then sample only for this cached display.
                 let mut boundaries = Vec::new();
                 if let Ok(kernel::brep::LoftSection::Profile { plane, wires, .. }) =
-                    kernel::acis::loft_section_geometry(&[
-                        codec::entities::EmbeddedEntity::Region(region.clone()),
-                    ])
+                    kernel::acis::loft_section_geometry(&[codec::entities::EmbeddedEntity::Region(
+                        region.clone(),
+                    )])
                 {
                     let (color, _, _, line_weight_px, _) =
                         view::render::render_style_for_viewport(document, &source, active_viewport);
@@ -166,6 +168,16 @@ pub(crate) fn tessellate_entity(
             }
             wires.extend(construction);
         }
+        for points in model::solid_history::composite_history_edges(document, handle) {
+            let selected = selected.contains(&handle);
+            let color = [1.0, 0.25, 0.25, 1.0];
+            wires.push(WireModel::solid_f64(
+                handle.value().to_string(),
+                points,
+                color,
+                selected,
+            ));
+        }
     }
     wires
 }
@@ -207,9 +219,7 @@ impl Scene {
         {
             let (edges, lows) = set.geometry_edges();
             let mut seen = HashSet::default();
-            for (a, b) in
-                crate::scene::model::mesh_model::solid_edge_segments(edges, lows)
-            {
+            for (a, b) in crate::scene::model::mesh_model::solid_edge_segments(edges, lows) {
                 for (point, hint) in [(a, SnapHint::Vertex), (b, SnapHint::Vertex)] {
                     let key = [point.x.to_bits(), point.y.to_bits(), point.z.to_bits()];
                     if seen.insert(key) {
@@ -308,8 +318,8 @@ impl Scene {
         want_nearest: bool,
     ) -> Option<crate::snap::SnapResult> {
         use crate::snap::{
-            closest_point_on_tri_2d, foot_on_triangle, snap_better, snap_priority,
-            snap_tier, SnapType,
+            closest_point_on_tri_2d, foot_on_triangle, snap_better, snap_priority, snap_tier,
+            SnapType,
         };
         if !want_perp && !want_nearest {
             return None;
@@ -353,8 +363,7 @@ impl Scene {
                         || (tier == *bt
                             && (d2 - *bd2).abs() <= 1e-4
                             && sub == *bs
-                            && (depth2 < *bdepth2
-                                || (depth2 == *bdepth2 && handle.value() < *bh)))
+                            && (depth2 < *bdepth2 || (depth2 == *bdepth2 && handle.value() < *bh)))
                 }
             };
             if better {
@@ -374,9 +383,7 @@ impl Scene {
                         extension_origin: None,
                         extension_dir: None,
                         viewport: None,
-                        source: Some(
-                            crate::command::DimensionAssociationSource::inferred(handle),
-                        ),
+                        source: Some(crate::command::DimensionAssociationSource::inferred(handle)),
                         secondary_source: None,
                         model_point: None,
                     },
@@ -429,7 +436,10 @@ impl Scene {
                 for (slot, index) in v.iter_mut().zip(tri.iter()) {
                     let (Some(high), low) = (
                         lod.verts.get(*index as usize),
-                        lod.verts_low.get(*index as usize).copied().unwrap_or([0.0; 3]),
+                        lod.verts_low
+                            .get(*index as usize)
+                            .copied()
+                            .unwrap_or([0.0; 3]),
                     ) else {
                         ok = false;
                         break;
@@ -453,14 +463,8 @@ impl Scene {
                     continue;
                 }
                 // Per-triangle screen reject before any 3D work.
-                let (tx0, ty0) = (
-                    sa[0].min(sb[0]).min(sc[0]),
-                    sa[1].min(sb[1]).min(sc[1]),
-                );
-                let (tx1, ty1) = (
-                    sa[0].max(sb[0]).max(sc[0]),
-                    sa[1].max(sb[1]).max(sc[1]),
-                );
+                let (tx0, ty0) = (sa[0].min(sb[0]).min(sc[0]), sa[1].min(sb[1]).min(sc[1]));
+                let (tx1, ty1) = (sa[0].max(sb[0]).max(sc[0]), sa[1].max(sb[1]).max(sc[1]));
                 if cursor[0] < tx0 - aperture_px
                     || cursor[0] > tx1 + aperture_px
                     || cursor[1] < ty0 - aperture_px
@@ -505,10 +509,53 @@ pub(super) struct EntityIndex {
     pub unbounded_handles: Vec<Handle>,
 }
 
+/// Hash of every baked display input a memoized tessellation depends on; a
+/// memo entry is reusable only under the guard it was built with.
+fn tess_memo_guard(
+    view_aabb: Option<[f32; 4]>,
+    anno: f32,
+    annotation_scale_handle: Option<Handle>,
+    all_visible: bool,
+    bg: [f32; 4],
+    avp: Option<Handle>,
+) -> u64 {
+    let mut g: u64 = 0xcbf2_9ce4_8422_2325;
+    let mut mix = |x: u64| g = g.rotate_left(13) ^ x;
+    // wpp removed from guard: GPU analytical rendering handles
+    // circles/arcs/ellipses, Point ignores wpp, and Light (the
+    // only remaining wpp consumer) is rare enough that its stale
+    // glyphs don't justify clearing every memoized entity on zoom.
+    if let Some(v) = view_aabb {
+        for c in v {
+            mix(c.to_bits() as u64);
+        }
+    }
+    mix(anno.to_bits() as u64);
+    mix(annotation_scale_handle
+        .map(|handle| handle.value())
+        .unwrap_or(0));
+    mix(all_visible as u64);
+    // Direct entities and inherited/faded block colours still bake
+    // the background before Batches::finalize records its inputs.
+    for channel in bg {
+        mix(channel.to_bits() as u64);
+    }
+    mix(avp.map(|h| h.value()).unwrap_or(0));
+    // SDF glyph quads bake the atlas UV of each tile, so a growth or
+    // a re-bake (which rescale / rewind every UV) makes memoized text
+    // address the wrong tile — garbage on screen, and a silent miss in
+    // the PDF export's glyph lookup (#385 under #347's conditions).
+    mix(crate::scene::text::sdf_atlas::generation());
+    g
+}
+
 #[derive(Clone, Default)]
 struct DependencyTargets {
     render_handles: HashSet<Handle>,
     source_handles: HashSet<Handle>,
+    /// Render handles reached through a block definition (INSERTs and other
+    /// block users), as opposed to entities that carry the name themselves.
+    block_users: HashSet<Handle>,
     touches_block_definition: bool,
 }
 
@@ -529,6 +576,9 @@ struct SceneDependencyIndex {
     text_geometry: DependencyTargets,
     annotation_geometry: DependencyTargets,
     signatures: HashMap<Handle, u64>,
+    /// Block name (normalised) → the layout entities that draw it, nested
+    /// references included.
+    block_roots: HashMap<String, HashSet<Handle>>,
 }
 
 fn hatch_interaction_aabb(hatch: &model::hatch_model::HatchModel) -> Option<[f64; 4]> {
@@ -1280,7 +1330,7 @@ fn build_derived_caches_impl(
                         } else {
                             [1.0, 1.0, 1.0, 1.0]
                         };
-                        ImageModel::from_underlay(u, def, background).map(|m| (handle, m))
+                        ImageModel::from_underlay(u, def, background, None).map(|m| (handle, m))
                     }
                     _ => None,
                 },
@@ -1299,7 +1349,7 @@ fn build_derived_caches_impl(
     // definition solids keep block-local coords for per-INSERT instancing. (#123)
     let facet_res = doc.header.facet_resolution;
     let chordal_deflection = crate::entities::solid3d::display_deflection(&doc.header, facet_res);
-    let isolines = doc.header.isolines.max(0) as usize;
+    let isolines = crate::entities::solid3d::clamp_header_isolines(doc.header.isolines);
     // Real layout blocks come from the Layout objects' block_record handles —
     // `BlockRecord::is_layout()` is unreliable here (it flags ordinary blocks).
     let layout_blocks: std::collections::HashSet<Handle> = doc
@@ -1798,10 +1848,7 @@ fn offset_mesh_lod_set(mut set: MeshLodSet) -> MeshLodSet {
 }
 
 /// Build a lightweight placement over immutable block-local geometry.
-fn transform_block_mesh_lod_set(
-    set: &MeshLodSet,
-    xform: &codec::types::Transform,
-) -> MeshLodSet {
+fn transform_block_mesh_lod_set(set: &MeshLodSet, xform: &codec::types::Transform) -> MeshLodSet {
     use codec::types::Vector3;
     let source = set.instance_source.clone().unwrap_or_else(|| {
         std::sync::Arc::new(model::mesh_model::MeshInstanceSource {
@@ -1935,6 +1982,15 @@ pub enum ViewportRefreshScope {
 /// Entity membership in document order, keyed by geometry epoch.
 type BlockMembers = (u64, HashMap<Handle, Vec<Handle>>);
 
+/// What count mode colours: see [`Scene::count_display`].
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct CountDisplay {
+    pub counted: HashSet<Handle>,
+    pub errors: HashSet<Handle>,
+    pub color: [f32; 4],
+    pub error_color: [f32; 4],
+}
+
 pub struct Scene {
     pub camera: Rc<RefCell<Camera>>,
     /// View saved immediately before the latest navigation operation. ZOOM
@@ -2023,6 +2079,10 @@ pub struct Scene {
     /// edited geometry stands out while the surrounding drawing stays visible
     /// for context. `None` = not editing. (#136)
     pub refedit_keep: Option<HashSet<Handle>>,
+    /// COUNT mode colours: counted references in COUNTCOLOR, overlapping
+    /// duplicates in COUNTERRORCOLOR, everything else faded. `None` outside
+    /// count mode.
+    pub count_display: Option<CountDisplay>,
     /// Entity drawn with the selection-highlight colour without being part
     /// of the real selection — used to preview a row in the cycling list box.
     pub hover_highlight: Option<Handle>,
@@ -2059,6 +2119,9 @@ pub struct Scene {
     pub preview_text: Vec<crate::scene::pipeline::text_gpu::TextVertex>,
     /// Committed-segment wire drawn during multi-point commands (normal colour).
     pub interim_wire: Option<WireModel>,
+    /// Set when an entity creation or update automatically registers a novel
+    /// layer into the document layer table, signalling the UI to refresh.
+    pub layer_table_dirty: bool,
     pub camera_generation: u64,
     /// Incremented whenever geometry-affecting state changes (entities, selection,
     /// preview wires, layer visibility, layout). The GPU pipeline uses this to
@@ -2191,6 +2254,11 @@ pub struct Scene {
     frozen_hatch_cache: RefCell<HashMap<(Handle, String, u64), (u64, u64, Arc<Vec<HatchModel>>)>>,
     frozen_wipeout_cache: RefCell<HashMap<(Handle, String, u64), (u64, Arc<Vec<HatchModel>>)>>,
     frozen_image_cache: RefCell<HashMap<(Handle, u64), (u64, Arc<Vec<ImageModel>>)>>,
+    /// Point clouds shown by the model content, keyed by target block and
+    /// frozen-layer signature, per geometry epoch.
+    point_cloud_cache: RefCell<
+        HashMap<(Handle, u64), (u64, Arc<crate::scene::model::point_cloud::PointCloudSet>)>,
+    >,
     frozen_mesh_cache: RefCell<HashMap<(Handle, String, u64), (u64, Arc<Vec<MeshLodSet>>)>>,
     /// Viewports that carry layer color/alpha/linetype/lineweight overrides.
     /// Cached per geometry epoch so ordinary viewports can share render data.
@@ -2217,8 +2285,7 @@ pub struct Scene {
         RefCell<HashMap<(String, String), Option<Arc<crate::io::plot_style::PlotStyleTable>>>>,
     styled_wire_cache: RefCell<HashMap<(u64, String), (u64, Arc<Vec<WireModel>>)>>,
     styled_hatch_cache: RefCell<HashMap<(u64, usize, usize, String, u32), Arc<Vec<HatchModel>>>>,
-    styled_wire_fill_cache:
-        RefCell<HashMap<(u64, String, u32, u64), Arc<Vec<HatchModel>>>>,
+    styled_wire_fill_cache: RefCell<HashMap<(u64, String, u32, u64), Arc<Vec<HatchModel>>>>,
     /// Per-viewport projected wire cache for paper-space content viewports.
     /// Stores projected + clipped wires in paper-space coordinates.
     /// Maps vp_handle → (geometry_epoch, Vec<WireModel>).
@@ -2300,8 +2367,19 @@ pub struct Scene {
     layout_names_cache: RefCell<Option<(u64, std::sync::Arc<Vec<String>>)>>,
     /// Bump on any annotation-scale list mutation.
     scale_epoch: u64,
-    scale_picker_cache:
-        RefCell<Option<(u64, f64, Option<bool>, String, std::sync::Arc<Vec<(String, f32, f64)>>)>>,
+    scale_picker_cache: RefCell<
+        Option<(
+            u64,
+            f64,
+            Option<bool>,
+            String,
+            std::sync::Arc<Vec<(String, f32, f64)>>,
+        )>,
+    >,
+    /// Bump on any named-UCS table mutation (UCS SAVE / DELETE / RENAME,
+    /// record-API patch, file-open, undo Full-swap).
+    ucs_epoch: u64,
+    ucs_names_cache: RefCell<Option<(u64, std::sync::Arc<[String]>)>>,
     /// Reverse dependencies from layer/style/block definitions to the top-level
     /// entities whose resident wire runs actually change. Kept independent from
     /// `geometry_epoch`: a layer colour toggle can reuse the index, invalidate
@@ -2313,12 +2391,21 @@ pub struct Scene {
     /// Conservative association hint: unknown until scanned, then updated from
     /// changed entities. Retaining `true` after deletion only costs an extra scan.
     has_associative_centers: std::cell::Cell<Option<bool>>,
+    /// Conservative hint for whether any Underlay entities exist in the document.
+    pub(crate) has_underlays: std::cell::Cell<Option<bool>>,
     /// Conservative hint for whether any Face3D entities exist in the document.
     pub(crate) has_face3d: std::cell::Cell<Option<bool>>,
     /// Cached resolved document render environment (fog and background image), keyed by (geometry_epoch, document.objects.len()).
-    document_render_env_cache: RefCell<Option<(u64, usize, crate::scene::view::render::CachedDocumentRenderEnvironment)>>,
+    document_render_env_cache: RefCell<
+        Option<(
+            u64,
+            usize,
+            crate::scene::view::render::CachedDocumentRenderEnvironment,
+        )>,
+    >,
     /// Memoized background image resolution to avoid repeated filesystem probes on each render frame.
-    background_image_cache: RefCell<HashMap<String, Option<crate::scene::model::image_model::DecodedImage>>>,
+    background_image_cache:
+        RefCell<HashMap<String, Option<crate::scene::model::image_model::DecodedImage>>>,
     /// Runtime parametric constraint sets decoded from standard graph scopes.
     pub(crate) parametric_constraints: Vec<parametric_constraints::ParametricConstraintSet>,
     /// CONSTRAINTNAMEFORMAT: what a dynamic dimension's text shows —
@@ -2330,6 +2417,11 @@ pub struct Scene {
     hidden_dynamic_dimensions: HashSet<Handle>,
     /// The camera generation the dynamic dimensions were last scaled for.
     dynamic_dimension_camera_gen: Option<u64>,
+    /// The view scale (world units per pixel, in quarter-octave steps) the
+    /// underlay rasters are made for, and a new step waiting for the view
+    /// to settle.
+    underlay_world_per_pixel: Option<f64>,
+    underlay_scale_pending: Option<(i32, iced::time::Instant)>,
     /// Session-only visibility overrides for constraint glyphs.
     hidden_parametric_constraints: HashSet<(
         parametric_constraints::ParametricScope,
@@ -2539,9 +2631,8 @@ fn section_plane(
     let translation = codec::types::Vector3::new(matrix[0][3], matrix[1][3], matrix[2][3]);
     let origin = inverse
         .transform_point(codec::types::Vector3::new(origin.x, origin.y, origin.z) - translation);
-    let tangent = inverse.transform_point(codec::types::Vector3::new(
-        tangent.x, tangent.y, tangent.z,
-    ));
+    let tangent =
+        inverse.transform_point(codec::types::Vector3::new(tangent.x, tangent.y, tangent.z));
     let normal = linear
         .transpose()
         .transform_point(codec::types::Vector3::new(normal.x, normal.y, normal.z));
@@ -2607,6 +2698,7 @@ impl Scene {
             preview_hidden: HashSet::default(),
             command_preview_hidden: HashSet::default(),
             refedit_keep: None,
+            count_display: None,
             hover_highlight: None,
             constraint_hover_highlights: HashSet::default(),
             constraint_hover_refs: Vec::new(),
@@ -2621,6 +2713,7 @@ impl Scene {
             preview_hatches: Arc::new(Vec::new()),
             preview_text: vec![],
             interim_wire: None,
+            layer_table_dirty: false,
             camera_generation: 0,
             geometry_epoch: GEOMETRY_EPOCH.fetch_add(1, Ordering::Relaxed),
             projection_bounds_epoch: std::cell::Cell::new(0),
@@ -2648,6 +2741,7 @@ impl Scene {
             frozen_hatch_cache: RefCell::new(HashMap::default()),
             frozen_wipeout_cache: RefCell::new(HashMap::default()),
             frozen_image_cache: RefCell::new(HashMap::default()),
+            point_cloud_cache: RefCell::new(HashMap::default()),
             frozen_mesh_cache: RefCell::new(HashMap::default()),
             viewport_style_override_cache: RefCell::new(None),
             insert_hatch_cache: RefCell::new(None),
@@ -2685,6 +2779,8 @@ impl Scene {
             layout_names_cache: RefCell::new(None),
             scale_epoch: 0,
             scale_picker_cache: RefCell::new(None),
+            ucs_epoch: 0,
+            ucs_names_cache: RefCell::new(None),
             dependency_index_cache: RefCell::new(None),
             associative_hatch_source_cache: RefCell::new(None),
             parametric_constraints: Vec::new(),
@@ -2692,12 +2788,15 @@ impl Scene {
             dynamic_constraint_display: true,
             hidden_dynamic_dimensions: HashSet::default(),
             dynamic_dimension_camera_gen: None,
+            underlay_world_per_pixel: None,
+            underlay_scale_pending: None,
             hidden_parametric_constraints: HashSet::default(),
             shown_parametric_constraints: HashSet::default(),
             constraints_epoch: 0,
             glyph_cache: RefCell::new(None),
             named_parameters: named_parameters::ParameterTable::new(),
             has_associative_centers: std::cell::Cell::new(None),
+            has_underlays: std::cell::Cell::new(None),
             has_face3d: std::cell::Cell::new(None),
             document_render_env_cache: RefCell::new(None),
             background_image_cache: RefCell::new(HashMap::default()),
@@ -2744,6 +2843,58 @@ impl Scene {
     /// model camera, so a cached value applied to mm-sheet entity AABBs would
     /// be a stale model-world wpp and cull every paper-space annotation.
     /// Paper-space callers use their own scale instead.
+    /// Rasterise the underlays again when the view's scale has moved to
+    /// another quarter-octave step and stayed there briefly (not on every
+    /// frame of a zoom).
+    pub fn refresh_underlay_resolution(&mut self, now: iced::time::Instant) {
+        let Some(wpp) = self.world_per_pixel() else {
+            return;
+        };
+        let step = (f64::from(wpp).log2() * 4.0).ceil() as i32;
+        let current = self
+            .underlay_world_per_pixel
+            .map(|w| (w.log2() * 4.0).round() as i32);
+        if current == Some(step) {
+            self.underlay_scale_pending = None;
+            return;
+        }
+        match self.underlay_scale_pending {
+            Some((pending, since)) if pending == step => {
+                if now.duration_since(since) < std::time::Duration::from_millis(150) {
+                    return;
+                }
+            }
+            _ => {
+                self.underlay_scale_pending = Some((step, now));
+                return;
+            }
+        }
+        self.underlay_scale_pending = None;
+        self.underlay_world_per_pixel = Some(2f64.powf(step as f64 / 4.0));
+        if self
+            .document
+            .entities()
+            .any(|e| matches!(e, EntityType::Underlay(_)))
+        {
+            self.reseed_underlays();
+        }
+    }
+
+    /// The view has moved to another scale step than the underlay rasters
+    /// were made for (frames are requested until they are made again).
+    pub fn underlay_resolution_stale(&self) -> bool {
+        if !self.has_underlays() {
+            return false;
+        }
+        let Some(wpp) = self.world_per_pixel() else {
+            return false;
+        };
+        let step = (f64::from(wpp).log2() * 4.0).ceil() as i32;
+        self.underlay_world_per_pixel
+            .map(|w| (w.log2() * 4.0).round() as i32)
+            != Some(step)
+    }
+
     pub(super) fn world_per_pixel(&self) -> Option<f32> {
         if self.current_layout != "Model" {
             return None;
@@ -2959,6 +3110,10 @@ impl Scene {
         Some(state.into_iter().collect())
     }
 
+    /// Whether this entity contributes glyphs to the SDF text buffer, so a
+    /// change to it must invalidate the cached text vertices. Every entity whose
+    /// `to_render` can emit a `GlyphRun` belongs here — miss one and its glyphs
+    /// linger after an erase and fail to appear after an add.
     fn entity_affects_text_cache(&self, entity: &EntityType) -> bool {
         if matches!(
             entity,
@@ -2974,6 +3129,19 @@ impl Scene {
                 | EntityType::Insert(_)
         ) {
             return true;
+        }
+        // A raster reference it cannot resolve draws the saved path as a glyph
+        // run in place of the picture (`RasterImage::to_render`), so its
+        // broken-reference placeholder lives in the text buffer; a resolvable
+        // one contributes only its frame. Same memoised probe the converter
+        // uses, so the two cannot disagree — and keeping it a probe rather than
+        // a blanket type match keeps a working image's grip-drag from
+        // rebuilding every glyph in the drawing on each mouse move.
+        if let EntityType::RasterImage(image) = entity {
+            let path = image.file_path.trim();
+            if !path.is_empty() && crate::scene::model::image_model::resolve_image(path).is_none() {
+                return true;
+            }
         }
         // Complex-linetype glyphs ride the host entity's wire.
         let lt = crate::scene::view::render::linetype_name_for(&self.document, entity);
@@ -3003,10 +3171,10 @@ impl Scene {
         let is_insert = matches!(entity, EntityType::Insert(_));
         let is_section = matches!(
             entity,
-            EntityType::Extended(codec::entities::ExtendedEntity {
-                data: codec::entities::ExtendedEntityData::SectionObject(_),
-                ..
-            })
+            EntityType::Extended(extended) if matches!(
+                extended.data,
+                codec::entities::ExtendedEntityData::SectionObject(_)
+            )
         );
         if self.meshes.contains_key(&handle)
             || self.block_meshes.contains_key(&handle)
@@ -3068,12 +3236,6 @@ impl Scene {
         true
     }
 
-    /// True when no text-bearing entity changed since `last_epoch`, so cached SDF
-    /// glyphs stay valid. Text comes from Text / MText / Dimension / MultiLeader /
-    /// Leader / Table / Tolerance / attributes (incl. ATTDEF) and from block
-    /// references (their baked text moves with the instance) — an edit to any of
-    /// those, or any removal, invalidates it; a plain line / arc / polyline edit
-    /// does not.
     /// Whether the per-entity draw-order labels can be replayed since
     /// `last_epoch`. Add/Remove keep every existing label stable; only a full
     /// structural delta (DRAWORDER, file/layout/block rebuild, journal overflow)
@@ -3082,6 +3244,15 @@ impl Scene {
         self.replay_since(last_epoch).is_some()
     }
 
+    /// True when no text-bearing entity changed since `last_epoch`, so cached SDF
+    /// glyphs stay valid. Text comes from Text / MText / Dimension / MultiLeader /
+    /// Leader / Table / Tolerance / attributes (incl. ATTDEF), from block
+    /// references (their baked text moves with the instance), and from a raster
+    /// image whose reference cannot be resolved (it draws the saved path in place
+    /// of the picture) — an edit or removal of any of those invalidates it; a
+    /// plain line / arc / polyline edit does not. See
+    /// [`Scene::entity_affects_text_cache`], which classifies both directions:
+    /// live entities for an add/edit, the pre-erase category mask for a removal.
     fn text_unchanged(&self, last_epoch: u64) -> bool {
         self.category_cache_valid(last_epoch, CACHE_CATEGORY_TEXT, |handle| {
             self.document
@@ -3258,6 +3429,19 @@ impl Scene {
         any
     }
 
+    /// Fast check for whether any Underlay entities exist in the document.
+    pub(crate) fn has_underlays(&self) -> bool {
+        if let Some(known) = self.has_underlays.get() {
+            return known;
+        }
+        let any = self
+            .document
+            .entities()
+            .any(|e| matches!(e, EntityType::Underlay(_)));
+        self.has_underlays.set(Some(any));
+        any
+    }
+
     /// Fast check for whether any Face3D entities exist in the document.
     pub(crate) fn has_face3d(&self) -> bool {
         if let Some(known) = self.has_face3d.get() {
@@ -3273,6 +3457,117 @@ impl Scene {
 
     pub fn bump_entities(&mut self, changes: &[(Handle, ChangeKind)]) {
         self.bump_entities_with_parametric_policy(changes, &[], false);
+    }
+
+    /// Update the fields an evaluation event re-evaluates (see
+    /// [`crate::entities::field::update_fields`]) and redraw the hosts whose
+    /// text changed. Returns the number of hosts whose text changed and the
+    /// number of fields the hosts hold.
+    pub fn update_fields(&mut self, event: i32, hosts: Option<&[Handle]>) -> (usize, usize) {
+        let (changed, found) =
+            crate::entities::field::update_fields(&mut self.document, event, hosts);
+        if !changed.is_empty() {
+            self.bump_text_hosts(&changed);
+        }
+        (changed.len(), found)
+    }
+
+    /// Redraw text hosts whose stored text changed (re-evaluated fields). An
+    /// attribute is drawn by its INSERT, and a host inside a block definition
+    /// by every reference to that block, so those redraw instead of the host;
+    /// nothing else re-tessellates.
+    pub fn bump_text_hosts(&mut self, hosts: &[Handle]) {
+        if hosts.is_empty() {
+            return;
+        }
+        if self.dependency_index_cache.borrow().is_none() {
+            *self.dependency_index_cache.borrow_mut() = Some(self.rebuild_dependency_index());
+        }
+        // One pass over the drawing for all hosts: which block definition
+        // holds an entity, which INSERT draws an attribute, which tables
+        // draw from a block.
+        let layout_blocks: HashSet<Handle> = self
+            .document
+            .objects
+            .values()
+            .filter_map(|object| match object {
+                ObjectType::Layout(layout) if !layout.block_record.is_null() => {
+                    Some(layout.block_record)
+                }
+                _ => None,
+            })
+            .collect();
+        let mut definitions: HashMap<Handle, (Handle, String)> = HashMap::default();
+        let mut members: HashMap<Handle, Handle> = HashMap::default();
+        for record in self.document.block_records.iter() {
+            let name = record.name.to_ascii_uppercase();
+            if layout_blocks.contains(&record.handle)
+                || name.starts_with("*MODEL_SPACE")
+                || name.starts_with("*PAPER_SPACE")
+            {
+                continue;
+            }
+            definitions.insert(record.handle, (record.handle, normalize_name(&record.name)));
+            for member in &record.entity_handles {
+                members.insert(*member, record.handle);
+            }
+        }
+        let mut attribute_owner: HashMap<Handle, Handle> = HashMap::default();
+        let mut tables_of: HashMap<Handle, Vec<Handle>> = HashMap::default();
+        for entity in self.document.entities() {
+            match entity {
+                EntityType::Insert(insert) => {
+                    for attribute in &insert.attributes {
+                        attribute_owner.insert(attribute.common.handle, insert.common.handle);
+                    }
+                }
+                EntityType::Table(table) => {
+                    if let Some(record) = table.block_record_handle {
+                        tables_of
+                            .entry(record)
+                            .or_default()
+                            .push(table.common.handle);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let mut targets = DependencyTargets::default();
+        for &host in hosts {
+            // An attribute is drawn by its INSERT.
+            let handle = match self.document.get_entity(host) {
+                Some(_) => host,
+                None => match attribute_owner.get(&host) {
+                    Some(insert) => *insert,
+                    None => continue,
+                },
+            };
+            let owner = self
+                .document
+                .get_entity(handle)
+                .map(|e| e.common().owner_handle);
+            let record = owner.and_then(|owner| definitions.get(&owner)).or_else(|| {
+                members
+                    .get(&handle)
+                    .and_then(|record| definitions.get(record))
+            });
+            let Some((record_handle, name)) = record else {
+                targets.render_handles.insert(handle);
+                continue;
+            };
+            // A host inside a block definition is drawn by every reference
+            // to that block, and a table by its own block of cell texts.
+            if let Some(index) = self.dependency_index_cache.borrow().as_ref() {
+                if let Some(users) = index.block_roots.get(name) {
+                    targets.render_handles.extend(users.iter().copied());
+                }
+            }
+            targets
+                .render_handles
+                .extend(tables_of.get(record_handle).into_iter().flatten().copied());
+            targets.touches_block_definition = true;
+        }
+        self.invalidate_dependency_targets(targets);
     }
 
     pub fn bump_entities_with_parametric_driven(
@@ -3306,12 +3601,22 @@ impl Scene {
             retained_originals,
             &[],
             true,
+            false,
         );
     }
 
     /// Refresh display and associations after a solved grip or exact history restore.
-    pub(crate) fn bump_entities_after_parametric_solve(&mut self, changes: &[(Handle, ChangeKind)]) {
-        self.bump_entities_with_solve_policy(changes, &[], false, &[], &[], false);
+    pub(crate) fn bump_entities_after_parametric_solve(
+        &mut self,
+        changes: &[(Handle, ChangeKind)],
+    ) {
+        self.bump_entities_with_solve_policy(changes, &[], false, &[], &[], false, false);
+    }
+
+    /// Refresh display after a restyle that moved no geometry: nothing
+    /// associated to these entities is re-resolved or re-solved.
+    pub(crate) fn bump_entities_restyled(&mut self, changes: &[(Handle, ChangeKind)]) {
+        self.bump_entities_with_solve_policy(changes, &[], false, &[], &[], false, true);
     }
 
     /// Apply a newly-created ordered relation while temporarily anchoring
@@ -3330,6 +3635,7 @@ impl Scene {
             &[],
             fixed_refs,
             true,
+            false,
         );
     }
 
@@ -3347,6 +3653,7 @@ impl Scene {
             retained_originals,
             transformed_refs,
             true,
+            false,
         );
     }
 
@@ -3358,6 +3665,7 @@ impl Scene {
         retained_originals: &[(Handle, EntityType)],
         fixed_refs: &[parametric_constraints::ParametricRef],
         solve_parametric: bool,
+        appearance_only: bool,
     ) {
         if changes.iter().any(|(handle, kind)| {
             matches!(kind, ChangeKind::Removed)
@@ -3369,38 +3677,77 @@ impl Scene {
             self.associative_hatch_source_cache.borrow_mut().take();
         }
         let mut changes = changes.to_vec();
-        if self.associative_centers_possible(&changes) {
-            for change in self.refresh_associative_centerlines(&changes) {
+        // A table whose content this app changed (its picture reference
+        // dropped by the edit, or a new table without one) has its drawing
+        // (the *T block) redrawn from the cells. Tables keeping their picture
+        // (moved, restyled, opened from a file) are never redrawn: the block
+        // may hold authored content the redraw does not reproduce.
+        // Its cell formulas are worked out again into that block.
+        if !appearance_only {
+            let mut rebuilt = false;
+            for (handle, kind) in &changes {
+                if !matches!(kind, ChangeKind::Removed)
+                    && matches!(
+                        self.document.get_entity(*handle),
+                        Some(EntityType::Table(t)) if t.block_record_handle.is_none()
+                    )
+                {
+                    rebuilt |= self.document.refresh_table_block(*handle);
+                    rebuilt |= !crate::entities::field::refresh_table_formulas(
+                        &mut self.document,
+                        *handle,
+                    )
+                    .is_empty();
+                }
+            }
+            // The block's cached drawing is stale once its texts change.
+            if rebuilt {
+                self.block_epoch = GEOMETRY_EPOCH.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        // A restyle (layer on/off, colour, text or dimension style) moves no
+        // geometry, so nothing measured from it is re-resolved: an
+        // association that disagrees with its dimension would otherwise
+        // re-place the dimension on a layer toggle.
+        if !appearance_only {
+            if self.associative_centers_possible(&changes) {
+                for change in self.refresh_associative_centerlines(&changes) {
+                    if !changes.iter().any(|(handle, _)| *handle == change.0) {
+                        changes.push(change);
+                    }
+                }
+                for change in self.refresh_associative_center_marks(&changes) {
+                    if !changes.iter().any(|(handle, _)| *handle == change.0) {
+                        changes.push(change);
+                    }
+                }
+            }
+            for change in self.refresh_associative_dimensions(&changes) {
                 if !changes.iter().any(|(handle, _)| *handle == change.0) {
                     changes.push(change);
                 }
             }
-            for change in self.refresh_associative_center_marks(&changes) {
+            for change in self.refresh_associative_hatches(&changes) {
                 if !changes.iter().any(|(handle, _)| *handle == change.0) {
                     changes.push(change);
                 }
             }
-        }
-        for change in self.refresh_associative_dimensions(&changes) {
-            if !changes.iter().any(|(handle, _)| *handle == change.0) {
-                changes.push(change);
-            }
-        }
-        for change in self.refresh_associative_hatches(&changes) {
-            if !changes.iter().any(|(handle, _)| *handle == change.0) {
-                changes.push(change);
-            }
-        }
-        if solve_parametric && !self.parametric_constraints.is_empty() {
-            for change in self.refresh_parametric_constraints_with_initial_policy(
-                &changes,
-                driven_refs,
-                retain_size,
-                retained_originals,
-                fixed_refs,
-            ) {
+            for change in self.refresh_associative_sweeps(&changes) {
                 if !changes.iter().any(|(handle, _)| *handle == change.0) {
                     changes.push(change);
+                }
+            }
+            if solve_parametric && !self.parametric_constraints.is_empty() {
+                for change in self.refresh_parametric_constraints_with_initial_policy(
+                    &changes,
+                    driven_refs,
+                    retain_size,
+                    retained_originals,
+                    fixed_refs,
+                ) {
+                    if !changes.iter().any(|(handle, _)| *handle == change.0) {
+                        changes.push(change);
+                    }
                 }
             }
         }
@@ -3457,7 +3804,10 @@ impl Scene {
             self.lighting_cache.borrow_mut().clear();
         }
         if let Some(true) = self.has_face3d.get() {
-            if changes.iter().any(|(_, k)| matches!(k, ChangeKind::Removed)) {
+            if changes
+                .iter()
+                .any(|(_, k)| matches!(k, ChangeKind::Removed))
+            {
                 self.has_face3d.set(None);
             }
         } else if changes.iter().any(|(h, _)| {
@@ -3536,6 +3886,7 @@ impl Scene {
         self.lighting_cache.borrow_mut().clear();
         *self.document_render_env_cache.borrow_mut() = None;
         self.background_image_cache.borrow_mut().clear();
+        self.has_underlays.set(None);
         self.has_face3d.set(None);
         // Default: also invalidate block definitions. Safe for every caller;
         // operations that know blocks are untouched use `bump_geometry_no_blocks`.
@@ -3759,7 +4110,10 @@ impl Scene {
                 crate::entities::solid3d::surface_isoline_counts(surface),
                 crate::entities::solid3d::surface_property_state(surface).isolines,
             ),
-            _ => ([self.document.header.isolines.max(0) as usize; 2], false),
+            _ => (
+                [crate::entities::solid3d::clamp_header_isolines(self.document.header.isolines); 2],
+                false,
+            ),
         };
         let (mut set, wires, center) = crate::scene::model::solid_model::display_from_solid(
             solid,
@@ -3902,6 +4256,9 @@ impl Scene {
                             );
                         }
                     }
+                    if self.meshes.contains_key(&h) {
+                        material.diffuse = self.count_color(h, material.diffuse, bg);
+                    }
                     (h, material)
                 })
             })
@@ -3929,6 +4286,9 @@ impl Scene {
         let bg = self.bg_color;
         let materials: HashMap<Handle, crate::scene::model::material_model::MeshMaterial> = handles
             .iter()
+            .filter(|handle| {
+                self.meshes.contains_key(handle) || self.block_meshes.contains_key(handle)
+            })
             .filter_map(|&handle| {
                 self.document.get_entity(handle).map(|entity| {
                     let color = self.render_style(entity).0;
@@ -3947,6 +4307,9 @@ impl Scene {
                     {
                         material.diffuse =
                             crate::scene::cache::block_cache::fade_toward_bg(material.diffuse, bg);
+                    }
+                    if self.meshes.contains_key(&handle) {
+                        material.diffuse = self.count_color(handle, material.diffuse, bg);
                     }
                     (handle, material)
                 })
@@ -3997,10 +4360,83 @@ impl Scene {
         self.bump_geometry_no_blocks();
     }
 
+    /// Enter / leave the COUNT colouring; a no-op when nothing changed.
+    /// Entering or leaving fades or restores the whole drawing; a change
+    /// inside count mode recolours only the objects whose colour changed.
+    pub fn set_count_display(&mut self, display: Option<CountDisplay>) {
+        if self.count_display == display {
+            return;
+        }
+        let old = std::mem::replace(&mut self.count_display, display);
+        let (Some(old), Some(new)) = (old, self.count_display.as_ref()) else {
+            self.hatch_cache.borrow_mut().clear();
+            self.recolor_meshes();
+            self.bump_geometry_no_blocks();
+            return;
+        };
+        let recoloured = (old.color, old.error_color) != (new.color, new.error_color);
+        let class = |d: &CountDisplay, h: &Handle| (d.errors.contains(h), d.counted.contains(h));
+        let changed: Vec<Handle> = old
+            .counted
+            .iter()
+            .chain(&old.errors)
+            .chain(&new.counted)
+            .chain(&new.errors)
+            .copied()
+            .collect::<HashSet<Handle>>()
+            .into_iter()
+            .filter(|h| recoloured || class(&old, h) != class(new, h))
+            .collect();
+        self.recolor_meshes_for_handles(&changed);
+        let changes: Vec<(Handle, ChangeKind)> = changed
+            .into_iter()
+            .map(|h| (h, ChangeKind::Modified))
+            .collect();
+        self.bump_entities_restyled(&changes);
+    }
+
+    /// The colour count mode gives an object drawn as part of `handle` (a
+    /// top-level entity): the count colours, else faded; unchanged outside
+    /// count mode.
+    pub(crate) fn count_color(&self, handle: Handle, color: [f32; 4], bg: [f32; 4]) -> [f32; 4] {
+        let Some(count) = &self.count_display else {
+            return color;
+        };
+        let [r, g, b, _] = if count.errors.contains(&handle) {
+            count.error_color
+        } else if count.counted.contains(&handle) {
+            count.color
+        } else {
+            return crate::scene::cache::block_cache::fade_toward_bg(color, bg);
+        };
+        [r, g, b, color[3]]
+    }
+
     /// Fade the colours of wires that belong to entities outside the REFEDIT
     /// keep set (no-op when not editing). The geometry is untouched, so
-    /// hit-testing still works on faded entities.
+    /// hit-testing still works on faded entities. In count mode the counted
+    /// references and the duplicates take the count colours instead.
     fn apply_refedit_fade(&self, wires: &mut [WireModel], bg: [f32; 4]) {
+        if let Some(count) = &self.count_display {
+            for w in wires.iter_mut() {
+                let (color, class) = match Self::handle_from_wire_name(&w.name) {
+                    Some(h) if count.errors.contains(&h) => (count.error_color, 2u64),
+                    Some(h) if count.counted.contains(&h) => (count.color, 1),
+                    _ => (
+                        crate::scene::cache::block_cache::fade_toward_bg(w.color, bg),
+                        0,
+                    ),
+                };
+                w.color = color;
+                // Instances of one definition draw in one colour: counted and
+                // duplicate references get instance groups of their own.
+                // ponytail: tags the two top bits of the source id, which the
+                // id counter never reaches.
+                if let Some(instance) = w.render_instance.as_mut() {
+                    instance.source_id |= class << 62;
+                }
+            }
+        }
         let Some(keep) = &self.refedit_keep else {
             return;
         };
@@ -4318,6 +4754,24 @@ impl Scene {
     /// without going through private API.
     pub fn current_layout_block_handle_pub(&self) -> Handle {
         self.current_layout_block_handle()
+    }
+
+    /// A unique id for a new viewport on the current layout: one past the
+    /// largest id there, at least 2 (1 is the layout's own paper viewport).
+    pub fn next_viewport_id(&self) -> i16 {
+        let layout_block = self.current_layout_block_handle();
+        let max_id = self
+            .document
+            .entities()
+            .filter_map(|e| match e {
+                codec::EntityType::Viewport(v) if v.common.owner_handle == layout_block => {
+                    Some(v.id)
+                }
+                _ => None,
+            })
+            .max()
+            .unwrap_or(1);
+        (max_id + 1).max(2)
     }
 
     /// True when an entity belongs to the active layout, including imported
@@ -5982,7 +6436,13 @@ impl Scene {
         if self.current_layout == "Model" {
             return self.document.header.current_annotation_scale.clone();
         }
-        self.explicit_viewport_handle()
+        // Same viewport the pill number comes from (active → selected →
+        // first-content fallback), so label, number and badge always describe
+        // one viewport (#48). Degenerate case: with zero Scale objects the
+        // name falls back to paper/"1:1" while the number stays factual.
+        // The render paths use displayed_annotation_scale_HANDLE, which stays
+        // explicit-only — untouched by this fix.
+        self.target_viewport_handle()
             .and_then(|viewport| self.viewport_scale_handle(viewport))
             .and_then(|handle| match self.document.objects.get(&handle) {
                 Some(ObjectType::Scale(scale)) => Some(scale.name.clone()),
@@ -6042,8 +6502,47 @@ impl Scene {
         Some(scale_handle)
     }
 
+    /// Scale the active viewport to `factor` paper units per model unit
+    /// (ZOOM nXP). A named scale of that factor is linked as its annotation
+    /// scale; otherwise the viewport keeps a custom scale.
+    pub fn set_viewport_scale_factor(&mut self, factor: f64) -> bool {
+        let Some(viewport) = self.explicit_viewport_handle() else {
+            return false;
+        };
+        let unit_factor = self.annotation_scale_unit_factor();
+        let named = self
+            .document
+            .objects
+            .values()
+            .find_map(|object| match object {
+                ObjectType::Scale(scale)
+                    if !scale.is_temporary
+                        && (scale.factor() * unit_factor - factor).abs()
+                            <= 1.0e-9 * factor.max(1.0) =>
+                {
+                    Some(scale.name.clone())
+                }
+                _ => None,
+            });
+        if let Some(name) = named {
+            return self.set_viewport_scale_named_for(viewport, &name).is_some();
+        }
+        match self.document.get_entity_mut(viewport) {
+            Some(EntityType::Viewport(vp)) if !vp.status.locked && factor > 1.0e-9 => {
+                vp.custom_scale = factor;
+                vp.view_height = vp.height / factor;
+            }
+            _ => return false,
+        }
+        self.notify_viewport_changed(viewport);
+        self.resident_wire_sets.borrow_mut().clear();
+        self.bump_geometry();
+        true
+    }
+
     pub fn viewport_annotation_scale_synced(&self) -> Option<bool> {
-        let viewport = self.explicit_viewport_handle()?;
+        // Same viewport as the pill number and label (#48).
+        let viewport = self.target_viewport_handle()?;
         let EntityType::Viewport(vp) = self.document.get_entity(viewport)? else {
             return None;
         };
@@ -6131,7 +6630,8 @@ impl Scene {
             }
         }
         let names = std::sync::Arc::new(self.layout_names());
-        *self.layout_names_cache.borrow_mut() = Some((self.layout_epoch, std::sync::Arc::clone(&names)));
+        *self.layout_names_cache.borrow_mut() =
+            Some((self.layout_epoch, std::sync::Arc::clone(&names)));
         names
     }
 
@@ -6177,6 +6677,31 @@ impl Scene {
             std::sync::Arc::clone(&list),
         ));
         list
+    }
+
+    pub fn bump_ucs_epoch(&mut self) {
+        self.ucs_epoch += 1;
+    }
+
+    /// Named-UCS names for the ViewCube picker, memoised behind `ucs_epoch`
+    /// (#34, mirrors `cached_layout_names`). Same empty-name filter the view
+    /// blocks used when building the list inline every frame.
+    pub fn cached_ucs_names(&self) -> std::sync::Arc<[String]> {
+        if let Some((epoch, names)) = self.ucs_names_cache.borrow().as_ref() {
+            if *epoch == self.ucs_epoch {
+                return std::sync::Arc::clone(names);
+            }
+        }
+        let names: std::sync::Arc<[String]> = self
+            .document
+            .ucss
+            .iter()
+            .map(|u| u.name.clone())
+            .filter(|n| !n.is_empty())
+            .collect::<Vec<_>>()
+            .into();
+        *self.ucs_names_cache.borrow_mut() = Some((self.ucs_epoch, std::sync::Arc::clone(&names)));
+        names
     }
 
     /// Wire set for the Model layout, shared by every tile.
@@ -6615,6 +7140,12 @@ impl Scene {
         let mut new_runs: HashMap<Handle, Vec<WireModel>> = HashMap::default();
         let mut memo_updates: Vec<(Handle, Arc<Vec<WireModel>>)> = Vec::new();
         let mut visible_changed: HashSet<Handle> = HashSet::default();
+        // Every geometry edit drops its handle's memo entry, so an entry that
+        // survived its delta marks a visibility-only change: its wires come
+        // back from the memo, provided it was built under this display context.
+        let avp = style_viewport.or(self.active_viewport);
+        let memo_ok = self.resident_tess_guard.get()
+            == tess_memo_guard(None, anno, annotation_scale_handle, all_visible, bg, avp);
         for (h, kind) in &deltas {
             if matches!(kind, ChangeKind::Removed) {
                 continue;
@@ -6632,10 +7163,19 @@ impl Scene {
                 continue;
             }
             visible_changed.insert(*h);
+            let memoized = memo_ok
+                .then(|| self.resident_tess_memo.borrow().get(h).cloned())
+                .flatten();
+            if let Some(raw) = memoized {
+                let mut faded = raw.as_ref().clone();
+                self.apply_refedit_fade(&mut faded, bg);
+                new_runs.insert(*h, faded);
+                continue;
+            }
             let mut raw = tessellate_entity(
                 &self.document,
                 &empty_sel,
-                style_viewport.or(self.active_viewport),
+                avp,
                 bg,
                 anno,
                 annotation_scale_handle,
@@ -6686,13 +7226,20 @@ impl Scene {
                     .copied()
                     .unwrap_or(handle.value())
             };
+            // Hashed once: a linear `order.contains` per re-shown entity made
+            // turning a big layer back on quadratic.
+            let ordered: HashSet<Handle> = if visible_changed.is_empty() {
+                HashSet::default()
+            } else {
+                layout.order.iter().copied().collect()
+            };
             for &(handle, kind) in &deltas {
                 if matches!(kind, ChangeKind::Removed) {
                     // Keep the order entry as a tombstone. Undo/Redo can then
                     // restore the exact physical slot and submission position.
                     continue;
                 }
-                if visible_changed.contains(&handle) && !layout.order.contains(&handle) {
+                if visible_changed.contains(&handle) && !ordered.contains(&handle) {
                     let key = effective(handle);
                     let position = layout
                         .order
@@ -7022,7 +7569,7 @@ impl Scene {
             let Some(EntityType::Viewport(viewport)) = self.document.get_entity(handle) else {
                 continue;
             };
-            if viewport.common.owner_handle != paper_block || !viewport.status.is_on {
+            if viewport.common.owner_handle != paper_block || !viewport.is_on() {
                 continue;
             }
             let mode = render_mode_override.unwrap_or(viewport.render_mode);
@@ -7462,8 +8009,15 @@ impl Scene {
         all_visible: bool,
         viewport: Option<Handle>,
     ) -> Vec<ImageModel> {
-        self.collect_images(target_block, frozen, annotation_scale_handle, all_visible,
-            viewport, false, |image, _| image)
+        self.collect_images(
+            target_block,
+            frozen,
+            annotation_scale_handle,
+            all_visible,
+            viewport,
+            false,
+            |image, _| image,
+        )
     }
 
     pub fn paper_plot_images(&self) -> Vec<crate::io::pdf_export::PlotImage> {
@@ -7472,8 +8026,14 @@ impl Scene {
         } else {
             self.paper_annotation_scale_handle()
         };
-        self.placed_images(self.current_layout_block_handle(), None,
-            scale, self.annotation_all_visible(), None, true)
+        self.placed_images(
+            self.current_layout_block_handle(),
+            None,
+            scale,
+            self.annotation_all_visible(),
+            None,
+            true,
+        )
     }
 
     fn placed_images(
@@ -7485,11 +8045,18 @@ impl Scene {
         viewport: Option<Handle>,
         plotting: bool,
     ) -> Vec<crate::io::pdf_export::PlotImage> {
-        self.collect_images(target_block, frozen, annotation_scale_handle, all_visible,
-            viewport, plotting, |image, context| crate::io::pdf_export::PlotImage {
+        self.collect_images(
+            target_block,
+            frozen,
+            annotation_scale_handle,
+            all_visible,
+            viewport,
+            plotting,
+            |image, context| crate::io::pdf_export::PlotImage {
                 image,
                 clips: context.clips.clone(),
-            })
+            },
+        )
     }
 
     fn collect_images<T>(
@@ -7530,8 +8097,12 @@ impl Scene {
         graph.walk_root(
             root,
             |entity, context| {
-                (!plotting || self.document.layers.get(&entity.common().layer)
-                    .is_none_or(|layer| layer.is_plottable))
+                (!plotting
+                    || self
+                        .document
+                        .layers
+                        .get(&entity.common().layer)
+                        .is_none_or(|layer| layer.is_plottable))
                     && (context.is_instanced()
                         || !self.entity_temporarily_hidden(entity.common().handle))
             },
@@ -7624,23 +8195,17 @@ impl Scene {
                     // also invalidate. Block-definition edits route through
                     // bump_geometry (a full delta) and invalidate regardless.
                     Some((cached_epoch, arc))
-                        if self.category_cache_valid(
-                            *cached_epoch,
-                            CACHE_CATEGORY_MESH,
-                            |h| {
-                                self.meshes.contains_key(&h)
-                                    || matches!(
-                                        self.document.get_entity(h),
-                                        Some(EntityType::Insert(_))
-                                            | Some(EntityType::Extended(
-                                                codec::entities::ExtendedEntity {
-                                                    data: codec::entities::ExtendedEntityData::SectionObject(_),
-                                                    ..
-                                                }
-                                            ))
-                                    )
-                            },
-                        ) =>
+                        if self.category_cache_valid(*cached_epoch, CACHE_CATEGORY_MESH, |h| {
+                            self.meshes.contains_key(&h)
+                                || match self.document.get_entity(h) {
+                                    Some(EntityType::Insert(_)) => true,
+                                    Some(EntityType::Extended(extended)) => matches!(
+                                        extended.data,
+                                        codec::entities::ExtendedEntityData::SectionObject(_)
+                                    ),
+                                    _ => false,
+                                }
+                        }) =>
                     {
                         Some(Arc::clone(arc))
                     }
@@ -8128,7 +8693,12 @@ impl Scene {
         };
         // ponytail: full entity scan per call, gated to drawings declaring the
         // class; memoize per geometry epoch if large Inventor sheets show up.
-        if self.document.classes.get_by_name("ACIDBLOCKREFERENCE").is_some() {
+        if self
+            .document
+            .classes
+            .get_by_name("ACIDBLOCKREFERENCE")
+            .is_some()
+        {
             let model = self.model_space_block_handle();
             hidden.extend(self.document.entities().filter_map(|e| match e {
                 EntityType::Insert(i)
@@ -8282,6 +8852,150 @@ impl Scene {
         arc
     }
 
+    /// Point clouds of the model content, with a content viewport's frozen
+    /// layers removed. The paper sheet shows none. The set is rebuilt per
+    /// geometry epoch; unchanged clouds keep their placed points (and GPU
+    /// buffers) by key.
+    pub(super) fn point_clouds_for_viewport(
+        &self,
+        frozen: &HashSet<Handle>,
+        paper_sheet: bool,
+    ) -> Arc<crate::scene::model::point_cloud::PointCloudSet> {
+        use crate::scene::model::point_cloud;
+        static EMPTY: std::sync::OnceLock<Arc<point_cloud::PointCloudSet>> =
+            std::sync::OnceLock::new();
+        let empty = || Arc::clone(EMPTY.get_or_init(Default::default));
+        if paper_sheet {
+            return empty();
+        }
+        let target_block = self.content_render_block_handle();
+        let key = (target_block, Self::frozen_layers_sig(frozen));
+        if let Some((epoch, arc)) = self.point_cloud_cache.borrow().get(&key) {
+            if *epoch == self.geometry_epoch {
+                return Arc::clone(arc);
+            }
+        }
+        let arc = if point_cloud::any_definition(&self.document) {
+            let depths = rustc_hash::FxHashMap::default();
+            let graph = render_graph::RenderSceneGraph::new(
+                &self.document,
+                (!frozen.is_empty()).then_some(frozen),
+                None,
+                true,
+                &depths,
+            );
+            let mut clouds = Vec::new();
+            graph.walk_root(
+                self.render_scene_root(target_block),
+                |entity, context| {
+                    context.is_instanced()
+                        || !self.entity_temporarily_hidden(entity.common().handle)
+                },
+                |entity, context| {
+                    let EntityType::Extended(extended) = entity else {
+                        return;
+                    };
+                    let codec::entities::ExtendedEntityData::PointCloudEx(data) = &extended.data
+                    else {
+                        return;
+                    };
+                    let transform = context.is_instanced().then_some(&context.transform);
+                    // Object Color stylization draws the cloud in its own colour.
+                    let common = entity.common();
+                    let color = if matches!(common.color, codec::types::Color::ByLayer) {
+                        self.document
+                            .layers
+                            .get(&common.layer)
+                            .map(|layer| layer.color.clone())
+                            .unwrap_or(common.color.clone())
+                    } else {
+                        common.color.clone()
+                    };
+                    let object_color = color.rgb().map_or([255; 3], |(r, g, b)| [r, g, b]);
+                    clouds.extend(point_cloud::placed(
+                        &self.document,
+                        data,
+                        object_color,
+                        transform,
+                        &point_cloud::hidden(data),
+                    ));
+                },
+            );
+            if clouds.is_empty() {
+                empty()
+            } else {
+                Arc::new(point_cloud::PointCloudSet {
+                    point_size: point_cloud::point_size(&self.document),
+                    clouds,
+                })
+            }
+        } else {
+            empty()
+        };
+        self.point_cloud_cache
+            .borrow_mut()
+            .insert(key, (self.geometry_epoch, Arc::clone(&arc)));
+        arc
+    }
+
+    /// Wireframe 2D draws no cloud points: each shown cloud whose file is
+    /// found draws its extents box and a message instead, unless
+    /// POINTCLOUD2DVSDISPLAY is 1.
+    // ponytail: model-space clouds only, rebuilt per frame; cache by epoch if
+    // drawings with many clouds make it show.
+    pub(super) fn point_cloud_2d_wires(&self) -> Vec<WireModel> {
+        use crate::scene::model::point_cloud::{resolve_source, setting, setting_value};
+        if !crate::scene::model::point_cloud::any_definition(&self.document)
+            || setting("POINTCLOUD2DVSDISPLAY")
+                .is_some_and(|s| setting_value(&self.document, s) == 1)
+        {
+            return Vec::new();
+        }
+        let mut wires = Vec::new();
+        for entity in self.document.entities() {
+            let EntityType::Extended(extended) = entity else {
+                continue;
+            };
+            let codec::entities::ExtendedEntityData::PointCloudEx(data) = &extended.data else {
+                continue;
+            };
+            let common = entity.common();
+            if common.invisible
+                || self.entity_temporarily_hidden(common.handle)
+                || self
+                    .document
+                    .layers
+                    .get(&common.layer)
+                    .is_some_and(|layer| layer.is_off() || layer.is_frozen())
+                || resolve_source(&self.document, data).is_none()
+            {
+                continue;
+            }
+            let color = if matches!(common.color, codec::types::Color::ByLayer) {
+                self.document
+                    .layers
+                    .get(&common.layer)
+                    .map(|layer| layer.color.clone())
+                    .unwrap_or(common.color.clone())
+            } else {
+                common.color.clone()
+            };
+            let (r, g, b) = color.rgb().unwrap_or((255, 255, 255));
+            wires.push(WireModel::solid_f64(
+                common.handle.value().to_string(),
+                crate::entities::extended::point_cloud_2d_style_lines(data),
+                [
+                    f32::from(r) / 255.0,
+                    f32::from(g) / 255.0,
+                    f32::from(b) / 255.0,
+                    1.0,
+                ],
+                false,
+            ));
+        }
+        wires
+    }
+
     /// Image / OLE models for a content viewport, with its frozen layers removed.
     pub(super) fn images_for_viewport(
         &self,
@@ -8352,14 +9066,19 @@ impl Scene {
         arc
     }
 
-    /// True when `handle`'s entity sits on a locked layer. Locked objects stay
-    /// visible, snappable and selectable, but mutation paths must skip them.
+    /// True when `handle`'s entity sits on a locked layer, or is a point cloud
+    /// locked on its own. Locked objects stay visible, snappable and
+    /// selectable, but mutation paths must skip them.
     pub fn is_layer_locked(&self, handle: Handle) -> bool {
-        self.document
-            .get_entity(handle)
-            .map(|e| e.common().layer.clone())
-            .and_then(|name| self.document.layers.get(&name).map(|l| l.is_locked()))
-            .unwrap_or(false)
+        let Some(entity) = self.document.get_entity(handle) else {
+            return false;
+        };
+        is_locked_point_cloud(entity)
+            || self
+                .document
+                .layers
+                .get(&entity.common().layer)
+                .is_some_and(|l| l.is_locked())
     }
 
     /// The name of the locked layer `handle` sits on, if any (for messages).
@@ -8489,6 +9208,17 @@ impl Scene {
                         self.material_base_dir.as_deref(),
                     );
                 }
+                if self.count_display.is_some() {
+                    let own = transformed
+                        .instance_color
+                        .or(set.display_color())
+                        .unwrap_or([1.0; 4]);
+                    let color = self.count_color(context.root_handle, own, self.current_bg());
+                    transformed.instance_color = Some(color);
+                    if let Some(material) = transformed.material.as_mut() {
+                        material.diffuse = color;
+                    }
+                }
                 transformed.instance_handle = Some(context.root_handle);
                 out.push(transformed);
             },
@@ -8533,7 +9263,7 @@ impl Scene {
     }
 
     /// Background colour for the current layout (model vs paper).
-    fn current_bg(&self) -> [f32; 4] {
+    pub(crate) fn current_bg(&self) -> [f32; 4] {
         if self.current_layout != "Model" {
             self.paper_bg_color
         } else {
@@ -9056,12 +9786,28 @@ impl Scene {
                 }
             }
         }
+        let block = self.interaction_block_handle();
+        let frozen: Option<HashSet<Handle>> = self
+            .interaction_viewport_frozen_layers()
+            .map(|layers| layers.iter().copied().collect());
+        let annotation_scale_handle = self.displayed_annotation_scale_handle();
+        let all_visible = self.annotation_all_visible();
+
         let changed_live: Vec<Handle> = changes
             .iter()
             .filter_map(|(handle, kind)| {
-                (!matches!(kind, ChangeKind::Removed)
-                    && !self.entity_temporarily_hidden(*handle)
-                    && self.document.get_entity(*handle).is_some())
+                if matches!(kind, ChangeKind::Removed) {
+                    return None;
+                }
+
+                let entity = self.document.get_entity(*handle)?;
+                self.resident_entity_visible(
+                    entity,
+                    block,
+                    frozen.as_ref(),
+                    annotation_scale_handle,
+                    all_visible,
+                )
                 .then_some(*handle)
             })
             .collect();
@@ -9310,8 +10056,25 @@ impl Scene {
 
     /// Prepare hover indexes after derived geometry is installed during open.
     pub(crate) fn warm_interaction_caches(&self) {
+        let perf = crate::perf::enabled();
+        let t_start = perf.then(iced::time::Instant::now);
+        let t_ei = perf.then(iced::time::Instant::now);
         let _ = self.entity_index();
+        let ei_ms = crate::perf::elapsed_ms(t_ei);
+
+        let t_ihi = perf.then(iced::time::Instant::now);
         let _ = self.interaction_handle_index();
+        let ihi_ms = crate::perf::elapsed_ms(t_ihi);
+        let total_ms = crate::perf::elapsed_ms(t_start);
+
+        if perf {
+            crate::perf_record!(
+                "[perf] warm_interaction_caches total={:.1}ms entity_index={:.1}ms interaction_handle_index={:.1}ms",
+                total_ms,
+                ei_ms,
+                ihi_ms,
+            );
+        }
     }
 
     fn interaction_handle_index(
@@ -9967,6 +10730,33 @@ impl Scene {
         )
     }
 
+    /// The solid under the cursor and where the pick ray meets it.
+    pub fn solid_click_hit_point(
+        &self,
+        cursor: iced::Point,
+        view_rot: glam::Mat4,
+        eye: glam::DVec3,
+        bounds: iced::Rectangle,
+    ) -> Option<(Handle, glam::DVec3)> {
+        let meshes = self.interaction_meshes_arc();
+        pick::hit_test::mesh_click_handle_point(
+            cursor,
+            meshes.iter().filter_map(|set| {
+                let handle = set.entity_handle()?;
+                let mesh = set.geometry_lods().first()?;
+                Some((
+                    handle,
+                    mesh,
+                    set.instance_transform,
+                    mesh_interaction_aabb(set)?,
+                ))
+            }),
+            view_rot,
+            eye,
+            bounds,
+        )
+    }
+
     pub fn solid_planar_face_normal_at(
         &mut self,
         handle: Handle,
@@ -10528,36 +11318,14 @@ impl Scene {
         let t_build = perf.then(iced::time::Instant::now);
         let mut wires: Vec<WireModel> = if memo_active {
             // Invalidate when any baked display input changes.
-            let guard = {
-                let mut g: u64 = 0xcbf2_9ce4_8422_2325;
-                let mut mix = |x: u64| g = g.rotate_left(13) ^ x;
-                // wpp removed from guard: GPU analytical rendering handles
-                // circles/arcs/ellipses, Point ignores wpp, and Light (the
-                // only remaining wpp consumer) is rare enough that its stale
-                // glyphs don't justify clearing every memoized entity on zoom.
-                if let Some(v) = view_aabb {
-                    for c in v {
-                        mix(c.to_bits() as u64);
-                    }
-                }
-                mix(anno.to_bits() as u64);
-                mix(annotation_scale_handle
-                    .map(|handle| handle.value())
-                    .unwrap_or(0));
-                mix(all_visible as u64);
-                // Direct entities and inherited/faded block colours still bake
-                // the background before Batches::finalize records its inputs.
-                for channel in bg {
-                    mix(channel.to_bits() as u64);
-                }
-                mix(avp.map(|h| h.value()).unwrap_or(0));
-                // SDF glyph quads bake the atlas UV of each tile, so a growth or
-                // a re-bake (which rescale / rewind every UV) makes memoized text
-                // address the wrong tile — garbage on screen, and a silent miss in
-                // the PDF export's glyph lookup (#385 under #347's conditions).
-                mix(crate::scene::text::sdf_atlas::generation());
-                g
-            };
+            let guard = tess_memo_guard(
+                view_aabb,
+                anno,
+                annotation_scale_handle,
+                all_visible,
+                bg,
+                avp,
+            );
             let (memo_cell, guard_cell) = if resident {
                 (&self.resident_tess_memo, &self.resident_tess_guard)
             } else {
@@ -10623,8 +11391,7 @@ impl Scene {
                 for (h, a) in miss_pairs {
                     // Uniquely owned (just built above): enrich solid shells
                     // with B-rep vertex snaps before the memo/assembly split.
-                    let mut wires =
-                        Arc::try_unwrap(a).unwrap_or_else(|a| a.as_ref().clone());
+                    let mut wires = Arc::try_unwrap(a).unwrap_or_else(|a| a.as_ref().clone());
                     self.attach_solid_snaps(h, &mut wires);
                     let a = Arc::new(wires);
                     out.extend(a.iter().cloned());
@@ -11149,6 +11916,9 @@ vis_index={:.1} visible_probe={:.1}",
                 target.render_handles.extend(render_handles.iter().copied());
                 target.source_handles.insert(common.handle);
                 target.touches_block_definition |= inside_block;
+                if inside_block {
+                    target.block_users.extend(render_handles.iter().copied());
+                }
             };
             if matches!(entity, EntityType::Point(_)) {
                 extend_category(&mut index.points);
@@ -11179,6 +11949,9 @@ vis_index={:.1} visible_probe={:.1}",
                 target.render_handles.extend(render_handles.iter().copied());
                 target.source_handles.insert(common.handle);
                 target.touches_block_definition |= inside_block;
+                if inside_block {
+                    target.block_users.extend(render_handles.iter().copied());
+                }
             };
             let add_handle = |map: &mut HashMap<Handle, DependencyTargets>,
                               handle: Option<Handle>| {
@@ -11189,6 +11962,9 @@ vis_index={:.1} visible_probe={:.1}",
                 target.render_handles.extend(render_handles.iter().copied());
                 target.source_handles.insert(common.handle);
                 target.touches_block_definition |= inside_block;
+                if inside_block {
+                    target.block_users.extend(render_handles.iter().copied());
+                }
             };
             add(&mut index.layers, &common.layer);
             match entity {
@@ -11296,6 +12072,7 @@ vis_index={:.1} visible_probe={:.1}",
                 _ => {}
             }
         }
+        index.block_roots = roots;
         index
     }
 
@@ -11321,6 +12098,9 @@ vis_index={:.1} visible_probe={:.1}",
             combined
                 .source_handles
                 .extend(target.source_handles.iter().copied());
+            combined
+                .block_users
+                .extend(target.block_users.iter().copied());
             combined.touches_block_definition |= target.touches_block_definition;
         }
         combined
@@ -11340,7 +12120,76 @@ vis_index={:.1} visible_probe={:.1}",
             .into_iter()
             .map(|handle| (handle, ChangeKind::Modified))
             .collect();
-        self.bump_entities(&changes);
+        self.bump_entities_restyled(&changes);
+    }
+
+    /// Off/freeze toggle on `names`, nothing else changed. Visibility gates an
+    /// entity before it is tessellated, so entities carrying these layers keep
+    /// their tessellation memo and only leave or re-enter the resident set;
+    /// block users re-expand, since their definitions bake the children's
+    /// visibility. Nothing is recoloured.
+    pub fn invalidate_layer_visibility(&mut self, names: &[String]) {
+        // Turning a layer off or freezing it removes its entities from the
+        // interactive scene as well as from rendering. Drop any entities that
+        // were already selected before the visibility change, otherwise a
+        // subsequent MOVE/ERASE/etc. could still modify invisible geometry.
+        let block = self.interaction_block_handle();
+        let frozen: Option<HashSet<Handle>> = self
+            .interaction_viewport_frozen_layers()
+            .map(|layers| layers.iter().copied().collect());
+        let annotation_scale_handle = self.displayed_annotation_scale_handle();
+        let all_visible = self.annotation_all_visible();
+
+        let visible_selection: Vec<Handle> = self
+            .selected_handles_in_order()
+            .into_iter()
+            .filter(|handle| {
+                self.document.get_entity(*handle).is_some_and(|entity| {
+                    self.resident_entity_visible(
+                        entity,
+                        block,
+                        frozen.as_ref(),
+                        annotation_scale_handle,
+                        all_visible,
+                    )
+                })
+            })
+            .collect();
+        self.replace_selection_exact(&visible_selection);
+
+        let targets = self.dependency_targets(DependencyKind::Layer, names);
+        if targets.render_handles.is_empty() {
+            return;
+        }
+        if targets.touches_block_definition {
+            self.block_epoch = GEOMETRY_EPOCH.fetch_add(1, Ordering::Relaxed);
+        }
+        let kept: Vec<_> = {
+            let mut tm = self.tess_memo.borrow_mut();
+            let mut rm = self.resident_tess_memo.borrow_mut();
+            targets
+                .render_handles
+                .iter()
+                .filter(|handle| !targets.block_users.contains(handle))
+                .map(|&handle| (handle, tm.remove(&handle), rm.remove(&handle)))
+                .collect()
+        };
+        let changes: Vec<(Handle, ChangeKind)> = targets
+            .render_handles
+            .iter()
+            .map(|&handle| (handle, ChangeKind::Modified))
+            .collect();
+        self.bump_entities_restyled(&changes);
+        let mut tm = self.tess_memo.borrow_mut();
+        let mut rm = self.resident_tess_memo.borrow_mut();
+        for (handle, culled, resident) in kept {
+            if let Some(wires) = culled {
+                tm.insert(handle, wires);
+            }
+            if let Some(wires) = resident {
+                rm.insert(handle, wires);
+            }
+        }
     }
 
     pub fn invalidate_layer_dependencies(&mut self, names: &[String]) {
@@ -11502,6 +12351,8 @@ vis_index={:.1} visible_probe={:.1}",
             }
         }
 
+        let perf = crate::perf::enabled();
+        let t_aabbs_start = perf.then(iced::time::Instant::now);
         let mut items: Vec<(Handle, [f64; 4])> = Vec::new();
         let mut unbounded: Vec<Handle> = Vec::new();
         let mut union: Option<[f64; 4]> = None;
@@ -11525,6 +12376,7 @@ vis_index={:.1} visible_probe={:.1}",
                 None => unbounded.push(e.common().handle),
             }
         }
+        let aabbs_ms = crate::perf::elapsed_ms(t_aabbs_start);
         let root = match union {
             Some(u) => {
                 let w = (u[2] - u[0]).max(1.0);
@@ -11535,9 +12387,21 @@ vis_index={:.1} visible_probe={:.1}",
             }
             None => [-1.0, -1.0, 1.0, 1.0],
         };
+        let t_tree_start = perf.then(iced::time::Instant::now);
         let mut tree = pick::quadtree::QuadTree::new(root);
         for (h, ab) in items {
             tree.insert(h, ab);
+        }
+        let tree_ms = crate::perf::elapsed_ms(t_tree_start);
+
+        if perf {
+            crate::perf_record!(
+                "[perf] entity_index-rebuild aabbs={:.1}ms tree={:.1}ms entities={} root={:?}",
+                aabbs_ms,
+                tree_ms,
+                tree.len(),
+                root,
+            );
         }
 
         *self.entity_index_cache.borrow_mut() = Some((
@@ -11737,78 +12601,15 @@ vis_index={:.1} visible_probe={:.1}",
 
     fn compute_model_space_extents(&self) -> Option<(glam::Vec3, glam::Vec3)> {
         let model_block = self.model_space_block_handle();
-        if model_block.is_null() {
-            return None;
-        }
-        // Reuse the full resident source in every layout. The kernel bounds
-        // its world-space key vertices; camera fitting never tessellates a
-        // second copy or reads the current paper sheet's wire cache.
-        let scale = crate::scene::annotative::scale_handle_by_name(
-            &self.document,
-            &self.document.header.current_annotation_scale,
-        );
-        let wires =
-            self.resident_wires_for(model_block, Some(self.annotation_scale), scale, None, None);
-        let mut min = [f64::INFINITY; 3];
-        let mut max = [f64::NEG_INFINITY; 3];
-        let mut has_points = false;
-
-        for wire in wires.iter() {
-            for &[x, y, z] in &wire.key_vertices {
-                if (x as f32).is_finite() && (y as f32).is_finite() && (z as f32).is_finite() {
-                    min[0] = min[0].min(x);
-                    min[1] = min[1].min(y);
-                    min[2] = min[2].min(z);
-                    max[0] = max[0].max(x);
-                    max[1] = max[1].max(y);
-                    max[2] = max[2].max(z);
-                    has_points = true;
-                }
-            }
-        }
-
-        if !self.meshes.is_empty() {
-            for (&handle, set) in &self.meshes {
-                let Some(entity) = self.document.get_entity(handle) else {
-                    continue;
-                };
-                if !self.mesh_entity_visible(handle)
-                    || !self.belongs_to_visible_block(
-                        handle,
-                        entity.common().owner_handle,
-                        model_block,
-                    )
-                {
-                    continue;
-                }
-                let [ax, ay, bx, by] = set.world_aabb;
-                let [az, bz] = set.z_aabb;
-                let (ax, ay, bx, by, az, bz) = (
-                    ax as f64, ay as f64, bx as f64, by as f64, az as f64, bz as f64,
-                );
-                if (ax as f32).is_finite()
-                    && (ay as f32).is_finite()
-                    && (az as f32).is_finite()
-                    && (bx as f32).is_finite()
-                    && (by as f32).is_finite()
-                    && (bz as f32).is_finite()
-                {
-                    min[0] = min[0].min(ax.min(bx));
-                    min[1] = min[1].min(ay.min(by));
-                    min[2] = min[2].min(az.min(bz));
-                    max[0] = max[0].max(ax.max(bx));
-                    max[1] = max[1].max(ay.max(by));
-                    max[2] = max[2].max(az.max(bz));
-                    has_points = true;
-                }
-            }
-        }
-
-        if has_points {
-            return Some((
-                glam::Vec3::new(min[0] as f32, min[1] as f32, min[2] as f32),
-                glam::Vec3::new(max[0] as f32, max[1] as f32, max[2] as f32),
-            ));
+        // Shared with ZOOM EXTENTS so the two never disagree about what the
+        // drawing covers. The previous walk here read only `key_vertices`,
+        // which is empty for every tessellated curve (see `WireModel`) — so
+        // circles, arcs, ellipses and splines contributed nothing, and
+        // neither did hatches or images. Everything that reads drawing
+        // extents (plot Extents, sheet-set framing, viewport auto-fit,
+        // SpaceMouse model bounds) inherited that blind spot.
+        if let Some((min, max)) = self.visible_block_bounds(model_block) {
+            return Some((min.as_vec3(), max.as_vec3()));
         }
         // Last resort: saved EXTMIN/EXTMAX before the wire cache is built.
         const SANE_EXTENT: f64 = 1.0e16;
@@ -11939,11 +12740,12 @@ mod section_tests {
     #[test]
     fn instance_transform_pulls_the_section_plane_into_body_space() {
         let body = kernel::brep::make::cuboid([0.0; 3], [10.0; 3]).unwrap();
-        let transform =
-            codec::types::Transform::from_scaling(codec::types::Vector3::new(2.0, 1.0, 1.0))
-                .then(&codec::types::Transform::from_translation(
-                    codec::types::Vector3::new(10.0, 0.0, 0.0),
-                ));
+        let transform = codec::types::Transform::from_scaling(codec::types::Vector3::new(
+            2.0, 1.0, 1.0,
+        ))
+        .then(&codec::types::Transform::from_translation(
+            codec::types::Vector3::new(10.0, 0.0, 0.0),
+        ));
         let mut data = section(1, 0.0);
         for point in &mut data.vertices {
             point.x = 20.0;
@@ -11957,15 +12759,15 @@ mod section_tests {
     #[test]
     fn adding_and_erasing_a_section_keeps_its_object_graph_consistent() {
         let mut scene = Scene::new();
-        let handle = scene.add_entity(EntityType::Extended(ExtendedEntity {
+        let handle = scene.add_entity(EntityType::Extended(Box::new(ExtendedEntity {
             common: EntityCommon::new(),
             data: ExtendedEntityData::SectionObject(section(1, 0.0)),
-        }));
+        })));
         let settings_handle = match scene.document.get_entity(handle).unwrap() {
-            EntityType::Extended(ExtendedEntity {
-                data: ExtendedEntityData::SectionObject(data),
-                ..
-            }) => data.settings_handle,
+            EntityType::Extended(extended) => match &extended.data {
+                ExtendedEntityData::SectionObject(data) => data.settings_handle,
+                _ => unreachable!(),
+            },
             _ => unreachable!(),
         };
         assert!(matches!(
@@ -12490,8 +13292,19 @@ mod journal_tests {
         hatch.common.layer = "Shadows".to_string();
         let handle = scene.add_entity(EntityType::Hatch(hatch));
         let model = scene.model_space_block_handle();
-        assert_eq!(scene.document.get_entity(handle).unwrap().common().owner_handle, model);
-        scene.document.objects.retain(|_, object| !matches!(object, ObjectType::Layout(_)));
+        assert_eq!(
+            scene
+                .document
+                .get_entity(handle)
+                .unwrap()
+                .common()
+                .owner_handle,
+            model
+        );
+        scene
+            .document
+            .objects
+            .retain(|_, object| !matches!(object, ObjectType::Layout(_)));
         scene.invalidate_dependency_index();
 
         let targets = scene.dependency_targets(DependencyKind::Layer, &["Shadows".to_string()]);
@@ -12502,7 +13315,10 @@ mod journal_tests {
         scene.document.layers.get_mut("Shadows").unwrap().flags.off = true;
         let epoch = scene.geometry_epoch;
         scene.invalidate_layer_dependencies(&["Shadows".to_string()]);
-        assert_ne!(scene.geometry_epoch, epoch, "the cached hatch needs an entity delta");
+        assert_ne!(
+            scene.geometry_epoch, epoch,
+            "the cached hatch needs an entity delta"
+        );
     }
 
     /// The loader's handed-over draw depths must equal a local rebuild.
@@ -12897,6 +13713,108 @@ mod journal_tests {
             })
         );
         assert!(s.text_unchanged(cached_epoch));
+    }
+
+    /// A raster image whose file cannot be resolved draws the saved path as a
+    /// glyph run instead of the picture, so erasing it MUST invalidate the SDF
+    /// text buffer — otherwise `gather_text_verts` reuses the previous vertex
+    /// list and the path text keeps drawing over the now-empty frame.
+    #[test]
+    fn erasing_broken_raster_reference_invalidates_text_cache() {
+        let mut s = Scene::new();
+        let image = s.add_entity(EntityType::RasterImage(broken_raster("erase")));
+        let cached_epoch = s.geometry_epoch;
+        s.erase_entities(&[image]);
+
+        assert!(
+            !s.text_unchanged(cached_epoch),
+            "erasing a broken raster reference must drop its placeholder glyphs"
+        );
+    }
+
+    /// The same classification in the other direction: attaching (and, through
+    /// the identical Added/Modified path, moving or undoing the erase of) a
+    /// broken reference must invalidate the text buffer so its path text appears.
+    #[test]
+    fn attaching_broken_raster_reference_invalidates_text_cache() {
+        let mut s = Scene::new();
+        let cached_epoch = s.geometry_epoch;
+        s.add_entity(EntityType::RasterImage(broken_raster("attach")));
+
+        assert!(
+            !s.text_unchanged(cached_epoch),
+            "attaching a broken raster reference must build its placeholder glyphs"
+        );
+    }
+
+    /// The converse perf property: a raster that resolves contributes no glyphs,
+    /// so editing or erasing it must leave the text buffer warm — a grip-drag of
+    /// a working image cannot re-walk every glyph in the drawing per mouse move.
+    /// An empty path counts as resolvable to both the converter and the
+    /// classifier, so this needs no picture on disk.
+    #[test]
+    fn erasing_resolvable_raster_keeps_text_cache_warm() {
+        use codec::entities::RasterImage;
+        use codec::types::Vector3;
+
+        let mut s = Scene::new();
+        let image = s.add_entity(EntityType::RasterImage(RasterImage::with_size(
+            "",
+            Vector3::new(0.0, 0.0, 0.0),
+            16.0,
+            16.0,
+            10.0,
+            10.0,
+        )));
+        let cached_epoch = s.geometry_epoch;
+        s.erase_entities(&[image]);
+
+        assert!(s.text_unchanged(cached_epoch));
+    }
+
+    /// End-to-end on the buffer the GPU actually draws: the placeholder's path
+    /// glyphs must be gone from the gathered SDF vertices after the erase. This
+    /// is the shape of the reported bug — `gather_text_verts` misses its content-
+    /// id cache on every geometry edit and then reuses the previous vertex list
+    /// whenever `text_unchanged` says the text is untouched.
+    #[test]
+    fn erasing_broken_raster_reference_drops_its_glyphs_from_the_text_buffer() {
+        let depth_map = rustc_hash::FxHashMap::default();
+        let mut s = Scene::new();
+        let image = s.add_entity(EntityType::RasterImage(broken_raster("gather")));
+
+        let wires = s.entity_wires();
+        let before = s.gather_text_verts(&wires, 1, 7, &depth_map);
+        assert!(
+            !before.is_empty(),
+            "a broken raster reference must contribute its path glyphs"
+        );
+
+        s.erase_entities(&[image]);
+        let wires = s.entity_wires();
+        let after = s.gather_text_verts(&wires, 2, 7, &depth_map);
+        assert!(
+            after.is_empty(),
+            "the erased placeholder left {} glyph vertices on screen",
+            after.len()
+        );
+    }
+
+    /// A raster pointing at a path that cannot exist. `resolve_image` memoises
+    /// per path for the life of the process, so each test uses its own path and
+    /// cannot inherit another's cached answer.
+    fn broken_raster(tag: &str) -> codec::entities::RasterImage {
+        use codec::entities::RasterImage;
+        use codec::types::Vector3;
+
+        RasterImage::with_size(
+            &format!("/nonexistent-ocs-test/{tag}/missing-reference.png"),
+            Vector3::new(0.0, 0.0, 0.0),
+            16.0,
+            16.0,
+            10.0,
+            10.0,
+        )
     }
 }
 
@@ -13379,42 +14297,27 @@ mod layout_cache_tests {
         s.add_entity(EntityType::LwPolyline(pl));
 
         let bounds = s.model_space_extents().expect("Extents must exist");
-        // Key vertices come from entities with distinct vertex positions (Line, LwPolyline).
-        // Line vertices: (0, 0, 10), (50, 100, 20)
-        // LwPolyline vertices: (300, -200, 0), (400, -100, 0)
-        // Min X = 0.0, Max X = 400.0
-        // Min Y = -200.0, Max Y = 100.0
-        // Min Z = 0.0, Max Z = 20.0
-        assert!(
-            (bounds.0.x - 0.0).abs() < 1e-3,
-            "min.x mismatch: {}",
-            bounds.0.x
-        );
-        assert!(
-            (bounds.1.x - 400.0).abs() < 1e-3,
-            "max.x mismatch: {}",
-            bounds.1.x
-        );
-        assert!(
-            (bounds.0.y - (-200.0)).abs() < 1e-3,
-            "min.y mismatch: {}",
-            bounds.0.y
-        );
-        assert!(
-            (bounds.1.y - 100.0).abs() < 1e-3,
-            "max.y mismatch: {}",
-            bounds.1.y
-        );
-        assert!(
-            (bounds.0.z - 0.0).abs() < 1e-3,
-            "min.z mismatch: {}",
-            bounds.0.z
-        );
-        assert!(
-            (bounds.1.z - 20.0).abs() < 1e-3,
-            "max.z mismatch: {}",
-            bounds.1.z
-        );
+        // Every entity counts, curves included. The circle and the arc used to
+        // contribute nothing at all: the walk read only `key_vertices`, which
+        // is empty for anything tessellated, so the drawing looked 275 units
+        // narrower and 150 shorter than it is.
+        //   Line:       (0, 0, 10) .. (50, 100, 20)
+        //   Circle:     (150, 150, 0) .. (250, 250, 0)      centre 200,200 r50
+        //   Arc:        (-125, -50, -5) .. (-75, -25, -5)   centre -100,-50 r25, 0..PI
+        //   LwPolyline: (300, -200, 0) .. (400, -100, 0)
+        for (got, want, axis) in [
+            (bounds.0.x, -125.0, "min.x"),
+            (bounds.1.x, 400.0, "max.x"),
+            (bounds.0.y, -200.0, "min.y"),
+            (bounds.1.y, 250.0, "max.y"),
+            (bounds.0.z, -5.0, "min.z"),
+            (bounds.1.z, 20.0, "max.z"),
+        ] {
+            assert!(
+                (got - want).abs() < 1e-3,
+                "{axis} mismatch: got {got}, want {want}"
+            );
+        }
     }
 
     #[test]
@@ -13679,4 +14582,221 @@ mod layout_cache_tests {
         );
         assert!(after.iter().any(|(n, _, _)| n == "1:50"));
     }
+
+    #[test]
+    fn cached_ucs_names_returns_same_arc_until_bump() {
+        // RED: `Scene::cached_ucs_names` does not exist yet (#34).
+        let scene = Scene::new();
+        let first = scene.cached_ucs_names();
+        let second = scene.cached_ucs_names();
+        assert!(std::sync::Arc::ptr_eq(&first, &second));
+    }
+
+    #[test]
+    fn cached_ucs_names_invalidated_by_bump() {
+        // RED: `Scene::bump_ucs_epoch` does not exist yet (#34).
+        let mut scene = Scene::new();
+        let before = scene.cached_ucs_names();
+        scene
+            .document
+            .ucss
+            .add_or_replace(codec::tables::Ucs::new("TEST_CACHED_UCS"));
+        scene.bump_ucs_epoch();
+        let after = scene.cached_ucs_names();
+        assert!(
+            !std::sync::Arc::ptr_eq(&before, &after),
+            "ucs mutation + bump must replace the cached Arc"
+        );
+        assert!(after.iter().any(|n| n == "TEST_CACHED_UCS"));
+    }
+
+    // #48: with no active/selected viewport, the pill number, label and sync
+    // badge must all describe the SAME viewport (the first-content fallback
+    // the number already used) — not a mix of viewport number, paper label
+    // and hidden badge.
+    #[test]
+    fn scale_pill_sources_agree_without_targeted_viewport() {
+        let mut scene = Scene::new();
+        scene.add_layout("P1").unwrap();
+        scene.current_layout = "P1".to_string();
+        assert!(scene.add_scale("1:50", 1.0, 50.0));
+        let mut vp = codec::entities::Viewport::new();
+        vp.width = 100.0;
+        vp.height = 100.0;
+        let handle = scene
+            .document
+            .add_entity_to_layout(codec::EntityType::Viewport(vp), "P1")
+            .unwrap();
+        assert!(scene.set_viewport_scale_named_for(handle, "1:50").is_some());
+        assert!(scene.active_viewport.is_none());
+        let number = scene.first_viewport_scale();
+        let name = scene.displayed_annotation_scale_name();
+        let synced = scene.viewport_annotation_scale_synced();
+        eprintln!("number={number:?} name={name:?} synced={synced:?}");
+        assert!(
+            number.is_some() && name == "1:50" && synced == Some(true),
+            "pill trio must agree"
+        );
+    }
+
+    #[test]
+    fn scale_pill_model_layout_unchanged() {
+        // Model layout has no viewports: number None, header label, no badge.
+        let scene = Scene::new();
+        assert!(scene.current_layout == "Model");
+        assert!(scene.first_viewport_scale().is_none());
+        assert_eq!(
+            scene.displayed_annotation_scale_name(),
+            scene.document.header.current_annotation_scale
+        );
+        assert!(scene.viewport_annotation_scale_synced().is_none());
+    }
+}
+
+#[cfg(test)]
+mod update_entities_batch_tests {
+    use super::Scene;
+    use codec::entities::{Block, BlockEnd, Line};
+    use codec::types::Vector3;
+    use codec::{EntityType, Handle};
+
+    /// Fresh scene holding two block sentinels (Block + BlockEnd) and one plain
+    /// line; returns their handles in that order.
+    fn scene_with_sentinels_and_line() -> (Scene, Handle, Handle, Handle) {
+        let mut scene = Scene::new();
+        let bh = scene
+            .document
+            .add_entity(EntityType::Block(Block::new("BATCH_TEST", Vector3::ZERO)))
+            .unwrap();
+        let be = scene
+            .document
+            .add_entity(EntityType::BlockEnd(BlockEnd::new()))
+            .unwrap();
+        let mut line = Line::new();
+        line.start = Vector3::new(0.0, 0.0, 1.0);
+        line.end = Vector3::new(3.0, 4.0, 2.0);
+        let lh = scene.document.add_entity(EntityType::Line(line)).unwrap();
+        (scene, bh, be, lh)
+    }
+
+    /// Stored entity as-is — the update shape the command arms actually pass.
+    fn snapshot(scene: &Scene, handle: Handle) -> EntityType {
+        scene.document.get_entity(handle).unwrap().clone()
+    }
+
+    /// The same line with an edited Z, still carrying its original handle.
+    fn edited_line(scene: &Scene, handle: Handle) -> EntityType {
+        let mut entity = snapshot(scene, handle);
+        if let EntityType::Line(line) = &mut entity {
+            line.start.z = 5.0;
+            line.end.z = 6.0;
+        }
+        entity
+    }
+
+    fn delta_count(scene: &Scene) -> usize {
+        scene.geometry_deltas.borrow().len()
+    }
+
+    #[test]
+    fn update_entities_batch_of_block_sentinels_collapses_to_one_full_delta() {
+        // Batched path: one coarse publish for the whole set.
+        let (mut batched, bh, be, _) = scene_with_sentinels_and_line();
+        let before = delta_count(&batched);
+        let updates = vec![snapshot(&batched, bh), snapshot(&batched, be)];
+        let moved = batched.update_entities(updates);
+        assert_eq!(moved, 2);
+        {
+            let ring = batched.geometry_deltas.borrow();
+            assert_eq!(
+                ring.len() - before,
+                1,
+                "batched sentinels must publish exactly one geometry delta"
+            );
+            assert!(
+                ring.back().unwrap().full,
+                "the batched delta must be full (bump_geometry)"
+            );
+        }
+
+        // Legacy path: each sentinel bumps on its own.
+        let (mut legacy, bh, be, _) = scene_with_sentinels_and_line();
+        let before = delta_count(&legacy);
+        let u1 = snapshot(&legacy, bh);
+        let u2 = snapshot(&legacy, be);
+        assert!(legacy.update_entity(u1));
+        assert!(legacy.update_entity(u2));
+        assert_eq!(
+            delta_count(&legacy) - before,
+            2,
+            "legacy per-entity updates must publish one delta each"
+        );
+
+        // Same final entity state either way.
+        for h in [bh, be] {
+            assert_eq!(
+                format!("{:?}", batched.document.get_entity(h)),
+                format!("{:?}", legacy.document.get_entity(h)),
+                "entity {h:?} differs between batched and legacy updates"
+            );
+        }
+    }
+
+    #[test]
+    fn update_entities_mixed_batch_matches_legacy_states_with_one_coarse_delta() {
+        // Batched: the sentinel's coarse (full) delta subsumes the line's
+        // would-be per-entity delta, and both slots are still written.
+        let (mut batched, bh, _, lh) = scene_with_sentinels_and_line();
+        let before = delta_count(&batched);
+        let updates = vec![snapshot(&batched, bh), edited_line(&batched, lh)];
+        let moved = batched.update_entities(updates);
+        assert_eq!(moved, 2);
+        {
+            let ring = batched.geometry_deltas.borrow();
+            assert_eq!(
+                ring.len() - before,
+                1,
+                "mixed batch with a sentinel must publish one coarse delta"
+            );
+            assert!(ring.back().unwrap().full, "coarse delta must be full");
+        }
+
+        // Legacy: full delta for the sentinel + per-entity delta for the line.
+        let (mut legacy, bh, _, lh) = scene_with_sentinels_and_line();
+        let before = delta_count(&legacy);
+        let u1 = snapshot(&legacy, bh);
+        let u2 = edited_line(&legacy, lh);
+        assert!(legacy.update_entity(u1));
+        assert!(legacy.update_entity(u2));
+        assert_eq!(
+            delta_count(&legacy) - before,
+            2,
+            "legacy publishes one delta per update"
+        );
+
+        for h in [bh, lh] {
+            assert_eq!(
+                format!("{:?}", batched.document.get_entity(h)),
+                format!("{:?}", legacy.document.get_entity(h)),
+                "entity {h:?} differs between batched and legacy updates"
+            );
+        }
+    }
+}
+
+pub(crate) fn is_point_cloud(entity: &EntityType) -> bool {
+    matches!(
+        entity,
+        EntityType::Extended(extended)
+            if matches!(extended.data, codec::entities::ExtendedEntityData::PointCloudEx(_))
+    )
+}
+
+/// A point cloud whose Locked property is set: edits leave it alone.
+pub(crate) fn is_locked_point_cloud(entity: &EntityType) -> bool {
+    matches!(
+        entity,
+        EntityType::Extended(extended)
+            if matches!(&extended.data, codec::entities::ExtendedEntityData::PointCloudEx(data) if data.locked)
+    )
 }

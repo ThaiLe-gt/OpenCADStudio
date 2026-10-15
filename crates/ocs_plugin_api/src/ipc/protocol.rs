@@ -21,9 +21,9 @@ use crate::host::{CommandSource, CommandStep, HostSettingValue};
 use crate::manifest::ApiVersion;
 use crate::ribbon::owned::{OwnedPluginManifest, OwnedRibbonGroup};
 
+pub use crate::host::PreviewWire;
 pub use codec::xdata::{ExtendedDataRecord, XDataValue};
 pub use codec::{CadDocument, EntityType, Handle};
-pub use crate::host::PreviewWire;
 
 /// Events the host forwards to an active plugin `InteractiveCommand`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -50,7 +50,10 @@ pub enum InteractiveEvent {
 #[derive(Debug, Serialize, Deserialize)]
 pub enum RunnerHandshake {
     Token(String),
-    TokenV4 { token: String, protocol_version: u32 },
+    TokenV4 {
+        token: String,
+        protocol_version: u32,
+    },
 }
 
 /// Environment variable through which the host passes the pre-shared
@@ -83,7 +86,9 @@ pub enum HostRequest {
         tab_index: usize,
     },
     /// V7: release an interactive command after completion or cancellation.
-    DropInteractive { command_id: u64 },
+    DropInteractive {
+        command_id: u64,
+    },
     /// V7: cursor move preview update during an interactive command.
     CursorMove {
         command_id: u64,
@@ -145,13 +150,19 @@ pub enum PluginRequest {
     AddEntities(Vec<EntityType>),
     /// V4: ask the host to create/refresh a tab-keyed shared-memory document
     /// view and return the file path + current version.
-    OpenDocumentViewV4 { tab_id: u64 },
+    OpenDocumentViewV4 {
+        tab_id: u64,
+    },
     /// V4: ask the host to close the tab-keyed shared-memory document view.
-    CloseDocumentViewV4 { tab_id: u64 },
+    CloseDocumentViewV4 {
+        tab_id: u64,
+    },
     /// V4: ask the host for the stable tab identifier of the active tab.
     GetTabId,
     /// V5: ask the host for the filesystem path of the document in `tab_id`.
-    DocumentPath { tab_id: u64 },
+    DocumentPath {
+        tab_id: u64,
+    },
     /// Add a layer to the active document with full initial properties.
     AddLayer(crate::host::LayerConfig),
     /// Modify specified properties of an existing layer in the active document.
@@ -159,20 +170,36 @@ pub enum PluginRequest {
     /// Run a command on the active document tab's command line (AutoLISP style).
     ExecuteCommand(String),
     /// Read a host-managed setting without nested command dispatch.
-    GetSystemVariable { name: String },
+    GetSystemVariable {
+        name: String,
+    },
     /// Change a host-managed setting without nested command dispatch.
-    SetSystemVariable { name: String, value: HostSettingValue },
+    SetSystemVariable {
+        name: String,
+        value: HostSettingValue,
+    },
     /// V7: validate and replace existing entities in a single undo step.
-    UpdateEntitiesTransaction { label: String, entities: Vec<EntityType> },
+    UpdateEntitiesTransaction {
+        label: String,
+        entities: Vec<EntityType>,
+    },
     /// V7: synchronous selection read/write for the dispatch tab.
     GetSelection,
-    SetSelection { handles: Vec<Handle> },
+    SetSelection {
+        handles: Vec<Handle>,
+    },
     /// V7 (additive): kernel-backed solid create or transform.
-    SolidOperation { operation: crate::host::SolidOperation },
+    SolidOperation {
+        operation: crate::host::SolidOperation,
+    },
     /// V7 (additive): drawing table record create/modify/rename/delete.
-    TableOperation { operation: crate::host::TableOperation },
+    TableOperation {
+        operation: crate::host::TableOperation,
+    },
     /// V7 (additive): drive an OCS command.
-    RunCommand { request: crate::host::CommandRequest },
+    RunCommand {
+        request: crate::host::CommandRequest,
+    },
 }
 
 /// Responses the host sends back for `PluginRequest`.

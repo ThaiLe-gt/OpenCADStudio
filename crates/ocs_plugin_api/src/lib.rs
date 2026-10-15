@@ -32,12 +32,12 @@
 //! - `runner` — child-process runner entry point.
 //! - `shm` — shared-memory document views.
 
+pub mod entity_coverage;
+pub mod entity_coverage_types;
 pub mod manifest;
 pub mod ribbon;
 pub mod type_registry;
 pub mod type_registry_types;
-pub mod entity_coverage;
-pub mod entity_coverage_types;
 pub mod version_info;
 
 /// Runtime host surface — only built with the `host` feature (pulls `opencadcodec`).
@@ -66,17 +66,19 @@ pub mod shm;
 #[cfg(feature = "host")]
 pub mod runner;
 
+pub use entity_coverage::{
+    get_embedded_entity_coverage_json, EntityCoverageCatalog, EntityKindCoverage, EntityScope,
+    ModelAccess, PropertyCoverage,
+};
 pub use manifest::{
     effective_max_api_version, host_accepts_plugin_version, ApiVersion, PluginManifest,
     API_VERSION, API_VERSION_MIN_SUPPORTED, MAX_API_VERSION_ENV,
 };
 pub use ribbon::{CadModule, IconKind, ModuleEvent, RibbonGroup, RibbonItem, StyleKey, ToolDef};
 pub use type_registry::{
-    get_embedded_type_registry_json, EnumVariantInfo, FieldInfo, MethodInfo, ParameterInfo,
-    TypeId, TypeInfo, TypeKind, TypeRegistry,
+    get_embedded_type_registry_json, EnumVariantInfo, FieldInfo, MethodInfo, ParameterInfo, TypeId,
+    TypeInfo, TypeKind, TypeRegistry,
 };
-pub use entity_coverage::{get_embedded_entity_coverage_json, EntityCoverageCatalog,
-    EntityKindCoverage, EntityScope, ModelAccess, PropertyCoverage};
 pub use version_info::get_embedded_version_info_json;
 
 #[cfg(test)]

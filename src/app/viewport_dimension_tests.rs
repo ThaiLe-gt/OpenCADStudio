@@ -27,7 +27,7 @@ fn fixture() -> (OpenCADStudio, Handle, ViewportFrame) {
     viewport.view_height = 1000.0;
     viewport.custom_scale = 0.1;
     viewport.view_direction = Vector3::UNIT_Z;
-    viewport.status.is_on = true;
+    viewport.turn_on();
     let viewport = scene.add_entity(EntityType::Viewport(viewport));
     let frame = scene.viewport_frame(viewport).unwrap();
     scene.document.header.dimension_associativity = 2;
@@ -88,7 +88,9 @@ fn displayed(doc: &CadDocument) -> f64 {
 }
 
 pub(super) fn preview_text(app: &OpenCADStudio, entity: &EntityType) -> String {
-    let EntityType::Dimension(dimension) = entity else { panic!("expected dimension") };
+    let EntityType::Dimension(dimension) = entity else {
+        panic!("expected dimension")
+    };
     let doc = &app.tabs[app.active_tab].scene.document;
     let source = doc.dim_styles.get(&dimension.base().style_name).unwrap();
     let style = crate::entities::dimension::resolved_dimension_style(source, dimension, doc);
@@ -147,6 +149,7 @@ fn viewport_dimension_curved_clip_includes_the_exact_boundary() {
         panic!()
     };
     vp.clip_boundary_handle = clip;
+    vp.status.non_rectangular_clipping = true;
     assert!(scene
         .viewport_displays_paper_point(frame.viewport, glam::DVec2::new(boundary.x, boundary.y)));
     assert!(!scene.viewport_displays_paper_point(frame.viewport, glam::DVec2::new(60.01, 50.0)));
@@ -312,9 +315,19 @@ fn viewport_dimension_linear_aligned_and_radial_object_picks() {
         let preview = app.dimension_preview_entities(i, place).unwrap();
         assert_eq!(preview.len(), 1, "{name}");
         let value = preview_text(&app, &preview[0]);
-        assert!(!app.dimension_preview_wires(i, place).unwrap().is_empty(), "{name}");
+        assert!(
+            !app.dimension_preview_wires(i, place).unwrap().is_empty(),
+            "{name}"
+        );
         let _ = app.feed_command(StepInput::Point(place));
-        assert_eq!(preview_text(&app, &EntityType::Dimension(dimension(&app.tabs[i].scene.document).clone())), value, "{name}");
+        assert_eq!(
+            preview_text(
+                &app,
+                &EntityType::Dimension(dimension(&app.tabs[i].scene.document).clone())
+            ),
+            value,
+            "{name}"
+        );
         assert!(
             (displayed(&app.tabs[i].scene.document) - expected).abs() < 1e-4,
             "{name}: {}",
@@ -347,7 +360,10 @@ fn viewport_dimension_angular_preserves_angle_without_length_factor() {
     let value = preview_text(&app, &preview[0]);
     let _ = app.feed_command(StepInput::Point(place));
     let doc = &app.tabs[app.active_tab].scene.document;
-    assert_eq!(preview_text(&app, &EntityType::Dimension(dimension(doc).clone())), value);
+    assert_eq!(
+        preview_text(&app, &EntityType::Dimension(dimension(doc).clone())),
+        value
+    );
     assert!((dimension(doc).measurement() - 90.0).abs() < 1e-5);
     assert!(MeasurementScale::read(&dimension(doc).base().common.extended_data).is_none());
 }
@@ -371,10 +387,16 @@ fn viewport_dimension_preview_uses_candidate_scale_only_before_second_pick() {
         let model_preview = app.dimension_preview_entities(i, target.world).unwrap();
         assert_eq!(preview_text(&app, &model_preview[0]), "1270");
         point(&mut app, frame, model, DVec3::X * 100.0);
-        let other = ViewportFrame { viewport: Handle::new(0xFFFF), scale: frame.scale * 2.0, ..frame };
+        let other = ViewportFrame {
+            viewport: Handle::new(0xFFFF),
+            scale: frame.scale * 2.0,
+            ..frame
+        };
         app.vp_snap_frame = Some(other);
         app.tabs[i].snap_result = Some(hit(other, model, DVec3::X * 100.0));
-        let placement = app.dimension_preview_entities(i, DVec3::new(60.0, 80.0, 0.0)).unwrap();
+        let placement = app
+            .dimension_preview_entities(i, DVec3::new(60.0, 80.0, 0.0))
+            .unwrap();
         assert_eq!(preview_text(&app, &placement[0]), "1270");
     }
 }
@@ -463,6 +485,7 @@ fn viewport_dimension_eligibility_is_shared_and_uses_clipping() {
     let clip = scene.add_entity(EntityType::LwPolyline(clip));
     if let Some(EntityType::Viewport(vp)) = scene.document.get_entity_mut(top) {
         vp.clip_boundary_handle = clip;
+        vp.status.non_rectangular_clipping = true;
     }
     assert_eq!(
         scene
@@ -482,7 +505,7 @@ fn viewport_dimension_eligibility_is_shared_and_uses_clipping() {
         first.viewport
     );
     if let Some(EntityType::Viewport(vp)) = scene.document.get_entity_mut(first.viewport) {
-        vp.status.is_on = false;
+        vp.turn_off();
     }
     assert!(scene.viewport_frames_at_paper_point(paper).is_empty());
     assert!(scene.dimension_pick_through_viewport(paper, 0.2).is_none());
@@ -867,8 +890,7 @@ fn viewport_dimension_fixture_regenerates_and_tracks_an_intersection() {
         else {
             panic!()
         };
-        let codec::objects::AssociativeData::DimensionAssociation(assoc) = &mut object.data
-        else {
+        let codec::objects::AssociativeData::DimensionAssociation(assoc) = &mut object.data else {
             panic!()
         };
         assoc.references[0][0].osnap_type = types.0;

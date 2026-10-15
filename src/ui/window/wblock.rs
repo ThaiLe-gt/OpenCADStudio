@@ -3,9 +3,7 @@
 use std::fmt;
 
 use codec::Handle;
-use iced::widget::{
-    button, column, combo_box, container, pick_list, row, text, text_input, Space,
-};
+use iced::widget::{button, column, combo_box, container, pick_list, row, text, text_input, Space};
 use iced::{Background, Border, Element, Fill, Length, Theme};
 
 use crate::app::Message;
@@ -294,27 +292,37 @@ pub fn view_window<'a>(
         qsel_btn = qsel_btn.style(button_style(false));
     }
 
-    let obj_btns_row = row![sel_obj_btn, qsel_btn]
-        .spacing(5)
-        .align_y(iced::Center);
+    let obj_btns_row = row![sel_obj_btn, qsel_btn].spacing(5).align_y(iced::Center);
 
     let object_radios = column![
         form_radio(
             t!("Retain"),
             WblockObjectMode::Retain,
-            if is_objects { Some(state.object_mode) } else { None },
+            if is_objects {
+                Some(state.object_mode)
+            } else {
+                None
+            },
             Message::WblockObjectMode,
         ),
         form_radio(
             t!("Convert to block"),
             WblockObjectMode::Convert,
-            if is_objects { Some(state.object_mode) } else { None },
+            if is_objects {
+                Some(state.object_mode)
+            } else {
+                None
+            },
             Message::WblockObjectMode,
         ),
         form_radio(
             t!("Delete from drawing"),
             WblockObjectMode::Delete,
-            if is_objects { Some(state.object_mode) } else { None },
+            if is_objects {
+                Some(state.object_mode)
+            } else {
+                None
+            },
             Message::WblockObjectMode,
         ),
     ]
@@ -348,8 +356,14 @@ pub fn view_window<'a>(
 
     let objects_subgroup = group(
         t!("Objects").into_owned(),
-        column![obj_btns_row, Space::new().height(2), object_radios, Space::new().height(2), status_row,]
-            .spacing(2),
+        column![
+            obj_btns_row,
+            Space::new().height(2),
+            object_radios,
+            Space::new().height(2),
+            status_row,
+        ]
+        .spacing(2),
         Length::Fixed(142.0),
     );
 
@@ -389,7 +403,9 @@ pub fn view_window<'a>(
     .style(button::secondary)
     .padding([3, 0]);
 
-    let path_row = row![file_input, browse_btn].spacing(5).align_y(iced::Center);
+    let path_row = row![file_input, browse_btn]
+        .spacing(5)
+        .align_y(iced::Center);
 
     let unit_options: Vec<UnitChoice> = units::all()
         .map(|(code, label)| UnitChoice { code, label })

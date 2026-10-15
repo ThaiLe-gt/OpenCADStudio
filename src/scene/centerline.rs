@@ -1,12 +1,10 @@
 use super::*;
 use crate::command::WorkingPlane;
-use codec::entities::{
-    CenterLineAssociation, CenterLineSource, CenterLineSourceKind,
-};
+use codec::entities::{CenterLineAssociation, CenterLineSource, CenterLineSourceKind};
 use codec::objects::{XRecordEntry, XRecordValue};
 use codec::types::Vector3;
-use kernel::geom2d::{centerline_between, closest_point, Curve, Line as KernelLine};
 use glam::DVec3;
+use kernel::geom2d::{centerline_between, closest_point, Curve, Line as KernelLine};
 
 const SETTINGS_RECORD: &str = "OPEN_CAD_CENTERLINE_SETTINGS";
 
@@ -155,7 +153,10 @@ pub(crate) fn picked_source(
     }
 }
 
-fn resolve_source(document: &codec::CadDocument, source: &CenterLineSource) -> Option<(DVec3, DVec3)> {
+fn resolve_source(
+    document: &codec::CadDocument,
+    source: &CenterLineSource,
+) -> Option<(DVec3, DVec3)> {
     let entity = document.get_entity(source.handle)?;
     let (_, start, end) = picked_source(entity, source.handle, dvec(source.pick_point))?;
     match source.kind {

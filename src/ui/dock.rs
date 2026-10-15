@@ -46,6 +46,12 @@ pub enum PanelId {
     Browser,
     /// Node library of the node graph overlay.
     NodeGraph,
+    /// Regions and scans of the drawing's point clouds.
+    PointCloudManager,
+    /// Block counts (COUNTLIST).
+    Count,
+    /// The open sheet sets: subsets and sheets.
+    SheetSetManager,
 }
 
 impl PanelId {
@@ -57,6 +63,9 @@ impl PanelId {
             PanelId::ExternalReferences => "External References",
             PanelId::Browser => "Browser",
             PanelId::NodeGraph => "Node Graph",
+            PanelId::PointCloudManager => "Point Cloud Manager",
+            PanelId::Count => "Count",
+            PanelId::SheetSetManager => "Sheet Set Manager",
         }
     }
 
@@ -68,6 +77,9 @@ impl PanelId {
             PanelId::ExternalReferences => 460.0,
             PanelId::Browser => 230.0,
             PanelId::NodeGraph => 220.0,
+            PanelId::PointCloudManager => 280.0,
+            PanelId::Count => 280.0,
+            PanelId::SheetSetManager => 280.0,
         }
     }
 
@@ -157,8 +169,13 @@ impl DockState {
             PanelId::ExternalReferences,
             PanelId::Browser,
             PanelId::NodeGraph,
+            PanelId::PointCloudManager,
+            PanelId::Count,
+            PanelId::SheetSetManager,
         ] {
-            self.panels.entry(id).or_insert_with(|| DockPanel::for_id(id));
+            self.panels
+                .entry(id)
+                .or_insert_with(|| DockPanel::for_id(id));
         }
     }
 
@@ -192,18 +209,27 @@ impl DockState {
 
     /// Set the persisted width, clamped.
     pub fn set_width(&mut self, id: PanelId, width: f32) {
-        let entry = self.panels.entry(id).or_insert_with(|| DockPanel::for_id(id));
+        let entry = self
+            .panels
+            .entry(id)
+            .or_insert_with(|| DockPanel::for_id(id));
         entry.width = width.clamp(DOCK_MIN_W, id.max_width());
     }
 
     /// Reset width to the panel's default.
     pub fn reset_width(&mut self, id: PanelId) {
-        let entry = self.panels.entry(id).or_insert_with(|| DockPanel::for_id(id));
+        let entry = self
+            .panels
+            .entry(id)
+            .or_insert_with(|| DockPanel::for_id(id));
         entry.width = id.default_width();
     }
 
     pub fn set_auto_collapse(&mut self, id: PanelId, on: bool) {
-        let entry = self.panels.entry(id).or_insert_with(|| DockPanel::for_id(id));
+        let entry = self
+            .panels
+            .entry(id)
+            .or_insert_with(|| DockPanel::for_id(id));
         entry.auto_collapse = on;
     }
 
@@ -273,17 +299,35 @@ pub fn title_bar<'a>(id: PanelId, title: String, auto_collapse: bool) -> Element
             style
         })
         .padding([3, 5]);
-    let pin = tooltip(pin, text(crate::t!("Auto")).size(10), tooltip::Position::Bottom).gap(4);
-    let close = button(crate::ui::icons::themed_secondary(crate::ui::icons::CLOSE, 12.0))
-        .on_press(Message::Dock(DockMsg::Close(id)))
-        .style(button::subtle)
-        .padding([3, 5]);
-    let close = tooltip(close, text(crate::t!("Close")).size(10), tooltip::Position::Bottom).gap(4);
+    let pin = tooltip(
+        pin,
+        text(crate::t!("Auto")).size(10),
+        tooltip::Position::Bottom,
+    )
+    .gap(4);
+    let close = button(crate::ui::icons::themed_secondary(
+        crate::ui::icons::CLOSE,
+        12.0,
+    ))
+    .on_press(Message::Dock(DockMsg::Close(id)))
+    .style(button::subtle)
+    .padding([3, 5]);
+    let close = tooltip(
+        close,
+        text(crate::t!("Close")).size(10),
+        tooltip::Position::Bottom,
+    )
+    .gap(4);
     mouse_area(
         container(
-            row![text(title).size(12), Space::new().width(Length::Fill), pin, close]
-                .spacing(3)
-                .align_y(iced::Center),
+            row![
+                text(title).size(12),
+                Space::new().width(Length::Fill),
+                pin,
+                close
+            ]
+            .spacing(3)
+            .align_y(iced::Center),
         )
         .style(|theme: &Theme| container::Style {
             background: Some(Background::Color(theme.palette().background.weak.color)),
@@ -362,7 +406,10 @@ mod tests {
         // (The 45%-of-window rule still dominates on narrow windows.)
         assert_eq!(state.width(PanelId::ExternalReferences, 3000.0), 460.0);
         state.set_width(PanelId::ExternalReferences, 5000.0);
-        assert_eq!(state.width(PanelId::ExternalReferences, 3000.0), DOCK_MAX_W * 2.0);
+        assert_eq!(
+            state.width(PanelId::ExternalReferences, 3000.0),
+            DOCK_MAX_W * 2.0
+        );
         // Other panels keep the shared maximum.
         state.set_width(PanelId::BlockPalette, 5000.0);
         assert_eq!(state.width(PanelId::BlockPalette, 3000.0), DOCK_MAX_W);
@@ -371,7 +418,10 @@ mod tests {
     #[test]
     fn default_docks_each_known_panel_on_an_edge() {
         let state = DockState::default();
-        assert_eq!(state.location(PanelId::Properties), Some((DockSide::Left, 0)));
+        assert_eq!(
+            state.location(PanelId::Properties),
+            Some((DockSide::Left, 0))
+        );
         assert_eq!(
             state.location(PanelId::BlockPalette),
             Some((DockSide::Right, 0))
@@ -430,7 +480,10 @@ mod tests {
         let mut state = DockState::default();
         state.set_width(PanelId::BlockPalette, 500.0);
         // Window too narrow -> capped by the 0.45 fraction, not DOCK_MAX_W.
-        assert_eq!(state.width(PanelId::BlockPalette, 800.0), DOCK_MAX_W.min(360.0));
+        assert_eq!(
+            state.width(PanelId::BlockPalette, 800.0),
+            DOCK_MAX_W.min(360.0)
+        );
     }
 
     #[test]

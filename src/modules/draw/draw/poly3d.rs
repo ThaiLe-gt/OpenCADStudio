@@ -1,9 +1,9 @@
 // 3DPOLY creates open or closed non-planar paths.
 
+use crate::t;
 use codec::entities::Polyline3D;
 use codec::types::Vector3;
 use codec::EntityType;
-use crate::t;
 
 use crate::command::{CadCommand, CmdResult};
 use crate::modules::{IconKind, ModuleEvent, ToolDef};
@@ -133,4 +133,4 @@ impl CadCommand for Poly3dCommand {
 }
 
 // ── Autocomplete registry ─────────────────────────────────
-inventory::submit!(crate::command::CommandRegistration { names: &["3DPOLY"] });  // Poly3dCommand
+inventory::submit!(crate::command::CommandRegistration { names: &["3DPOLY"] }); // Poly3dCommand

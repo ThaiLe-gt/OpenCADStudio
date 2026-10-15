@@ -3699,7 +3699,7 @@ mod ocs {
         }
         host_ctx::with_host(|host| {
             host_ctx::ensure_undo_started(host);
-            host.add_entity(EntityType::Table(builder.build())).value()
+            host.add_entity(EntityType::Table(Box::new(builder.build()))).value()
         })
         .ok_or_else(|| vm.new_runtime_error("ocs: not running inside a PY_ command".to_owned()))
     }

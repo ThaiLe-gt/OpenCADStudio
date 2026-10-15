@@ -11,12 +11,10 @@ use iced::{Rectangle, Size};
 
 use std::sync::Arc;
 
+use crate::scene::convert::tess_util;
+use crate::scene::model::visual_style_model::{resolve_visual_style_handle, MeshVisualStyle};
 use crate::scene::pipeline::viewcube::{hover_id, VIEWCUBE_PX};
 use crate::scene::pipeline::MultiPipeline;
-use crate::scene::convert::tess_util;
-use crate::scene::model::visual_style_model::{
-    resolve_visual_style_handle, MeshVisualStyle,
-};
 use crate::scene::{
     vp_effective_scale, Camera, HatchModel, ImageModel, MeshLodSet, NavPerfSample, Scene,
     SceneLight, Uniforms, ViewportInstance, WireModel,
@@ -52,7 +50,8 @@ struct ViewportDisplaySettings {
 pub(crate) struct CachedDocumentRenderEnvironment {
     pub(crate) fog: Option<([f32; 4], [f32; 4], [f32; 4])>,
     pub(crate) environment: Option<([f32; 4], crate::scene::model::image_model::DecodedImage)>,
-    pub(crate) preset_environment: Option<([f32; 4], crate::scene::model::image_model::DecodedImage)>,
+    pub(crate) preset_environment:
+        Option<([f32; 4], crate::scene::model::image_model::DecodedImage)>,
 }
 
 #[derive(Clone, Debug)]
@@ -150,8 +149,7 @@ pub struct ViewportData {
     /// Live grip-drag / command-preview glyph quads. Kept out of the epoch-cached
     /// `text_verts` and uploaded to a per-frame buffer, so text dragged by a grip
     /// stays visible even though it's hidden from the base text set (issue #316).
-    pub(in crate::scene) preview_text_verts:
-        Arc<Vec<crate::scene::pipeline::text_gpu::TextVertex>>,
+    pub(in crate::scene) preview_text_verts: Arc<Vec<crate::scene::pipeline::text_gpu::TextVertex>>,
     /// Per-entity normalized draw-order depth (handle.value() → (0,1)), used
     /// by the wire / face3d pipelines as a clip-z bias. WireModels carry no
     /// depth field (84 construction sites); the bias is looked up by handle
@@ -159,17 +157,19 @@ pub struct ViewportData {
     /// See `Scene::draw_depth_generation`. Cached uploads that bake a depth are
     /// only reusable while this is unchanged.
     pub(in crate::scene) draw_depth_generation: u64,
-    pub(in crate::scene) draw_depths:
-        std::sync::Weak<rustc_hash::FxHashMap<u64, [f32; 2]>>,
+    pub(in crate::scene) draw_depths: std::sync::Weak<rustc_hash::FxHashMap<u64, [f32; 2]>>,
     pub(in crate::scene) hatches: Arc<Vec<HatchModel>>,
     /// Wipeout fills — rendered in a separate pass AFTER wires.
     pub(in crate::scene) wipeout_hatches: Arc<Vec<HatchModel>>,
     pub(in crate::scene) images: Arc<Vec<ImageModel>>,
+    /// Point cloud sprites; empty on the paper sheet and in 2D wireframe.
+    pub(in crate::scene) point_clouds: Arc<crate::scene::model::point_cloud::PointCloudSet>,
+    /// Point cloud lighting and density for this view: `[mode, source,
+    /// drawn fraction, _, light direction x, y, z, _]`.
+    pub(in crate::scene) point_cloud_light: [f32; 12],
     pub(in crate::scene) meshes: Arc<Vec<MeshLodSet>>,
-    pub(in crate::scene) background_image:
-        Option<crate::scene::model::image_model::DecodedImage>,
-    pub(in crate::scene) environment_image:
-        Option<crate::scene::model::image_model::DecodedImage>,
+    pub(in crate::scene) background_image: Option<crate::scene::model::image_model::DecodedImage>,
+    pub(in crate::scene) environment_image: Option<crate::scene::model::image_model::DecodedImage>,
     pub(in crate::scene) uniforms: Uniforms,
     /// World-space camera forward — the parallel view direction. DISPSILH
     /// silhouettes use this alone (not the eye position), so the outline follows
@@ -296,9 +296,7 @@ pub struct RenderModeFlags {
     pub flat_shade: bool,
 }
 
-pub fn render_mode_flags(
-    mode: codec::entities::ViewportRenderMode,
-) -> RenderModeFlags {
+pub fn render_mode_flags(mode: codec::entities::ViewportRenderMode) -> RenderModeFlags {
     use codec::entities::ViewportRenderMode as M;
     match mode {
         M::Wireframe2D => RenderModeFlags {
@@ -374,6 +372,11 @@ impl shader::Primitive for Primitive {
         viewport: &Viewport,
     ) {
         let nav_prepare_started = iced::time::Instant::now();
+        if let Some(gap_ms) = crate::perf::take_view_to_prepare_ms() {
+            if gap_ms >= 1.0 {
+                crate::perf_record!("[perf] layout-draw {:>7.1}ms", gap_ms);
+            }
+        }
         let errors_at_entry = crate::scene::pipeline::gpu_errors_seen();
         let recovering = pipeline.gpu_error_epoch != errors_at_entry;
         if recovering {
@@ -415,9 +418,12 @@ impl shader::Primitive for Primitive {
             let clip_size = placement.size;
             inner.viewport = Some(placement);
             inner.ensure_depth_texture(device, clip_size);
-            let viewcube_side =
-                (crate::scene::VIEWCUBE_RENDER_PX.ceil() * scale).ceil().max(1.0) as u32;
-            inner.viewcube.ensure_depth_texture(device, Size::new(viewcube_side, viewcube_side));
+            let viewcube_side = (crate::scene::VIEWCUBE_RENDER_PX.ceil() * scale)
+                .ceil()
+                .max(1.0) as u32;
+            inner
+                .viewcube
+                .ensure_depth_texture(device, Size::new(viewcube_side, viewcube_side));
             inner.upload_blit_uv(queue, placement.uv_offset, placement.uv_scale);
             inner.upload_background_images(
                 device,
@@ -514,11 +520,7 @@ impl shader::Primitive for Primitive {
                 .as_ref()
                 .map_or(true, |source| !Arc::ptr_eq(source, &vp.wipeout_hatches));
             if hatch_changed || fill_changed {
-                inner.upload_hatches(
-                    device,
-                    queue,
-                    if fill_mode { &vp.hatches[..] } else { &[] },
-                );
+                inner.upload_hatches(device, queue, if fill_mode { &vp.hatches[..] } else { &[] });
                 inner.cached_hatch_source = Some(Arc::clone(&vp.hatches));
             }
             let preview_hatch_changed = inner
@@ -526,13 +528,8 @@ impl shader::Primitive for Primitive {
                 .as_ref()
                 .map_or(true, |source| !Arc::ptr_eq(source, &vp.preview_hatches));
             if preview_hatch_changed || fill_changed {
-                inner.upload_preview_hatches(
-                    device,
-                    queue,
-                    &vp.preview_hatches[..],
-                );
-                inner.cached_preview_hatch_source =
-                    Some(Arc::clone(&vp.preview_hatches));
+                inner.upload_preview_hatches(device, queue, &vp.preview_hatches[..]);
+                inner.cached_preview_hatch_source = Some(Arc::clone(&vp.preview_hatches));
             }
             if wipeout_changed || fill_changed {
                 inner.upload_wipeouts(
@@ -554,6 +551,15 @@ impl shader::Primitive for Primitive {
                 inner.upload_images(device, queue, &vp.images[..]);
                 inner.cached_image_source = Some(Arc::clone(&vp.images));
             }
+            if inner
+                .cached_point_cloud_source
+                .as_ref()
+                .map_or(true, |source| !Arc::ptr_eq(source, &vp.point_clouds))
+            {
+                inner.upload_point_clouds(device, queue, &vp.point_clouds);
+                inner.cached_point_cloud_source = Some(Arc::clone(&vp.point_clouds));
+            }
+            inner.set_point_cloud_view(queue, vp.point_cloud_light);
             if inner
                 .cached_text_source
                 .as_ref()
@@ -592,8 +598,7 @@ impl shader::Primitive for Primitive {
                     .as_ref()
                     .and_then(std::sync::Weak::upgrade)
                     .map_or(true, |source| !Arc::ptr_eq(&source, &draw_depths))
-                || (inner.cached_face3d_key.0 != vp.wire_content_id
-                    && !face_pass_unchanged);
+                || (inner.cached_face3d_key.0 != vp.wire_content_id && !face_pass_unchanged);
             if face3d_changed
                 || face3d_fill_active != inner.cached_face3d_key.1
                 || solid_fill_active != inner.cached_face3d_key.2
@@ -644,20 +649,16 @@ impl shader::Primitive for Primitive {
                     .all(|other| other.wire_content_id != vp.wire_content_id);
                 let use_wire_arena = crate::scene::wire_gpu_patch_enabled()
                     && (inner.wire_const_bgl.is_some()
-                        || ((vp.wire_patch.is_some()
-                            || inner.wire_arena_id != u64::MAX)
+                        || ((vp.wire_patch.is_some() || inner.wire_arena_id != u64::MAX)
                             && packed_arena_owner));
                 if use_wire_arena {
                     use crate::scene::pipeline::wire_arena::{
                         self, PersistentWireArena as WireArena,
                     };
                     let const_bgl = inner.wire_const_bgl.as_ref();
-                    let base_ok = vp
-                        .wire_patch
-                        .as_ref()
-                        .map_or(false, |(base, patch)| {
-                            inner.wire_arena_id == *base && !patch.changes.is_empty()
-                        });
+                    let base_ok = vp.wire_patch.as_ref().map_or(false, |(base, patch)| {
+                        inner.wire_arena_id == *base && !patch.changes.is_empty()
+                    });
                     let patch = vp.wire_patch.as_ref().map(|(_, patch)| patch);
                     if _perf {
                         crate::perf_record!(
@@ -734,8 +735,7 @@ impl shader::Primitive for Primitive {
                                 &draw_depths,
                             )
                         } else {
-                            inner.wire_arena_fallback_kind == Some(true)
-                                && !fallback_touched(true)
+                            inner.wire_arena_fallback_kind == Some(true) && !fallback_touched(true)
                         };
                     if !reg_ok || !mesh_ok {
                         // Initial upload or a patch that outgrew arena capacity:
@@ -765,15 +765,11 @@ impl shader::Primitive for Primitive {
                                 inner.wire_arena_fallback_handles = regular
                                     .iter()
                                     .filter_map(|wire| {
-                                        wire.name
-                                            .parse::<u64>()
-                                            .ok()
-                                            .map(codec::Handle::new)
+                                        wire.name.parse::<u64>().ok().map(codec::Handle::new)
                                     })
                                     .collect();
                             } else if inner.wire_arena_fallback_kind == Some(false) {
-                                inner.wire_arena_fallback =
-                                    std::sync::Arc::new(Vec::new());
+                                inner.wire_arena_fallback = std::sync::Arc::new(Vec::new());
                                 inner.wire_arena_fallback_kind = None;
                                 inner.wire_arena_fallback_handles.clear();
                             }
@@ -802,15 +798,11 @@ impl shader::Primitive for Primitive {
                                 inner.wire_arena_fallback_handles = mesh
                                     .iter()
                                     .filter_map(|wire| {
-                                        wire.name
-                                            .parse::<u64>()
-                                            .ok()
-                                            .map(codec::Handle::new)
+                                        wire.name.parse::<u64>().ok().map(codec::Handle::new)
                                     })
                                     .collect();
                             } else if inner.wire_arena_fallback_kind == Some(true) {
-                                inner.wire_arena_fallback =
-                                    std::sync::Arc::new(Vec::new());
+                                inner.wire_arena_fallback = std::sync::Arc::new(Vec::new());
                                 inner.wire_arena_fallback_kind = None;
                                 inner.wire_arena_fallback_handles.clear();
                             }
@@ -818,8 +810,8 @@ impl shader::Primitive for Primitive {
                     }
                     _patched = reg_ok && mesh_ok;
 
-                    let regular_ready = inner.wire_arena.is_some()
-                        || inner.wire_arena_fallback_kind == Some(false);
+                    let regular_ready =
+                        inner.wire_arena.is_some() || inner.wire_arena_fallback_kind == Some(false);
                     let mesh_ready = inner.wire_arena_mesh.is_some()
                         || inner.wire_arena_fallback_kind == Some(true);
                     if regular_ready
@@ -849,54 +841,46 @@ impl shader::Primitive for Primitive {
                                 patch.changes.iter().all(|(handle, _)| {
                                     !inner.partition_contributors.contains(handle)
                                         && !patch.runs.get(handle).is_some_and(|run| {
-                                            run.iter()
-                                                .any(wire_arena::feeds_analytical_uploads)
+                                            run.iter().any(wire_arena::feeds_analytical_uploads)
                                         })
                                 })
                             });
                         let t_part = _perf.then(iced::time::Instant::now);
                         let partitioned = (!analytical_untouched)
                             .then(|| wire_arena::partition_wires(&vp_wires, &draw_depths));
-                        let part_ms = t_part
-                            .map_or(0.0, |t| t.elapsed().as_secs_f64() * 1000.0);
+                        let part_ms = t_part.map_or(0.0, |t| t.elapsed().as_secs_f64() * 1000.0);
                         let t_blk = _perf.then(iced::time::Instant::now);
                         let mut blk_ms = 0.0f64;
                         let mut curve_ms = 0.0f64;
                         // `None` means the three uploads this slot holds are
                         // still the answer, so they are left alone.
                         if let Some(partitioned) = &partitioned {
-                            inner.gpu_block_wires = std::sync::Arc::new(
-                                inner.upload_block_wires(
-                                    device,
-                                    queue,
-                                    &partitioned.instanced,
-                                    &draw_depths,
-                                    &mut pipeline.block_geometry,
-                                ),
-                            );
-                            blk_ms = t_blk
-                                .map_or(0.0, |t| t.elapsed().as_secs_f64() * 1000.0);
+                            inner.gpu_block_wires = std::sync::Arc::new(inner.upload_block_wires(
+                                device,
+                                queue,
+                                &partitioned.instanced,
+                                &draw_depths,
+                                &mut pipeline.block_geometry,
+                            ));
+                            blk_ms = t_blk.map_or(0.0, |t| t.elapsed().as_secs_f64() * 1000.0);
                             let t_curve = _perf.then(iced::time::Instant::now);
-                            inner.gpu_circles = std::sync::Arc::new(
-                                inner.upload_circles_from_instances(
+                            inner.gpu_circles =
+                                std::sync::Arc::new(inner.upload_circles_from_instances(
                                     device,
                                     queue,
                                     &partitioned.circle_instances,
-                                ),
-                            );
-                            inner.gpu_ellipses = std::sync::Arc::new(
-                                inner.upload_ellipses_from_instances(
+                                ));
+                            inner.gpu_ellipses =
+                                std::sync::Arc::new(inner.upload_ellipses_from_instances(
                                     device,
                                     queue,
                                     &partitioned.ellipse_instances,
-                                ),
-                            );
+                                ));
                             inner
                                 .partition_contributors
                                 .clone_from(&partitioned.contributors);
                             inner.partition_depth_generation = vp.draw_depth_generation;
-                            curve_ms = t_curve
-                                .map_or(0.0, |t| t.elapsed().as_secs_f64() * 1000.0);
+                            curve_ms = t_curve.map_or(0.0, |t| t.elapsed().as_secs_f64() * 1000.0);
                         }
                         if _perf {
                             // Report counts only when partitioning ran.
@@ -924,8 +908,7 @@ retained_contributors={}",
                                 &patch.unwrap().index_edits,
                             );
                         } else {
-                            inner.wire_handle_index =
-                                wire_arena::build_handle_index(&vp_wires[..]);
+                            inner.wire_handle_index = wire_arena::build_handle_index(&vp_wires[..]);
                         }
                         // Only claim the content id when the device accepted
                         // the upload; otherwise the slot believes it holds this
@@ -965,10 +948,7 @@ retained_contributors={}",
                 // `.cloned()` releases the immutable cache borrow before the
                 // miss branch takes a mutable one.
                 if !arena_served {
-                    let cached = pipeline
-                        .wire_buffer_cache
-                        .get(&vp.wire_content_id)
-                        .cloned();
+                    let cached = pipeline.wire_buffer_cache.get(&vp.wire_content_id).cloned();
                     let built = match cached {
                         Some(entry) => entry,
                         None => {
@@ -993,16 +973,14 @@ retained_contributors={}",
                                 );
                             }
                             let t_upload = _perf.then(iced::time::Instant::now);
-                            let errors_before =
-                                crate::scene::pipeline::gpu_errors_seen();
-                            let entry =
-                                inner.build_wire_buffers(
-                                    device,
-                                    queue,
-                                    &vp_wires[..],
-                                    &draw_depths,
-                                    &mut pipeline.block_geometry,
-                                );
+                            let errors_before = crate::scene::pipeline::gpu_errors_seen();
+                            let entry = inner.build_wire_buffers(
+                                device,
+                                queue,
+                                &vp_wires[..],
+                                &draw_depths,
+                                &mut pipeline.block_geometry,
+                            );
                             if let Some(start) = t_upload {
                                 crate::perf_record!(
                                     "[perf] wire-upload {:.1}ms wires={} content_id={}",
@@ -1034,11 +1012,7 @@ retained_contributors={}",
                 inner.cached_wire_id = vp.wire_content_id;
                 if _perf {
                     let gi: u32 = inner.gpu_wires.iter().map(|w| w.instance_count).sum();
-                    let bi: u32 = inner
-                        .gpu_block_wires
-                        .iter()
-                        .map(|w| w.instance_count)
-                        .sum();
+                    let bi: u32 = inner.gpu_block_wires.iter().map(|w| w.instance_count).sum();
                     let outcome = if !arena_served {
                         "shared-fullupload"
                     } else if _patched {
@@ -1063,19 +1037,18 @@ retained_contributors={}",
             // so this refreshes without re-tessellating or re-uploading the main
             // wire buffers.
             let sel_key = (vp.wire_content_id, vp.selection_generation);
-            let highlighted_geometry_unchanged =
-                vp.selected_handles.is_empty() && vp.hover_handles.is_empty()
-                    || vp.wire_patch.as_ref().is_some_and(|(previous, patch)| {
-                        *previous == inner.cached_selection.0
-                            && patch.changes.iter().all(|(handle, _)| {
-                                !vp.selected_handles.contains(handle)
-                                    && !vp.hover_handles.contains(handle)
-                            })
-                    });
+            let highlighted_geometry_unchanged = vp.selected_handles.is_empty()
+                && vp.hover_handles.is_empty()
+                || vp.wire_patch.as_ref().is_some_and(|(previous, patch)| {
+                    *previous == inner.cached_selection.0
+                        && patch.changes.iter().all(|(handle, _)| {
+                            !vp.selected_handles.contains(handle)
+                                && !vp.hover_handles.contains(handle)
+                        })
+                });
             let selection_changed = inner.cached_selection.1 != vp.selection_generation;
-            let highlighted_geometry_changed = inner.cached_selection.0
-                != vp.wire_content_id
-                && !highlighted_geometry_unchanged;
+            let highlighted_geometry_changed =
+                inner.cached_selection.0 != vp.wire_content_id && !highlighted_geometry_unchanged;
             let annotation_context_changed = inner
                 .cached_annotation_highlight_source
                 .as_ref()
@@ -1128,12 +1101,7 @@ retained_contributors={}",
             {
                 let patched = vp.wire_patch.as_ref().is_some_and(|(previous, patch)| {
                     *previous == inner.cached_mesh_content_id
-                        && inner.patch_mesh_batch(
-                            device,
-                            queue,
-                            &vp.meshes[..],
-                            &patch.changes,
-                        )
+                        && inner.patch_mesh_batch(device, queue, &vp.meshes[..], &patch.changes)
                 });
                 if !patched {
                     inner.upload_mesh_batch(device, queue, &vp.meshes[..]);
@@ -1181,7 +1149,11 @@ retained_contributors={}",
                 inner.upload_silhouettes(
                     device,
                     queue,
-                    if silhouette_enabled { &vp.meshes[..] } else { &[] },
+                    if silhouette_enabled {
+                        &vp.meshes[..]
+                    } else {
+                        &[]
+                    },
                     vp.wire_content_id,
                     vp.view_dir,
                 );
@@ -1216,9 +1188,8 @@ retained_contributors={}",
                 clip_size.width,
                 clip_size.height,
             );
-            if inner.wire_arena_id == vp.wire_content_id
-                && inner.wire_cull_key != cull_key
-            {
+            if inner.wire_arena_id == vp.wire_content_id && inner.wire_cull_key != cull_key {
+                let t_cull = iced::time::Instant::now();
                 let mut visible = if inner.wire_arena_fallback_kind == Some(false) {
                     inner.wire_arena_fallback.as_ref().clone()
                 } else {
@@ -1244,6 +1215,14 @@ retained_contributors={}",
                         clip_size.width,
                         clip_size.height,
                     ));
+                }
+                let cull_ms = t_cull.elapsed().as_secs_f64() * 1000.0;
+                if crate::perf::enabled() {
+                    crate::perf_record!(
+                        "[perf] wire-cull {:>7.2}ms items={}",
+                        cull_ms,
+                        visible.len()
+                    );
                 }
                 inner.gpu_wires = std::sync::Arc::new(visible);
                 inner.wire_cull_key = cull_key;
@@ -1281,9 +1260,9 @@ retained_contributors={}",
                 sample.started.elapsed().as_secs_f64() * 1000.0,
                 self.viewports.len(),
             ));
-        } else if crate::perf::enabled() && prepare_ms >= 5.0 {
+        } else if crate::perf::enabled() {
             crate::perf_record!(
-                "[perf] frame-prepare {:>7.1}ms viewports={}",
+                "[perf] frame-prepare {:>7.2}ms viewports={}",
                 prepare_ms,
                 self.viewports.len(),
             );
@@ -1309,7 +1288,9 @@ retained_contributors={}",
         clip: &Rectangle<u32>,
     ) {
         let nav_render_started = iced::time::Instant::now();
-        pipeline.frame_rendered.store(true, std::sync::atomic::Ordering::Relaxed);
+        pipeline
+            .frame_rendered
+            .store(true, std::sync::atomic::Ordering::Relaxed);
         let clip_right = clip.x + clip.width;
         let clip_bottom = clip.y + clip.height;
         for vp in &self.viewports {
@@ -1328,8 +1309,12 @@ retained_contributors={}",
             let surface_clip = Rectangle {
                 x: left,
                 y: top,
-                width: (surface_dest.x + surface_dest.width).min(clip_right).saturating_sub(left),
-                height: (surface_dest.y + surface_dest.height).min(clip_bottom).saturating_sub(top),
+                width: (surface_dest.x + surface_dest.width)
+                    .min(clip_right)
+                    .saturating_sub(left),
+                height: (surface_dest.y + surface_dest.height)
+                    .min(clip_bottom)
+                    .saturating_sub(top),
             };
             if surface_clip.width == 0 || surface_clip.height == 0 {
                 continue;
@@ -1365,11 +1350,16 @@ retained_contributors={}",
             // The ViewCube renders directly to the surface in the top-right corner
             // of the viewport. Skip it only when the top-right corner is off-canvas
             // or the visible area cannot fit the cube.
-            if vp.show_viewcube && inner.viewcube.should_render(surface_dest, surface_clip, clip) {
+            if vp.show_viewcube
+                && inner
+                    .viewcube
+                    .should_render(surface_dest, surface_clip, clip)
+            {
                 inner.viewcube.render(encoder, target, surface_clip);
             }
         }
         let render_ms = nav_render_started.elapsed().as_secs_f64() * 1000.0;
+        crate::perf::note_frame_render(render_ms);
         if let Some(sample) = self.nav_perf {
             crate::perf::record(format_args!(
                 "[perf] nav-render op={} space={} mode={} encode={:.2}ms elapsed={:.2}ms viewports={}",
@@ -1425,6 +1415,13 @@ fn render_signature(vp: &ViewportData, placement: &PhysicalViewport) -> u64 {
         std::sync::Arc::as_ptr(&vp.meshes) as usize
     }
     .hash(&mut h);
+    if vp.point_clouds.clouds.is_empty() {
+        std::ptr::null()
+    } else {
+        std::sync::Arc::as_ptr(&vp.point_clouds)
+    }
+    .hash(&mut h);
+    vp.point_cloud_light.map(f32::to_bits).hash(&mut h);
     vp.geometry_epoch.hash(&mut h);
     vp.selection_generation.hash(&mut h);
     vp.selected_sig.hash(&mut h);
@@ -1447,7 +1444,12 @@ fn render_signature(vp: &ViewportData, placement: &PhysicalViewport) -> u64 {
     vp.skip_background.hash(&mut h);
     placement.size.width.hash(&mut h);
     placement.size.height.hash(&mut h);
-    for value in [placement.raster.x, placement.raster.y, placement.raster.width, placement.raster.height] {
+    for value in [
+        placement.raster.x,
+        placement.raster.y,
+        placement.raster.width,
+        placement.raster.height,
+    ] {
         value.to_bits().hash(&mut h);
     }
     // Live overlay (command preview / interim / grip drag). Small — a handful
@@ -1949,10 +1951,7 @@ fn normalized_direction(value: [f64; 3], fallback: [f32; 3]) -> [f32; 3] {
     }
 }
 
-fn solar_direction(
-    sun: &codec::objects::Sun,
-    geo: &codec::objects::GeoData,
-) -> Option<[f32; 3]> {
+fn solar_direction(sun: &codec::objects::Sun, geo: &codec::objects::GeoData) -> Option<[f32; 3]> {
     if sun.julian_day < 1_000_000 {
         return None;
     }
@@ -1961,8 +1960,7 @@ fn solar_direction(
     } else {
         0.0
     };
-    let jd = sun.julian_day as f64
-        + (sun.milliseconds as f64 - daylight_ms) / 86_400_000.0;
+    let jd = sun.julian_day as f64 + (sun.milliseconds as f64 - daylight_ms) / 86_400_000.0;
     let days = jd - 2_451_545.0;
     let mean_longitude = (280.460 + 0.985_647_4 * days).to_radians();
     let mean_anomaly = (357.528 + 0.985_600_3 * days).to_radians();
@@ -1979,10 +1977,10 @@ fn solar_direction(
         - std::f64::consts::PI;
     let latitude = geo.reference_point.y.to_radians();
     let east_component = -declination.cos() * hour_angle.sin();
-    let north_component = declination.sin() * latitude.cos()
-        - declination.cos() * hour_angle.cos() * latitude.sin();
-    let up_component = declination.sin() * latitude.sin()
-        + declination.cos() * hour_angle.cos() * latitude.cos();
+    let north_component =
+        declination.sin() * latitude.cos() - declination.cos() * hour_angle.cos() * latitude.sin();
+    let up_component =
+        declination.sin() * latitude.sin() + declination.cos() * hour_angle.cos() * latitude.cos();
     if up_component <= 0.0 {
         return None;
     }
@@ -2053,10 +2051,7 @@ impl Scene {
     fn model_tile_vport(&self, index: usize) -> Option<&codec::tables::VPort> {
         let rect = self.model_tiles.borrow().get(index)?.rect;
         let lower_left = [rect.x as f64, (1.0 - rect.y - rect.height) as f64];
-        let upper_right = [
-            (rect.x + rect.width) as f64,
-            (1.0 - rect.y) as f64,
-        ];
+        let upper_right = [(rect.x + rect.width) as f64, (1.0 - rect.y) as f64];
         const EPSILON: f64 = 1e-5;
         let exact = self
             .document
@@ -2109,7 +2104,10 @@ impl Scene {
                         && value.reference_point.x.is_finite()
                         && value.reference_point.y.is_finite()
                         && value.reference_point.x.abs() <= 180.0
-                        && value.reference_point.y.abs() <= 90.0 => Some(value),
+                        && value.reference_point.y.abs() <= 90.0 =>
+                {
+                    Some(value)
+                }
                 _ => None,
             })
     }
@@ -2163,8 +2161,7 @@ impl Scene {
             if light.photometric_mode {
                 if let Some(photo) = light.photometric_data.as_ref() {
                     let solid_angle = if light.is_spot() && light.falloff_angle > 0.0 {
-                        2.0 * std::f64::consts::PI
-                            * (1.0 - (light.falloff_angle * 0.5).cos())
+                        2.0 * std::f64::consts::PI * (1.0 - (light.falloff_angle * 0.5).cos())
                     } else {
                         4.0 * std::f64::consts::PI
                     };
@@ -2200,9 +2197,8 @@ impl Scene {
                         } else {
                             138.517_731_223_1 * (kelvin - 10.0).ln() - 305.044_792_730_7
                         };
-                        let lamp = [red, green, blue].map(|channel| {
-                            (channel.clamp(0.0, 255.0) / 255.0) as f32
-                        });
+                        let lamp = [red, green, blue]
+                            .map(|channel| (channel.clamp(0.0, 255.0) / 255.0) as f32);
                         for index in 0..3 {
                             color[index] *= lamp[index];
                         }
@@ -2262,8 +2258,7 @@ impl Scene {
                 attenuation_end,
                 cast_shadows: light.cast_shadows,
                 shadow_softness: light.shadow_map_softness as f32 / 255.0 + area_softness,
-                shadow_map_size: u32::try_from(light.shadow_map_size.max(0))
-                    .unwrap_or(0),
+                shadow_map_size: u32::try_from(light.shadow_map_size.max(0)).unwrap_or(0),
                 web_profile,
                 web_rotation,
                 web_enabled,
@@ -2271,17 +2266,11 @@ impl Scene {
         }
 
         let mut lights = Vec::new();
-        for &handle in crate::entities::object_data::light_entities(
-            &self.object_data_cache,
-        ) {
+        for &handle in crate::entities::object_data::light_entities(&self.object_data_cache) {
             if let Some(EntityType::Light(light)) = self.document.get_entity(handle) {
                 let common = &light.common;
                 if self.layer_frozen_in(&common.layer, Some(frozen))
-                    || !self.belongs_to_visible_block(
-                        handle,
-                        common.owner_handle,
-                        target_block,
-                    )
+                    || !self.belongs_to_visible_block(handle, common.owner_handle, target_block)
                 {
                     continue;
                 }
@@ -2348,9 +2337,11 @@ impl Scene {
         let cache = self.lighting_cache.borrow();
         let lights = cache.get(&key).map(Vec::as_slice).unwrap_or_default();
         let settings = self.viewport_lighting_settings(viewport);
-        let visible_lights: Vec<&SceneLight> = lights
-            .iter()
-            .filter(|light| match self.document.get_entity(light.handle) {
+        let visible_lights: Vec<&SceneLight> =
+            lights
+                .iter()
+                .filter(|light| {
+                    match self.document.get_entity(light.handle) {
                 Some(EntityType::Light(entity)) => {
                     let common = &entity.common;
                     !common.invisible
@@ -2372,9 +2363,10 @@ impl Scene {
                     ) && (!settings.sun_handle.is_valid()
                         || settings.sun_handle == light.handle)
                 }),
-            })
-            .take(4)
-            .collect();
+            }
+                })
+                .take(4)
+                .collect();
         uniforms.lighting[1..4].copy_from_slice(&settings.ambient);
         if settings.force_default || visible_lights.is_empty() {
             Self::apply_default_lighting(uniforms, &viewport.camera, settings.default_type);
@@ -2405,22 +2397,15 @@ impl Scene {
                 light.direction[2],
                 light.intensity,
             ];
-            uniforms.light_color_hotspot[index] = [
-                color[0],
-                color[1],
-                color[2],
-                light.hotspot_cos,
-            ];
+            uniforms.light_color_hotspot[index] = [color[0], color[1], color[2], light.hotspot_cos];
             uniforms.light_attenuation[index] = [
                 light.attenuation_type,
                 light.attenuation_start,
                 light.attenuation_end,
                 light.falloff_cos,
             ];
-            uniforms.light_web_profile_a[index]
-                .copy_from_slice(&light.web_profile[..4]);
-            uniforms.light_web_profile_b[index]
-                .copy_from_slice(&light.web_profile[4..]);
+            uniforms.light_web_profile_a[index].copy_from_slice(&light.web_profile[..4]);
+            uniforms.light_web_profile_b[index].copy_from_slice(&light.web_profile[4..]);
             uniforms.light_web_rotation[index] = [
                 light.web_rotation[0],
                 light.web_rotation[1],
@@ -2447,16 +2432,13 @@ impl Scene {
                 .max(viewport.camera.distance * 0.25)
                 .max(1.0);
             let shadow_view_proj = if light.light_type < 1.5 {
-                let direction = glam::Vec3::from_array(light.direction)
-                    .normalize_or(glam::Vec3::NEG_Z);
+                let direction =
+                    glam::Vec3::from_array(light.direction).normalize_or(glam::Vec3::NEG_Z);
                 let light_eye = target - direction * radius * 2.0;
-                let view = glam::camera::rh::view::look_at_mat4(
-                    light_eye,
-                    target,
-                    up_for(direction),
-                );
-                let aspect = (uniforms.viewport_size[0] / uniforms.viewport_size[1].max(1.0))
-                    .max(1.0);
+                let view =
+                    glam::camera::rh::view::look_at_mat4(light_eye, target, up_for(direction));
+                let aspect =
+                    (uniforms.viewport_size[0] / uniforms.viewport_size[1].max(1.0)).max(1.0);
                 let projection = glam::camera::rh::proj::directx::orthographic(
                     -radius * aspect,
                     radius * aspect,
@@ -2475,8 +2457,7 @@ impl Scene {
                 let direction = if light.light_type < 2.5 {
                     (target - position).normalize_or(glam::Vec3::NEG_Z)
                 } else {
-                    glam::Vec3::from_array(light.direction)
-                        .normalize_or(glam::Vec3::NEG_Z)
+                    glam::Vec3::from_array(light.direction).normalize_or(glam::Vec3::NEG_Z)
                 };
                 let view = glam::camera::rh::view::look_at_mat4(
                     position,
@@ -2494,12 +2475,7 @@ impl Scene {
                 } else {
                     radius * 5.0
                 };
-                glam::camera::rh::proj::directx::perspective(
-                    fov,
-                    1.0,
-                    0.01,
-                    far.max(0.02),
-                ) * view
+                glam::camera::rh::proj::directx::perspective(fov, 1.0, 0.01, far.max(0.02)) * view
             };
             uniforms.shadow_view_proj = shadow_view_proj;
             let requested_size = light.shadow_map_size.max(256) as f32;
@@ -2512,10 +2488,7 @@ impl Scene {
         }
     }
 
-    fn viewport_lighting_settings(
-        &self,
-        viewport: &ViewportInstance,
-    ) -> ViewportLightingSettings {
+    fn viewport_lighting_settings(&self, viewport: &ViewportInstance) -> ViewportLightingSettings {
         let ambient = |color: &AcadColor| {
             color.rgb().map_or([0.18; 3], |(r, g, b)| {
                 [r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0]
@@ -2552,10 +2525,7 @@ impl Scene {
         ViewportLightingSettings::default()
     }
 
-    fn viewport_display_settings(
-        &self,
-        viewport: &ViewportInstance,
-    ) -> ViewportDisplaySettings {
+    fn viewport_display_settings(&self, viewport: &ViewportInstance) -> ViewportDisplaySettings {
         // What lies behind a viewport depends on what the viewport is. The
         // full-canvas paper sheet shows the desk, and the page is drawn on top
         // of it by `paper_sheet_fill` — give the desk the page's own colour and
@@ -2577,12 +2547,8 @@ impl Scene {
                      brightness: f64,
                      contrast: f64,
                      background_handle: Handle| {
-            let visual_style = resolve_visual_style_handle(
-                &self.document,
-                visual_style_handle,
-            );
-            let mut background = self
-                .viewport_background(background_handle, canvas_background, 0);
+            let visual_style = resolve_visual_style_handle(&self.document, visual_style_handle);
+            let mut background = self.viewport_background(background_handle, canvas_background, 0);
             self.apply_document_render_environment(&mut background);
             ViewportDisplaySettings {
                 visual_style,
@@ -2718,16 +2684,23 @@ impl Scene {
                 candidates.push(base.join(&source));
                 if let Some(name) = source.file_name() {
                     candidates.push(base.join(name));
-                    for folder in ["Photometric", "photometric", "Web", "web", "Lights", "lights"] {
+                    for folder in [
+                        "Photometric",
+                        "photometric",
+                        "Web",
+                        "web",
+                        "Lights",
+                        "lights",
+                    ] {
                         candidates.push(base.join(folder).join(name));
                     }
                 }
             }
             let path = candidates.into_iter().find(|path| path.is_file())?;
             let contents = std::fs::read_to_string(path).ok()?;
-            let tilt_start = contents.lines().position(|line| {
-                line.trim_start().to_ascii_uppercase().starts_with("TILT=")
-            })?;
+            let tilt_start = contents
+                .lines()
+                .position(|line| line.trim_start().to_ascii_uppercase().starts_with("TILT="))?;
             let lines: Vec<&str> = contents.lines().collect();
             let tilt = lines[tilt_start]
                 .trim()
@@ -2738,7 +2711,9 @@ impl Scene {
             }
             let values: Vec<f64> = lines[tilt_start + 1..]
                 .iter()
-                .flat_map(|line| line.split(|character: char| character.is_whitespace() || character == ','))
+                .flat_map(|line| {
+                    line.split(|character: char| character.is_whitespace() || character == ',')
+                })
                 .filter(|token| !token.is_empty())
                 .filter_map(|token| token.parse::<f64>().ok())
                 .collect();
@@ -2802,84 +2777,108 @@ impl Scene {
 
         let mut result = CachedDocumentRenderEnvironment::default();
 
-        let (environment, preset) = if crate::entities::object_data::cache_is_prepared(&self.object_data_cache) {
-            let env = crate::entities::object_data::render_environments(&self.object_data_cache)
-                .iter()
-                .find_map(|handle| match self.document.objects.get(handle) {
-                    Some(ObjectType::ClassObject(value)) => match &value.data {
-                        ClassObjectData::RenderEnvironment(environment) => {
-                            Some((*handle, environment))
+        let (environment, preset) =
+            if crate::entities::object_data::cache_is_prepared(&self.object_data_cache) {
+                let env =
+                    crate::entities::object_data::render_environments(&self.object_data_cache)
+                        .iter()
+                        .find_map(|handle| match self.document.objects.get(handle) {
+                            Some(ObjectType::ClassObject(value)) => match &value.data {
+                                ClassObjectData::RenderEnvironment(environment) => {
+                                    Some((*handle, environment))
+                                }
+                                _ => None,
+                            },
+                            _ => None,
+                        })
+                        .map(|(_, environment)| environment);
+
+                let pre = crate::entities::object_data::render_settings(&self.object_data_cache)
+                    .iter()
+                    .filter_map(|handle| match self.document.objects.get(handle) {
+                        Some(ObjectType::ClassObject(value)) => {
+                            let settings = match &value.data {
+                                ClassObjectData::RenderSettings(settings) => settings,
+                                ClassObjectData::MentalRayRenderSettings(settings) => {
+                                    &settings.base
+                                }
+                                ClassObjectData::RapidRtRenderSettings(settings) => &settings.base,
+                                _ => return None,
+                            };
+                            (settings.environment_image_enabled
+                                && !settings.environment_image_filename.is_empty())
+                            .then_some((*handle, settings))
                         }
                         _ => None,
-                    },
-                    _ => None,
-                })
-                .map(|(_, environment)| environment);
+                    })
+                    .min_by_key(|(handle, settings)| (!settings.has_predefined, handle.value()))
+                    .map(|(_, settings)| settings);
 
-            let pre = crate::entities::object_data::render_settings(&self.object_data_cache)
-                .iter()
-                .filter_map(|handle| match self.document.objects.get(handle) {
-                    Some(ObjectType::ClassObject(value)) => {
-                        let settings = match &value.data {
-                            ClassObjectData::RenderSettings(settings) => settings,
-                            ClassObjectData::MentalRayRenderSettings(settings) => &settings.base,
-                            ClassObjectData::RapidRtRenderSettings(settings) => &settings.base,
-                            _ => return None,
-                        };
-                        (settings.environment_image_enabled
-                            && !settings.environment_image_filename.is_empty())
-                            .then_some((*handle, settings))
-                    }
-                    _ => None,
-                })
-                .min_by_key(|(handle, settings)| (!settings.has_predefined, handle.value()))
-                .map(|(_, settings)| settings);
+                (env, pre)
+            } else {
+                let mut best_env: Option<(codec::Handle, &codec::objects::RenderEnvironment)> =
+                    None;
+                let mut best_preset: Option<(codec::Handle, &codec::objects::RenderSettings)> =
+                    None;
 
-            (env, pre)
-        } else {
-            let mut best_env: Option<(codec::Handle, &codec::objects::RenderEnvironment)> = None;
-            let mut best_preset: Option<(codec::Handle, &codec::objects::RenderSettings)> = None;
-
-            for (handle, object) in &self.document.objects {
-                if let ObjectType::ClassObject(value) = object {
-                    match &value.data {
-                        ClassObjectData::RenderEnvironment(env) => {
-                            if best_env.as_ref().map_or(true, |(best_h, _)| handle.value() < best_h.value()) {
-                                best_env = Some((*handle, env));
-                            }
-                        }
-                        ClassObjectData::RenderSettings(settings) => {
-                            if settings.environment_image_enabled && !settings.environment_image_filename.is_empty() {
-                                let key = (!settings.has_predefined, handle.value());
-                                if best_preset.as_ref().map_or(true, |(best_h, best_s)| key < (!best_s.has_predefined, best_h.value())) {
-                                    best_preset = Some((*handle, settings));
+                for (handle, object) in &self.document.objects {
+                    if let ObjectType::ClassObject(value) = object {
+                        match &value.data {
+                            ClassObjectData::RenderEnvironment(env) => {
+                                if best_env
+                                    .as_ref()
+                                    .map_or(true, |(best_h, _)| handle.value() < best_h.value())
+                                {
+                                    best_env = Some((*handle, env));
                                 }
                             }
-                        }
-                        ClassObjectData::MentalRayRenderSettings(settings) => {
-                            let base = &settings.base;
-                            if base.environment_image_enabled && !base.environment_image_filename.is_empty() {
-                                let key = (!base.has_predefined, handle.value());
-                                if best_preset.as_ref().map_or(true, |(best_h, best_s)| key < (!best_s.has_predefined, best_h.value())) {
-                                    best_preset = Some((*handle, base));
+                            ClassObjectData::RenderSettings(settings) => {
+                                if settings.environment_image_enabled
+                                    && !settings.environment_image_filename.is_empty()
+                                {
+                                    let key = (!settings.has_predefined, handle.value());
+                                    if best_preset.as_ref().map_or(true, |(best_h, best_s)| {
+                                        key < (!best_s.has_predefined, best_h.value())
+                                    }) {
+                                        best_preset = Some((*handle, settings));
+                                    }
                                 }
                             }
-                        }
-                        ClassObjectData::RapidRtRenderSettings(settings) => {
-                            let base = &settings.base;
-                            if base.environment_image_enabled && !base.environment_image_filename.is_empty() {
-                                let key = (!base.has_predefined, handle.value());
-                                if best_preset.as_ref().map_or(true, |(best_h, best_s)| key < (!best_s.has_predefined, best_h.value())) {
-                                    best_preset = Some((*handle, base));
+                            ClassObjectData::MentalRayRenderSettings(settings) => {
+                                let base = &settings.base;
+                                if base.environment_image_enabled
+                                    && !base.environment_image_filename.is_empty()
+                                {
+                                    let key = (!base.has_predefined, handle.value());
+                                    if best_preset.as_ref().map_or(true, |(best_h, best_s)| {
+                                        key < (!best_s.has_predefined, best_h.value())
+                                    }) {
+                                        best_preset = Some((*handle, base));
+                                    }
                                 }
                             }
+                            ClassObjectData::RapidRtRenderSettings(settings) => {
+                                let base = &settings.base;
+                                if base.environment_image_enabled
+                                    && !base.environment_image_filename.is_empty()
+                                {
+                                    let key = (!base.has_predefined, handle.value());
+                                    if best_preset.as_ref().map_or(true, |(best_h, best_s)| {
+                                        key < (!best_s.has_predefined, best_h.value())
+                                    }) {
+                                        best_preset = Some((*handle, base));
+                                    }
+                                }
+                            }
+                            _ => {}
                         }
-                        _ => {}
                     }
                 }
-            }
-            (best_env.map(|(_, env)| env), best_preset.map(|(_, pre)| pre))
-        };
+                (
+                    best_env.map(|(_, env)| env),
+                    best_preset.map(|(_, pre)| pre),
+                )
+            };
 
         if let Some(environment) = environment {
             if environment.fog_enabled {
@@ -2909,7 +2908,8 @@ impl Scene {
                 result.fog = Some((fog_color, fog_params, fog_distances));
             }
             if environment.environment_image_enabled {
-                if let Some(image) = self.background_image(&environment.environment_image_filename) {
+                if let Some(image) = self.background_image(&environment.environment_image_filename)
+                {
                     result.environment = Some(([1.0, 0.0, 0.25, 0.35], image));
                 }
             }
@@ -2924,10 +2924,7 @@ impl Scene {
         result
     }
 
-    fn apply_document_render_environment(
-        &self,
-        background: &mut ViewportBackgroundSettings,
-    ) {
+    fn apply_document_render_environment(&self, background: &mut ViewportBackgroundSettings) {
         let key = (self.geometry_epoch, self.document.objects.len());
         let needs_build = match self.document_render_env_cache.borrow().as_ref() {
             Some((epoch, len, _)) => *epoch != key.0 || *len != key.1,
@@ -2974,9 +2971,9 @@ impl Scene {
         };
         match &value.data {
             ClassObjectData::SolidBackground(background) => {
-                let mut result = ViewportBackgroundSettings::canvas(
-                    Self::packed_background_color(background.color),
-                );
+                let mut result = ViewportBackgroundSettings::canvas(Self::packed_background_color(
+                    background.color,
+                ));
                 result.params[0] = 1.0;
                 result
             }
@@ -3028,19 +3025,11 @@ impl Scene {
                 result
             }
             ClassObjectData::IblBackground(background) => {
-                let mut result = self.viewport_background(
-                    background.secondary_background,
-                    canvas,
-                    depth + 1,
-                );
+                let mut result =
+                    self.viewport_background(background.secondary_background, canvas, depth + 1);
                 if background.enabled {
                     if let Some(environment) = self.background_image(&background.name) {
-                        result.environment_params = [
-                            1.0,
-                            background.rotation as f32,
-                            0.25,
-                            0.35,
-                        ];
+                        result.environment_params = [1.0, background.rotation as f32, 0.25, 0.35];
                         if background.display_image {
                             result.params = [5.0, 0.0, 0.0, background.rotation as f32];
                             result.image_params[3] =
@@ -3064,9 +3053,8 @@ impl Scene {
                 {
                     if let ClassObjectData::Sun(sun) = &value.data {
                         if sun.is_on {
-                            if let Some(direction) = self
-                                .geolocation()
-                                .and_then(|geo| solar_direction(sun, geo))
+                            if let Some(direction) =
+                                self.geolocation().and_then(|geo| solar_direction(sun, geo))
                             {
                                 result.params[1..4].copy_from_slice(&[
                                     -direction[0],
@@ -3074,12 +3062,8 @@ impl Scene {
                                     -direction[2],
                                 ]);
                                 let color = tess_util::aci_to_rgba(&sun.color);
-                                result.colors[1] = [
-                                    color[0],
-                                    color[1],
-                                    color[2],
-                                    sun.intensity.max(0.0) as f32,
-                                ];
+                                result.colors[1] =
+                                    [color[0], color[1], color[2], sun.intensity.max(0.0) as f32];
                             }
                         }
                     }
@@ -3115,7 +3099,10 @@ impl Scene {
     }
 
     /// Returns (entity_color, pattern_length, pattern, line_weight_px, aci).
-    pub(in crate::scene) fn render_style(&self, e: &EntityType) -> ([f32; 4], f32, [f32; 8], f32, u8) {
+    pub(in crate::scene) fn render_style(
+        &self,
+        e: &EntityType,
+    ) -> ([f32; 4], f32, [f32; 8], f32, u8) {
         let (color, pl, pat, lw, aci) = render_style_for(&self.document, e);
         let bg = if self.current_layout == "Model" {
             self.bg_color
@@ -3148,11 +3135,10 @@ impl Scene {
         if let Some(style) = self.display_plot_style_cache.borrow().get(&key) {
             return style.clone();
         }
-        let style = crate::io::plot_style::PlotStyleTable::load_named(
-            &settings.current_style_sheet,
-        )
-        .ok()
-        .map(Arc::new);
+        let style =
+            crate::io::plot_style::PlotStyleTable::load_named(&settings.current_style_sheet)
+                .ok()
+                .map(Arc::new);
         self.display_plot_style_cache
             .borrow_mut()
             .insert(key, style.clone());
@@ -3172,10 +3158,7 @@ impl Scene {
             color[..3].copy_from_slice(&rgb);
         }
         let screening = style.resolve_screening(aci);
-        for (channel, paper) in color[..3]
-            .iter_mut()
-            .zip(self.paper_bg_color[..3].iter())
-        {
+        for (channel, paper) in color[..3].iter_mut().zip(self.paper_bg_color[..3].iter()) {
             *channel = *channel * screening + *paper * (1.0 - screening);
         }
     }
@@ -3214,8 +3197,7 @@ impl Scene {
             }
         }
         let wires = Arc::new(wires);
-        let gen = crate::scene::WIRE_CONTENT_GEN
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let gen = crate::scene::WIRE_CONTENT_GEN.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let mut cache = self.styled_wire_cache.borrow_mut();
         if cache.len() >= DISPLAY_STYLE_CACHE_LIMIT {
             cache.clear();
@@ -3247,11 +3229,12 @@ impl Scene {
         for hatch in &mut hatches {
             self.apply_display_plot_style(&mut hatch.color, hatch.aci, &style);
             if hatch.aci > 0 {
-                if matches!(hatch.pattern, crate::scene::model::hatch_model::HatchPattern::Solid) {
-                    if let Some(fill_style) = style
-                        .aci_entries
-                        .get(hatch.aci as usize)
-                        .and_then(|entry| {
+                if matches!(
+                    hatch.pattern,
+                    crate::scene::model::hatch_model::HatchPattern::Solid
+                ) {
+                    if let Some(fill_style) =
+                        style.aci_entries.get(hatch.aci as usize).and_then(|entry| {
                             crate::scene::model::hatch_model::plot_style_fill_pattern(
                                 entry.fill_style,
                             )
@@ -3264,9 +3247,8 @@ impl Scene {
                 if let Some(mm) = style.resolve_lineweight(hatch.aci) {
                     hatch.line_weight_px = (mm * MM_TO_PX).max(1.0);
                 }
-                if let crate::scene::model::hatch_model::HatchPattern::Gradient {
-                    color2, ..
-                } = &mut hatch.pattern
+                if let crate::scene::model::hatch_model::HatchPattern::Gradient { color2, .. } =
+                    &mut hatch.pattern
                 {
                     self.apply_display_plot_style(color2, hatch.aci, &style);
                 }
@@ -3308,21 +3290,18 @@ impl Scene {
         }
         let depths = self.draw_depth_map();
         let mut hatches = Vec::new();
-        for wire in wires.iter().filter(|wire| wire.fill_is_2d_solid && wire.aci > 0) {
-            let Some(pattern) = style
-                .aci_entries
-                .get(wire.aci as usize)
-                .and_then(|entry| {
-                    (65..=72)
-                        .contains(&entry.fill_style)
-                        .then(|| {
-                            crate::scene::model::hatch_model::plot_style_fill_pattern(
-                                entry.fill_style,
-                            )
-                        })
-                        .flatten()
-                })
-            else {
+        for wire in wires
+            .iter()
+            .filter(|wire| wire.fill_is_2d_solid && wire.aci > 0)
+        {
+            let Some(pattern) = style.aci_entries.get(wire.aci as usize).and_then(|entry| {
+                (65..=72)
+                    .contains(&entry.fill_style)
+                    .then(|| {
+                        crate::scene::model::hatch_model::plot_style_fill_pattern(entry.fill_style)
+                    })
+                    .flatten()
+            }) else {
                 continue;
             };
             let mut color = wire.color;
@@ -3363,9 +3342,7 @@ impl Scene {
                     // child label (or None for top-level wires) — either way
                     // it would place the fill outside its host's depth band
                     // and let sibling wipes/masks bury it.
-                    draw_depth: crate::scene::pipeline::wire_gpu::wire_draw_depth(
-                        wire, &depths,
-                    ),
+                    draw_depth: crate::scene::pipeline::wire_gpu::wire_draw_depth(wire, &depths),
                 });
             }
         }
@@ -3393,11 +3370,14 @@ pub(in crate::scene) fn layer_locked(document: &CadDocument, e: &EntityType) -> 
 
 /// Resolves the effective linetype name for an entity, falling back to the
 /// layer's linetype when the entity's own linetype is "ByLayer".
-pub(in crate::scene) fn linetype_name_for<'a>(document: &'a CadDocument, e: &'a EntityType) -> &'a str {
+pub(in crate::scene) fn linetype_name_for<'a>(
+    document: &'a CadDocument,
+    e: &'a EntityType,
+) -> &'a str {
     linetype_name_for_viewport(document, e, None)
 }
 
-pub(in crate::scene) fn linetype_name_for_common_viewport<'a>(
+pub(crate) fn linetype_name_for_common_viewport<'a>(
     document: &'a CadDocument,
     common: &'a codec::entities::EntityCommon,
     viewport: Option<Handle>,
@@ -3413,7 +3393,11 @@ pub(in crate::scene) fn linetype_name_for_common_viewport<'a>(
             )
             .and_then(|value| value.as_handle())
             {
-                if let Some(line_type) = document.line_types.iter().find(|line_type| line_type.handle == handle) {
+                if let Some(line_type) = document
+                    .line_types
+                    .iter()
+                    .find(|line_type| line_type.handle == handle)
+                {
                     return line_type.name.as_str();
                 }
             }
@@ -3475,18 +3459,19 @@ pub(crate) fn render_style_for_common_viewport(
                 _ => None,
             });
         let ec = book_color.unwrap_or(&common.color);
-        let viewport_color = (book_color.is_none() && *ec == AcadColor::ByLayer && viewport.is_some())
-            .then(|| {
-                viewport_override(
-                    document,
-                    layer_name,
-                    viewport,
-                    codec::objects::KnownXRecordKind::LayerViewportColorOverride,
-                )
-                .and_then(|value| value.as_i32())
-                .map(AcadColor::from_true_color_value)
-            })
-            .flatten();
+        let viewport_color =
+            (book_color.is_none() && *ec == AcadColor::ByLayer && viewport.is_some())
+                .then(|| {
+                    viewport_override(
+                        document,
+                        layer_name,
+                        viewport,
+                        codec::objects::KnownXRecordKind::LayerViewportColorOverride,
+                    )
+                    .and_then(|value| value.as_i32())
+                    .map(AcadColor::from_true_color_value)
+                })
+                .flatten();
         let resolved = if *ec == AcadColor::ByLayer {
             viewport_color.as_ref().unwrap_or_else(|| {
                 document
@@ -3517,7 +3502,12 @@ pub(crate) fn render_style_for_common_viewport(
                 None
             };
             vp_trans
-                .or_else(|| document.layers.get(layer_name).map(|layer| layer.transparency))
+                .or_else(|| {
+                    document
+                        .layers
+                        .get(layer_name)
+                        .map(|layer| layer.transparency)
+                })
                 .unwrap_or(common.transparency)
         } else {
             common.transparency
@@ -3533,18 +3523,19 @@ pub(crate) fn render_style_for_common_viewport(
 
     let line_weight_px = {
         let ew = &common.line_weight;
-        let viewport_lineweight = (viewport.is_some() && matches!(ew, LineWeight::ByLayer | LineWeight::Default))
-            .then(|| {
-                viewport_override(
-                    document,
-                    layer_name,
-                    viewport,
-                    codec::objects::KnownXRecordKind::LayerViewportLineweightOverride,
-                )
-                .and_then(|value| value.as_i32())
-                .map(|value| LineWeight::from_value(value as i16))
-            })
-            .flatten();
+        let viewport_lineweight = (viewport.is_some()
+            && matches!(ew, LineWeight::ByLayer | LineWeight::Default))
+        .then(|| {
+            viewport_override(
+                document,
+                layer_name,
+                viewport,
+                codec::objects::KnownXRecordKind::LayerViewportLineweightOverride,
+            )
+            .and_then(|value| value.as_i32())
+            .map(|value| LineWeight::from_value(value as i16))
+        })
+        .flatten();
         let resolved = match ew {
             LineWeight::ByLayer | LineWeight::ByBlock | LineWeight::Default => viewport_lineweight
                 .as_ref()
@@ -3660,12 +3651,19 @@ pub(crate) fn layer_render_style_viewport(
             codec::objects::KnownXRecordKind::LayerViewportLinetypeOverride,
         )
         .and_then(|value| value.as_handle())
-        .and_then(|handle| document.line_types.iter().find(|line_type| line_type.handle == handle))
+        .and_then(|handle| {
+            document
+                .line_types
+                .iter()
+                .find(|line_type| line_type.handle == handle)
+        })
         .map(|line_type| line_type.name.as_str())
         .or_else(|| layer.map(|layer| layer.line_type.as_str()))
         .unwrap_or("Continuous")
     } else {
-        layer.map(|layer| layer.line_type.as_str()).unwrap_or("Continuous")
+        layer
+            .map(|layer| layer.line_type.as_str())
+            .unwrap_or("Continuous")
     };
     let lt_scale = document.header.linetype_scale as f32;
     let (pat_len, pat) = resolve_pattern(&document.line_types, lt_name, lt_scale);
@@ -3762,8 +3760,7 @@ pub(crate) fn render_style_for_block_sub_viewport(
     };
     let final_color = [resolved_rgb[0], resolved_rgb[1], resolved_rgb[2], alpha];
 
-    let lt_bylayer =
-        common.linetype.is_empty() || common.linetype.eq_ignore_ascii_case("bylayer");
+    let lt_bylayer = common.linetype.is_empty() || common.linetype.eq_ignore_ascii_case("bylayer");
     let (final_pat_len, final_pat) = if common.linetype.eq_ignore_ascii_case("byblock") {
         (insert_pat_len, insert_pat)
     } else if on_l0 && lt_bylayer {
@@ -3774,7 +3771,12 @@ pub(crate) fn render_style_for_block_sub_viewport(
 
     let final_lw = if matches!(common.line_weight, LineWeight::ByBlock) {
         insert_lw_px
-    } else if on_l0 && matches!(common.line_weight, LineWeight::ByLayer | LineWeight::Default) {
+    } else if on_l0
+        && matches!(
+            common.line_weight,
+            LineWeight::ByLayer | LineWeight::Default
+        )
+    {
         l0.lw_px
     } else {
         lw_px
@@ -3788,8 +3790,11 @@ pub(crate) fn render_style_for_block_sub_viewport(
 /// backgrounds become white. All other colors pass through unchanged.
 pub(crate) fn adapt_to_bg(color: [f32; 4], bg: [f32; 4]) -> [f32; 4] {
     let lum = 0.299 * bg[0] + 0.587 * bg[1] + 0.114 * bg[2];
-    let is_white = color[0] > 0.95 && color[1] > 0.95 && color[2] > 0.95;
-    let is_black = color[0] < 0.05 && color[1] < 0.05 && color[2] < 0.05;
+    // Only exact white / black swap: that is colour 7 (and interface colours).
+    // Authored colours reach here nudged off both, so they stay as drawn —
+    // a true-colour white mask on a light sheet remains white. (#1500)
+    let is_white = color[..3] == [1.0; 3];
+    let is_black = color[..3] == [0.0; 3];
     if is_white && lum > 0.5 {
         [0.0, 0.0, 0.0, color[3]]
     } else if is_black && lum <= 0.5 {
@@ -3937,10 +3942,7 @@ impl Scene {
         verts
     }
 
-    fn annotation_context_highlight_wires(
-        &self,
-        inst: &ViewportInstance,
-    ) -> Arc<Vec<WireModel>> {
+    fn annotation_context_highlight_wires(&self, inst: &ViewportInstance) -> Arc<Vec<WireModel>> {
         if self.selected.is_empty()
             && self.hover_highlight.is_none()
             && self.constraint_hover_highlights.is_empty()
@@ -3948,9 +3950,8 @@ impl Scene {
             return Arc::new(Vec::new());
         }
 
-        let content_viewport = !inst.paper_sheet
-            && inst.tile_idx.is_none()
-            && inst.handle != Handle::NULL;
+        let content_viewport =
+            !inst.paper_sheet && inst.tile_idx.is_none() && inst.handle != Handle::NULL;
         let target_block = if inst.paper_sheet {
             self.current_layout_block_handle()
         } else {
@@ -3991,9 +3992,8 @@ impl Scene {
         let all_visible = self.annotation_all_visible();
 
         let mut key = 0xcbf2_9ce4_8422_2325_u64;
-        let mut mix = |value: u64| {
-            key = key.rotate_left(17) ^ value.wrapping_mul(0x9E37_79B9_7F4A_7C15)
-        };
+        let mut mix =
+            |value: u64| key = key.rotate_left(17) ^ value.wrapping_mul(0x9E37_79B9_7F4A_7C15);
         mix(self.geometry_epoch);
         mix(self.selection_generation);
         mix(target_block.value());
@@ -4008,9 +4008,7 @@ impl Scene {
         }
         let mut frozen_sig = frozen.len() as u64;
         for handle in &frozen {
-            frozen_sig ^= handle
-                .value()
-                .wrapping_mul(0x9E37_79B9_7F4A_7C15);
+            frozen_sig ^= handle.value().wrapping_mul(0x9E37_79B9_7F4A_7C15);
         }
         mix(frozen_sig);
 
@@ -4040,12 +4038,12 @@ impl Scene {
                 continue;
             };
             if !self.resident_entity_visible(
-                    entity,
-                    target_block,
-                    Some(&frozen),
-                    annotation_scale_handle,
-                    true,
-                ) {
+                entity,
+                target_block,
+                Some(&frozen),
+                annotation_scale_handle,
+                true,
+            ) {
                 continue;
             }
 
@@ -4114,13 +4112,11 @@ impl Scene {
                 continue;
             }
 
-            let mut scales: Vec<Handle> = crate::scene::annotative::object_scale_memberships(
-                &self.document,
-                handle,
-            )
-            .into_iter()
-            .map(|(_, scale)| scale)
-            .collect();
+            let mut scales: Vec<Handle> =
+                crate::scene::annotative::object_scale_memberships(&self.document, handle)
+                    .into_iter()
+                    .map(|(_, scale)| scale)
+                    .collect();
             scales.sort_unstable_by_key(Handle::value);
             scales.dedup();
 
@@ -4202,8 +4198,10 @@ impl Scene {
         // Hover comes from the scene cell driven by the app-level
         // `CursorMoved` handler — the cube overlay sits above the shader
         // and would otherwise mask the move event from `Program::update`.
-        let hover_region = show_interaction.then(|| self.viewcube_hover.get()).flatten();
-        self.selection.borrow_mut().vp_size = (bounds.width, bounds.height);
+        let hover_region = show_interaction
+            .then(|| self.viewcube_hover.get())
+            .flatten();
+        self.selection.borrow_mut().view.vp_size = (bounds.width, bounds.height);
         if bounds.height > 0.0 {
             self.set_render_aspect(bounds.width / bounds.height);
             self.set_render_pixel_scale(bounds.width, bounds.height);
@@ -4259,7 +4257,9 @@ impl Scene {
         show_interaction: bool,
         viewcube_text_color: [f32; 4],
     ) -> Primitive {
-        let hover_region = show_interaction.then(|| self.viewcube_hover.get()).flatten();
+        let hover_region = show_interaction
+            .then(|| self.viewcube_hover.get())
+            .flatten();
         let canvas = (bounds.width.max(1.0), bounds.height.max(1.0));
         let bg_color = [0.0, 0.0, 0.0, 0.0];
         let tiles = self.model_tiles.borrow();
@@ -4421,7 +4421,12 @@ impl Scene {
         // memoized rather than re-walking every wire (handle lookup + clone)
         // each frame — for every source, since all ids are stable now.
         let (face3d_wires, other_arc) = {
-            let cached = { self.split_cache.borrow().get(&base_wire_content_id).cloned() };
+            let cached = {
+                self.split_cache
+                    .borrow()
+                    .get(&base_wire_content_id)
+                    .cloned()
+            };
             let inherited_empty = if let Some((base, patch)) = base_wire_patch.as_ref() {
                 if patch.face_pass_changed {
                     None
@@ -4492,50 +4497,59 @@ impl Scene {
         // even though the world-space geometry itself did not change. The
         // incremental patch's base id receives the same tag, preserving the
         // arena fast path after the first mode switch.
-        let wire_mode_tag = u64::from(
-            inst.render_mode == codec::entities::ViewportRenderMode::Wireframe3D,
-        );
+        let wire_mode_tag =
+            u64::from(inst.render_mode == codec::entities::ViewportRenderMode::Wireframe3D);
         let wire_content_id = base_wire_content_id
             .wrapping_mul(2)
             .wrapping_add(wire_mode_tag);
-        let wire_patch = base_wire_patch.map(|(base, patch)| {
-            (
-                base.wrapping_mul(2).wrapping_add(wire_mode_tag),
-                patch,
-            )
-        });
+        let wire_patch = base_wire_patch
+            .map(|(base, patch)| (base.wrapping_mul(2).wrapping_add(wire_mode_tag), patch));
         // A live overlay belongs to one drawing space, but every viewport that
         // displays that space must project the same world-space preview. In a
         // paper layout, model-space overlays go to all content viewports while
         // paper-space overlays stay on the sheet. This also keeps model-space
         // coordinates out of the full-canvas sheet pass (#540).
-        let show_live_overlay = show_interaction && if self.current_layout == "Model" {
-            true
-        } else if self.active_viewport.is_some() {
-            !inst.paper_sheet
-        } else {
-            inst.paper_sheet
-        };
+        let show_live_overlay = show_interaction
+            && if self.current_layout == "Model" {
+                true
+            } else if self.active_viewport.is_some() {
+                !inst.paper_sheet
+            } else {
+                inst.paper_sheet
+            };
         let annotation_context_wires = if show_live_overlay {
             self.annotation_context_highlight_wires(inst)
         } else {
             Arc::new(Vec::new())
         };
+        // 2D wireframe draws no cloud points; the clouds show their extents
+        // and a message there instead (drawn with the live overlays).
+        let wireframe_2d = inst.render_mode == codec::entities::ViewportRenderMode::Wireframe2D;
+        let cloud_2d_wires = if wireframe_2d && show_live_overlay && !inst.paper_sheet {
+            self.point_cloud_2d_wires()
+        } else {
+            Vec::new()
+        };
         let preview_wires = if !show_live_overlay
             || (self.interim_wire.is_none()
                 && self.preview_wires.is_empty()
-                && self.constraint_hover_wires.is_empty())
+                && self.constraint_hover_wires.is_empty()
+                && cloud_2d_wires.is_empty())
         {
             Arc::new(Vec::new())
         } else {
             let mut v: Vec<WireModel> = Vec::with_capacity(
-                self.preview_wires.len() + self.constraint_hover_wires.len() + 1,
+                self.preview_wires.len()
+                    + self.constraint_hover_wires.len()
+                    + cloud_2d_wires.len()
+                    + 1,
             );
             if let Some(iw) = &self.interim_wire {
                 v.push(iw.clone());
             }
             v.extend(self.preview_wires.iter().cloned());
             v.extend(self.constraint_hover_wires.iter().cloned());
+            v.extend(cloud_2d_wires);
             Arc::new(v)
         };
         let preview_hatches = if show_live_overlay {
@@ -4547,14 +4561,12 @@ impl Scene {
         // Per-viewport frozen-layer set for a paper content viewport. Content
         // viewports hide special fills, media, meshes and lights on VP-frozen
         // layers too, matching the already-filtered resident wire set.
-        let vp_frozen: rustc_hash::FxHashSet<Handle> = if !inst.paper_sheet
-            && inst.tile_idx.is_none()
-            && inst.handle != codec::Handle::NULL
-        {
-            self.viewport_hidden_handles(inst.handle)
-        } else {
-            rustc_hash::FxHashSet::default()
-        };
+        let vp_frozen: rustc_hash::FxHashSet<Handle> =
+            if !inst.paper_sheet && inst.tile_idx.is_none() && inst.handle != codec::Handle::NULL {
+                self.viewport_hidden_handles(inst.handle)
+            } else {
+                rustc_hash::FxHashSet::default()
+            };
         let lighting_block = if inst.paper_sheet {
             self.current_layout_block_handle()
         } else {
@@ -4604,8 +4616,7 @@ impl Scene {
             && inst.handle != Handle::NULL
         {
             if let Some(EntityType::Viewport(vp)) = self.document.get_entity(inst.handle) {
-                let viewport_scale =
-                    vp_effective_scale(vp.custom_scale, vp.view_height, vp.height);
+                let viewport_scale = vp_effective_scale(vp.custom_scale, vp.view_height, vp.height);
 
                 if viewport_scale.is_finite() && viewport_scale > 1e-9 {
                     uniforms.linetype_scale = (1.0 / viewport_scale) as f32;
@@ -4655,8 +4666,7 @@ impl Scene {
                 highlight,
                 (style.brightness / 10.0).clamp(-1.0, 1.0),
             ];
-            uniforms.visual_style_color =
-                style.mono_color.unwrap_or([1.0, 1.0, 1.0, 1.0]);
+            uniforms.visual_style_color = style.mono_color.unwrap_or([1.0, 1.0, 1.0, 1.0]);
         }
         self.apply_document_lighting(&mut uniforms, lighting_block, &vp_frozen, inst);
 
@@ -4731,6 +4741,8 @@ impl Scene {
         } else {
             self.meshes_for_viewport(inst.handle, &vp_frozen)
         };
+        let point_clouds =
+            self.point_clouds_for_viewport(&vp_frozen, inst.paper_sheet || wireframe_2d);
 
         // SDF text quads (behind OCS_TEXT_SDF). The glyph quads ride on each
         // entity's own wire (produced by the tessellator, transformed for
@@ -4757,19 +4769,13 @@ impl Scene {
         } else {
             0x3000_0000_0000_0000 | inst.handle.value()
         };
-        let draw_depths = if inst.render_mode
-            == codec::entities::ViewportRenderMode::Wireframe3D
-        {
+        let draw_depths = if inst.render_mode == codec::entities::ViewportRenderMode::Wireframe3D {
             Arc::clone(&self.no_draw_depths)
         } else {
             self.draw_depth_map()
         };
-        let text_verts = self.gather_text_verts(
-            &all_wires,
-            wire_content_id,
-            text_source_key,
-            &draw_depths,
-        );
+        let text_verts =
+            self.gather_text_verts(&all_wires, wire_content_id, text_source_key, &draw_depths);
         // Grip-drag / command-preview glyphs, excluded from the epoch-cached base
         // gather above. Two sources, both tiny (one operation's worth) and walked
         // per frame: the overlay wires' own glyphs (MOVE / COPY / ROTATE / SCALE /
@@ -4814,6 +4820,39 @@ impl Scene {
             Arc::new(vec![])
         };
         let navigating = !inst.paper_sheet && self.navigating_lod();
+        let point_cloud_light = {
+            use crate::scene::model::point_cloud::{setting, setting_value};
+            let value = |name| setting(name).map_or(0, |s| setting_value(&self.document, s)) as f32;
+            // Lit only in the shaded styles, as the reference.
+            let lighting = if flags.mesh_fill && !flags.hidden_line {
+                value("POINTCLOUDLIGHTING")
+            } else {
+                0.0
+            };
+            let source = value("POINTCLOUDLIGHTSOURCE");
+            // The lights follow the view (measured from the reference in
+            // view coordinates: right, up, toward the viewer): the default
+            // lighting is a key light from the upper left and a fill light
+            // from the lower right, the other source one light from above.
+            let view = |x: f32, y: f32, z: f32| {
+                (inst.camera.rotation * glam::Vec3::new(x, y, z)).normalize_or(glam::Vec3::Z)
+            };
+            let (first, second) = if source > 0.5 {
+                (view(-0.034, 0.987, 0.158), glam::Vec3::ZERO)
+            } else {
+                (view(-0.512, 0.500, 0.698), view(0.834, -0.451, 0.318))
+            };
+            // While the view moves, POINTCLOUDRTDENSITY per cent of the points.
+            let fraction = if navigating {
+                value("POINTCLOUDRTDENSITY") / 100.0
+            } else {
+                1.0
+            };
+            [
+                lighting, source, fraction, 0.0, first.x, first.y, first.z, 0.0, second.x,
+                second.y, second.z, 0.0,
+            ]
+        };
         Some(ViewportData {
             instance_id,
             force_rasterize,
@@ -4830,6 +4869,8 @@ impl Scene {
             hatches,
             wipeout_hatches,
             images,
+            point_clouds,
+            point_cloud_light,
             meshes,
             background_image: display.background.image.clone(),
             environment_image: display.background.environment.clone(),
@@ -4849,9 +4890,10 @@ impl Scene {
             mesh_fill: flags.mesh_fill,
             show_3d_edges: flags.show_3d_edges,
             display_silhouette: flags.hidden_line
-                || display.visual_style.as_ref().is_some_and(|style| {
-                    style.silhouette_width > 0 && style.edges_visible()
-                })
+                || display
+                    .visual_style
+                    .as_ref()
+                    .is_some_and(|style| style.silhouette_width > 0 && style.edges_visible())
                 || self.document.header.display_silhouette,
             hidden_line: flags.hidden_line,
             // Interaction LOD: suppress the costly hatch pass while the view is
@@ -4878,7 +4920,11 @@ impl Scene {
                 .selection_generation
                 .wrapping_mul(2)
                 .wrapping_add(u64::from(!show_interaction)),
-            selected_sig: if show_interaction { self.selected_set_sig() } else { 0 },
+            selected_sig: if show_interaction {
+                self.selected_set_sig()
+            } else {
+                0
+            },
             screen_rect,
         })
     }
@@ -4911,7 +4957,10 @@ impl Scene {
         }
     }
 
-    pub(in crate::scene) fn viewcube_mouse_interaction(&self, state: &CameraState) -> mouse::Interaction {
+    pub(in crate::scene) fn viewcube_mouse_interaction(
+        &self,
+        state: &CameraState,
+    ) -> mouse::Interaction {
         if state.hover_region.is_some() {
             mouse::Interaction::Pointer
         } else {
@@ -5067,8 +5116,16 @@ mod layer0_inherit_tests {
         let walls = layer_render_style(&d, "Walls").color;
         let zero = layer_render_style(&d, "0").color;
         let c = resolve(&d, &child("0", Color::ByLayer), walls);
-        assert_eq!(&c[..3], &walls[..3], "layer-0 child must show the insert's layer (Walls)");
-        assert_ne!(&c[..3], &zero[..3], "layer-0 child must NOT show layer 0's own color");
+        assert_eq!(
+            &c[..3],
+            &walls[..3],
+            "layer-0 child must show the insert's layer (Walls)"
+        );
+        assert_ne!(
+            &c[..3],
+            &zero[..3],
+            "layer-0 child must NOT show layer 0's own color"
+        );
     }
 
     #[test]
@@ -5077,7 +5134,11 @@ mod layer0_inherit_tests {
         let walls = layer_render_style(&d, "Walls").color;
         let other = layer_render_style(&d, "Other").color;
         let c = resolve(&d, &child("Other", Color::ByLayer), walls);
-        assert_eq!(&c[..3], &other[..3], "a child on a normal layer keeps its own layer");
+        assert_eq!(
+            &c[..3],
+            &other[..3],
+            "a child on a normal layer keeps its own layer"
+        );
     }
 
     #[test]
@@ -5101,8 +5162,16 @@ mod layer0_inherit_tests {
         }
         let after = render_style_for(&d, &e).0;
         let green = tess_util::aci_to_rgba(&Color::Index(3));
-        assert_eq!(&after[..3], &green[..3], "top-level layer-0 ByLayer must follow layer 0's colour");
-        assert_ne!(&before[..3], &after[..3], "colour must change after recolour");
+        assert_eq!(
+            &after[..3],
+            &green[..3],
+            "top-level layer-0 ByLayer must follow layer 0's colour"
+        );
+        assert_ne!(
+            &before[..3],
+            &after[..3],
+            "colour must change after recolour"
+        );
     }
 
     #[test]
@@ -5111,7 +5180,11 @@ mod layer0_inherit_tests {
         let walls = layer_render_style(&d, "Walls").color;
         let green = tess_util::aci_to_rgba(&Color::Index(3));
         let c = resolve(&d, &child("0", Color::Index(3)), walls);
-        assert_eq!(&c[..3], &green[..3], "an explicit color must win even on layer 0");
+        assert_eq!(
+            &c[..3],
+            &green[..3],
+            "an explicit color must win even on layer 0"
+        );
     }
 
     #[test]
@@ -5124,7 +5197,11 @@ mod layer0_inherit_tests {
         l.common.transparency = Transparency::from_percent(0.5); // 50% transparent
         let c = resolve(&d, &EntityType::Line(l), walls);
         assert_eq!(&c[..3], &walls[..3], "RGB inherited from the insert layer");
-        assert!((c[3] - 0.5).abs() < 0.02, "child's own 50% transparency is kept, got {}", c[3]);
+        assert!(
+            (c[3] - 0.5).abs() < 0.02,
+            "child's own 50% transparency is kept, got {}",
+            c[3]
+        );
     }
 
     #[test]
@@ -5189,12 +5266,18 @@ mod layer0_inherit_tests {
         // Removing 1 of 2 faces must leave has_face3d() true!
         scene.document.remove_entity(fh1);
         scene.bump_entities(&[(fh1, crate::scene::ChangeKind::Removed)]);
-        assert!(scene.has_face3d(), "has_face3d must remain true while fh2 still exists");
+        assert!(
+            scene.has_face3d(),
+            "has_face3d must remain true while fh2 still exists"
+        );
 
         // Removing the 2nd face must update has_face3d() to false.
         scene.document.remove_entity(fh2);
         scene.bump_entities(&[(fh2, crate::scene::ChangeKind::Removed)]);
-        assert!(!scene.has_face3d(), "has_face3d must become false when all Face3Ds are removed");
+        assert!(
+            !scene.has_face3d(),
+            "has_face3d must become false when all Face3Ds are removed"
+        );
 
         // bump_geometry_no_blocks must also invalidate has_face3d
         let fh3 = scene.add_entity(EntityType::Face3D(codec::entities::Face3D::new(
@@ -5206,7 +5289,10 @@ mod layer0_inherit_tests {
         assert!(scene.has_face3d());
         scene.document.remove_entity(fh3);
         scene.bump_geometry_no_blocks();
-        assert!(!scene.has_face3d(), "bump_geometry_no_blocks must invalidate has_face3d");
+        assert!(
+            !scene.has_face3d(),
+            "bump_geometry_no_blocks must invalidate has_face3d"
+        );
     }
 
     #[test]
@@ -5280,7 +5366,12 @@ mod layer0_inherit_tests {
         let missing = "non_existent_background_image_test_file.png";
         assert!(scene.background_image(missing).is_none());
         assert!(scene.background_image_cache.borrow().contains_key(missing));
-        assert!(scene.background_image_cache.borrow().get(missing).unwrap().is_none());
+        assert!(scene
+            .background_image_cache
+            .borrow()
+            .get(missing)
+            .unwrap()
+            .is_none());
 
         // Second call hits cache
         assert!(scene.background_image(missing).is_none());

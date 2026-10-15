@@ -8,13 +8,13 @@
 
 use codec::{EntityType, Handle};
 use graph::{Kind, NodeId, Port, Spec};
+use iced::advanced::layout::{self, Layout};
+use iced::advanced::widget::{self, Widget};
+use iced::advanced::{renderer, Renderer as _, Shell};
 use iced::widget::{
     button, canvas, checkbox, column, container, mouse_area, opaque, pin, row, scrollable, slider,
     stack, text, text_input, Space,
 };
-use iced::advanced::layout::{self, Layout};
-use iced::advanced::widget::{self, Widget};
-use iced::advanced::{renderer, Renderer as _, Shell};
 use iced::{
     mouse, Background, Border, Element, Length, Point, Rectangle, Size, Theme, Transformation,
     Vector,
@@ -123,7 +123,9 @@ impl ObjectKind {
         let origin = Vector3::new(0.0, 0.0, 0.0);
         let x_axis = Vector3::new(1.0, 0.0, 0.0);
         match self {
-            ObjectKind::Line => EntityType::Line(e::Line::from_coords(0.0, 0.0, 0.0, 10.0, 0.0, 0.0)),
+            ObjectKind::Line => {
+                EntityType::Line(e::Line::from_coords(0.0, 0.0, 0.0, 10.0, 0.0, 0.0))
+            }
             ObjectKind::Circle => EntityType::Circle(e::Circle::from_coords(0.0, 0.0, 0.0, 5.0)),
             ObjectKind::Arc => EntityType::Arc(e::Arc::from_coords(
                 0.0,
@@ -289,7 +291,10 @@ impl Graph {
     /// Screen point → graph coordinates.
     fn to_graph(&self, screen: Point) -> Point {
         let zoom = self.zoom();
-        Point::new((screen.x - self.pan.x) / zoom, (screen.y - self.pan.y) / zoom)
+        Point::new(
+            (screen.x - self.pan.x) / zoom,
+            (screen.y - self.pan.y) / zoom,
+        )
     }
 
     /// Graph coordinates → screen point.
@@ -308,7 +313,10 @@ impl Graph {
                 let mut open: Vec<&String> = ui.open.iter().collect();
                 open.sort();
                 let handles: Vec<u64> = ui.handles.iter().map(|handle| handle.value()).collect();
-                (id.to_string(), json!({ "pos": [ui.pos.x, ui.pos.y], "open": open, "handles": handles }))
+                (
+                    id.to_string(),
+                    json!({ "pos": [ui.pos.x, ui.pos.y], "open": open, "handles": handles }),
+                )
             })
             .collect();
         let file = json!({
@@ -334,28 +342,50 @@ impl Graph {
         };
         let canvas = &file["canvas"];
         let pair = |value: &Value| {
-            Some(Vector::new(value[0].as_f64()? as f32, value[1].as_f64()? as f32))
+            Some(Vector::new(
+                value[0].as_f64()? as f32,
+                value[1].as_f64()? as f32,
+            ))
         };
         graph.pan = pair(&canvas["pan"]).unwrap_or_default();
-        graph.zoom_steps = canvas["zoom"]
-            .as_i64()
-            .map_or(0, |steps| (steps as i32).clamp(*ZOOM_STEPS.start(), *ZOOM_STEPS.end()));
+        graph.zoom_steps = canvas["zoom"].as_i64().map_or(0, |steps| {
+            (steps as i32).clamp(*ZOOM_STEPS.start(), *ZOOM_STEPS.end())
+        });
         let ids: Vec<NodeId> = graph.engine.nodes.iter().map(|node| node.id).collect();
         for (index, id) in ids.into_iter().enumerate() {
             let saved = &canvas["nodes"][id.to_string()];
             let step = (index % 6) as f32 * 30.0;
             let pos = pair(&saved["pos"]).unwrap_or(Vector::new(40.0 + step, 40.0 + step));
             let open: HashSet<String> = match saved["open"].as_array() {
-                Some(titles) => titles.iter().filter_map(|title| title.as_str().map(str::to_owned)).collect(),
+                Some(titles) => titles
+                    .iter()
+                    .filter_map(|title| title.as_str().map(str::to_owned))
+                    .collect(),
                 None => std::iter::once(t!("Geometry").into_owned()).collect(),
             };
             let handles = saved["handles"]
                 .as_array()
-                .map(|values| values.iter().filter_map(Value::as_u64).map(Handle::new).collect())
+                .map(|values| {
+                    values
+                        .iter()
+                        .filter_map(Value::as_u64)
+                        .map(Handle::new)
+                        .collect()
+                })
                 .unwrap_or_default();
-            graph.ui.insert(id, NodeUi { pos: Point::ORIGIN + pos, open, handles });
+            graph.ui.insert(
+                id,
+                NodeUi {
+                    pos: Point::ORIGIN + pos,
+                    open,
+                    handles,
+                },
+            );
         }
-        Ok((graph, file["drawing"].as_str().unwrap_or_default().to_owned()))
+        Ok((
+            graph,
+            file["drawing"].as_str().unwrap_or_default().to_owned(),
+        ))
     }
 
     pub fn add_node(&mut self, item: PaletteItem, handles: Vec<Handle>, pos: Point) -> NodeId {
@@ -391,7 +421,10 @@ impl Graph {
             .inputs
             .iter()
             .map(|input| {
-                let port = Port { node: id, field: input.name.to_owned() };
+                let port = Port {
+                    node: id,
+                    field: input.name.to_owned(),
+                };
                 let widget = match (spec.name, input.name) {
                     ("Number Slider" | "Integer Slider", "value") => RowWidget::Slider {
                         min: param("min").unwrap_or(0.0),
@@ -429,12 +462,18 @@ impl Graph {
                     widget: RowWidget::Field,
                 }),
         );
-        vec![NodeSection { title: String::new(), rows }]
+        vec![NodeSection {
+            title: String::new(),
+            rows,
+        }]
     }
 
     /// Every node's rows, parallel to `engine.nodes`. `objects` holds the
     /// object nodes' rows, which only the app can build.
-    pub fn sections(&self, mut objects: HashMap<NodeId, Vec<NodeSection>>) -> Vec<Vec<NodeSection>> {
+    pub fn sections(
+        &self,
+        mut objects: HashMap<NodeId, Vec<NodeSection>>,
+    ) -> Vec<Vec<NodeSection>> {
         self.engine
             .nodes
             .iter()
@@ -447,16 +486,30 @@ impl Graph {
 
     fn is_open(&self, id: NodeId, section: &NodeSection) -> bool {
         section.title.is_empty()
-            || self.ui.get(&id).is_some_and(|ui| ui.open.contains(&section.title))
+            || self
+                .ui
+                .get(&id)
+                .is_some_and(|ui| ui.open.contains(&section.title))
     }
 
     /// Row centre of `field`, relative to the node's top. Rows of a collapsed
     /// section keep their ports on its header.
-    fn port_offset(&self, id: NodeId, sections: &[NodeSection], field: &str, input: bool) -> Option<f32> {
+    fn port_offset(
+        &self,
+        id: NodeId,
+        sections: &[NodeSection],
+        field: &str,
+        input: bool,
+    ) -> Option<f32> {
         let mut y = HEADER_H;
         for section in sections {
-            let matches = |row: &NodeRow| row.field == field && if input { row.input } else { row.output };
-            let header = if section.title.is_empty() { 0.0 } else { SECTION_H };
+            let matches =
+                |row: &NodeRow| row.field == field && if input { row.input } else { row.output };
+            let header = if section.title.is_empty() {
+                0.0
+            } else {
+                SECTION_H
+            };
             if !self.is_open(id, section) {
                 if section.rows.iter().any(matches) {
                     return Some(y + SECTION_H * 0.5);
@@ -476,27 +529,43 @@ impl Graph {
     }
 
     fn port_point(&self, sections: &[Vec<NodeSection>], port: &Port, input: bool) -> Option<Point> {
-        let index = self.engine.nodes.iter().position(|node| node.id == port.node)?;
+        let index = self
+            .engine
+            .nodes
+            .iter()
+            .position(|node| node.id == port.node)?;
         let ui = self.ui.get(&port.node)?;
         let y = self.port_offset(port.node, &sections[index], &port.field, input)?;
-        let x = if input { PORT_W * 0.5 } else { NODE_W - PORT_W * 0.5 };
+        let x = if input {
+            PORT_W * 0.5
+        } else {
+            NODE_W - PORT_W * 0.5
+        };
         Some(self.to_screen(ui.pos + Vector::new(x, y)))
     }
 
     /// The input port under the cursor.
     pub fn hit_input(&self, sections: &[Vec<NodeSection>]) -> Option<Port> {
-        self.engine.nodes.iter().zip(sections).find_map(|(node, node_sections)| {
-            node_sections
-                .iter()
-                .filter(|section| self.is_open(node.id, section))
-                .flat_map(|section| &section.rows)
-                .filter(|row| row.input)
-                .map(|row| Port { node: node.id, field: row.field.clone() })
-                .find(|port| {
-                    self.port_point(sections, port, true)
-                        .is_some_and(|p| p.distance(self.cursor) <= PORT_HIT * self.zoom().max(0.5))
-                })
-        })
+        self.engine
+            .nodes
+            .iter()
+            .zip(sections)
+            .find_map(|(node, node_sections)| {
+                node_sections
+                    .iter()
+                    .filter(|section| self.is_open(node.id, section))
+                    .flat_map(|section| &section.rows)
+                    .filter(|row| row.input)
+                    .map(|row| Port {
+                        node: node.id,
+                        field: row.field.clone(),
+                    })
+                    .find(|port| {
+                        self.port_point(sections, port, true).is_some_and(|p| {
+                            p.distance(self.cursor) <= PORT_HIT * self.zoom().max(0.5)
+                        })
+                    })
+            })
     }
 
     pub fn view(&self, sections: Vec<Vec<NodeSection>>) -> Element<'_, Message> {
@@ -518,20 +587,31 @@ impl Graph {
             _ => None,
         };
         let zoom = self.zoom();
+        // Lay the nodes out relative to the visible area's top-left rather
+        // than the graph origin: a `pin` clips to its own bounds, so nodes
+        // left of / above the origin vanished once panned or zoomed out (#1592).
+        let shift = Vector::new(self.pan.x / zoom, self.pan.y / zoom);
         let mut nodes = stack![];
         for (node, node_sections) in self.engine.nodes.iter().zip(sections) {
             let Some(ui) = self.ui.get(&node.id) else {
                 continue;
             };
-            nodes = nodes.push(pin(self.node_view(node, node_sections)).x(ui.pos.x).y(ui.pos.y));
+            nodes = nodes.push(
+                pin(self.node_view(node, node_sections))
+                    .x(ui.pos.x + shift.x)
+                    .y(ui.pos.y + shift.y),
+            );
         }
         let mut layers = stack![
-            canvas(Wires { wires, pending, width: 2.0 * zoom.max(0.5) })
-                .width(Length::Fill)
-                .height(Length::Fill),
+            canvas(Wires {
+                wires,
+                pending,
+                width: 2.0 * zoom.max(0.5)
+            })
+            .width(Length::Fill)
+            .height(Length::Fill),
             Zoomed {
                 content: nodes.width(Length::Fill).height(Length::Fill).into(),
-                pan: self.pan,
                 zoom,
             },
         ];
@@ -554,9 +634,10 @@ impl Graph {
     fn palette_entry(&self, item: PaletteItem) -> Element<'_, Message> {
         let icon: Element<'_, Message> = match item {
             PaletteItem::Object(kind) => crate::modules::registry::command_icon(kind.command())
-                .map_or_else(|| Space::new().width(14.0).into(), |bytes| {
-                    crate::ui::icons::semantic(bytes, 14.0)
-                }),
+                .map_or_else(
+                    || Space::new().width(14.0).into(),
+                    |bytes| crate::ui::icons::semantic(bytes, 14.0),
+                ),
             PaletteItem::Op(_) => Space::new().width(14.0).into(),
         };
         mouse_area(
@@ -606,7 +687,10 @@ impl Graph {
         let categories = std::iter::once("Objects").chain(graph::CATEGORIES.iter().copied());
         for category in categories {
             let items: Vec<PaletteItem> = if category == "Objects" {
-                OBJECTS.iter().map(|kind| PaletteItem::Object(*kind)).collect()
+                OBJECTS
+                    .iter()
+                    .map(|kind| PaletteItem::Object(*kind))
+                    .collect()
             } else {
                 graph::LIBRARY
                     .iter()
@@ -657,7 +741,11 @@ impl Graph {
 
         dock::frame(
             column![
-                dock::title_bar(PanelId::NodeGraph, t!("Node Graph").into_owned(), auto_collapse),
+                dock::title_bar(
+                    PanelId::NodeGraph,
+                    t!("Node Graph").into_owned(),
+                    auto_collapse
+                ),
                 toolbar,
                 body
             ]
@@ -673,7 +761,11 @@ impl Graph {
             Kind::Object(name) => {
                 let count = self.ui.get(&id).map_or(0, |ui| ui.handles.len());
                 let name = t!(name.as_str()).into_owned();
-                if count > 1 { format!("{name} ×{count}") } else { name }
+                if count > 1 {
+                    format!("{name} ×{count}")
+                } else {
+                    name
+                }
             }
         };
         let header = row![
@@ -745,7 +837,10 @@ impl Graph {
     }
 
     fn row_view(&self, id: NodeId, node_row: NodeRow) -> Element<'_, Message> {
-        let port = Port { node: id, field: node_row.field };
+        let port = Port {
+            node: id,
+            field: node_row.field,
+        };
         let linked_in = self.engine.is_linked(&port);
         let linked_out = self.engine.links.iter().any(|link| link.from == port);
         let shown = display(&node_row.value);
@@ -803,11 +898,16 @@ impl Graph {
         } else {
             text(shown).size(11).width(Length::Fill).into()
         };
-        row![in_port, text(node_row.label).size(11).width(LABEL_W), value, out_port]
-            .spacing(2)
-            .height(ROW_H)
-            .align_y(iced::Center)
-            .into()
+        row![
+            in_port,
+            text(node_row.label).size(11).width(LABEL_W),
+            value,
+            out_port
+        ]
+        .spacing(2)
+        .height(ROW_H)
+        .align_y(iced::Center)
+        .into()
     }
 
     /// Pure canvas state; document and evaluation work is the app's.
@@ -869,7 +969,10 @@ impl Graph {
                     self.zoom_steps = (self.zoom_steps + lines.signum() as i32)
                         .clamp(*ZOOM_STEPS.start(), *ZOOM_STEPS.end());
                     let zoom = self.zoom();
-                    self.pan = Vector::new(self.cursor.x - anchor.x * zoom, self.cursor.y - anchor.y * zoom);
+                    self.pan = Vector::new(
+                        self.cursor.x - anchor.x * zoom,
+                        self.cursor.y - anchor.y * zoom,
+                    );
                 }
             }
             GraphMsg::Input(port, value) => {
@@ -955,17 +1058,16 @@ impl canvas::Program<Message> for Wires {
 }
 
 /// Lays its content out in graph space and draws and hit-tests it through
-/// `pan` and `zoom`, so every widget inside scales as one picture.
+/// `zoom`, so every widget inside scales as one picture.
 struct Zoomed<'a> {
     content: Element<'a, Message>,
-    pan: Vector,
     zoom: f32,
 }
 
 impl Zoomed<'_> {
     /// Content coordinates → screen, for a layer whose top-left is `origin`.
     fn transformation(&self, origin: Point) -> Transformation {
-        Transformation::translate(origin.x + self.pan.x, origin.y + self.pan.y)
+        Transformation::translate(origin.x, origin.y)
             * Transformation::scale(self.zoom)
             * Transformation::translate(-origin.x, -origin.y)
     }
@@ -1029,15 +1131,18 @@ impl Widget<Message, Theme, iced::Renderer> for Zoomed<'_> {
         renderer: &iced::Renderer,
     ) -> mouse::Interaction {
         let inverse = self.transformation(layout.position()).inverse();
-        layout.children().next().map_or(mouse::Interaction::None, |content| {
-            self.content.as_widget().mouse_interaction(
-                &tree.children[0],
-                content,
-                cursor * inverse,
-                &(*viewport * inverse),
-                renderer,
-            )
-        })
+        layout
+            .children()
+            .next()
+            .map_or(mouse::Interaction::None, |content| {
+                self.content.as_widget().mouse_interaction(
+                    &tree.children[0],
+                    content,
+                    cursor * inverse,
+                    &(*viewport * inverse),
+                    renderer,
+                )
+            })
     }
 
     fn operate(
@@ -1048,9 +1153,12 @@ impl Widget<Message, Theme, iced::Renderer> for Zoomed<'_> {
         operation: &mut dyn widget::Operation,
     ) {
         if let Some(content) = layout.children().next() {
-            self.content
-                .as_widget_mut()
-                .operate(&mut tree.children[0], content, renderer, operation);
+            self.content.as_widget_mut().operate(
+                &mut tree.children[0],
+                content,
+                renderer,
+                operation,
+            );
         }
     }
 

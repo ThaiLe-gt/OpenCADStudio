@@ -151,7 +151,12 @@ pub fn page_content_by_layer(
     let base = page_content(&super::pdf_layers::source_with_layers(path, &names), page)?;
     let key = |s: &dyn std::fmt::Debug| format!("{s:?}");
     let mut seen: HashMap<String, usize> = HashMap::new();
-    for item in base.paths.iter().map(|p| key(p)).chain(base.texts.iter().map(|t| key(t))) {
+    for item in base
+        .paths
+        .iter()
+        .map(|p| key(p))
+        .chain(base.texts.iter().map(|t| key(t)))
+    {
         *seen.entry(item).or_default() += 1;
     }
     let mut out = Vec::new();
@@ -159,7 +164,11 @@ pub fn page_content_by_layer(
         if hidden.contains(&layer.name) {
             continue;
         }
-        let others: Vec<String> = names.iter().filter(|n| **n != layer.name).cloned().collect();
+        let others: Vec<String> = names
+            .iter()
+            .filter(|n| **n != layer.name)
+            .cloned()
+            .collect();
         let Some(mut only) =
             page_content(&super::pdf_layers::source_with_layers(path, &others), page)
         else {
@@ -203,7 +212,12 @@ fn images_to_last_layer(
     // Each layered path and text keyed once; the first layer holding it wins.
     let mut owners: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
     for (n, (_, pv)) in layered.iter().enumerate() {
-        for item in pv.paths.iter().map(|p| key(p)).chain(pv.texts.iter().map(|t| key(t))) {
+        for item in pv
+            .paths
+            .iter()
+            .map(|p| key(p))
+            .chain(pv.texts.iter().map(|t| key(t)))
+        {
             owners.entry(item).or_insert(n);
         }
     }
@@ -218,7 +232,9 @@ fn images_to_last_layer(
                 let image = &full.images[i];
                 if let Some(n) = layered.iter().position(|(_, pv)| pv.images.contains(image)) {
                     last = Some(n);
-                } else if let (Some(n), Some(at)) = (last, base.images.iter().position(|b| b == image)) {
+                } else if let (Some(n), Some(at)) =
+                    (last, base.images.iter().position(|b| b == image))
+                {
                     moves.push((n, base.images.remove(at)));
                 }
             }
@@ -268,7 +284,10 @@ fn read_page_with(path: &str, page: &str, images: bool) -> Option<PageVectors> {
                 .and_then(|dict| dict.get::<Name>(b"BaseFont"))
                 .map(|name| String::from_utf8_lossy(&name).into_owned())
                 .unwrap_or_default();
-            let name = name.split_once('+').map(|(_, rest)| rest.to_string()).unwrap_or(name);
+            let name = name
+                .split_once('+')
+                .map(|(_, rest)| rest.to_string())
+                .unwrap_or(name);
             if !names.contains(&name) {
                 names.push(name);
             }
@@ -276,7 +295,10 @@ fn read_page_with(path: &str, page: &str, images: bool) -> Option<PageVectors> {
     }
     let mut texts = device.texts;
     for text in &mut texts {
-        let index = device.font_order.iter().position(|key| *key == text.font_key);
+        let index = device
+            .font_order
+            .iter()
+            .position(|key| *key == text.font_key);
         text.text.font = index
             .and_then(|i| names.get(i).cloned())
             .filter(|name| !name.is_empty())
@@ -344,7 +366,10 @@ fn subpaths(path: &BezPath, transform: Affine) -> Vec<SubPath> {
         match *el {
             PathEl::MoveTo(p) => {
                 let p = transform * p;
-                out.push(SubPath { segments: Vec::new(), closed: false });
+                out.push(SubPath {
+                    segments: Vec::new(),
+                    closed: false,
+                });
                 start = p;
                 last = p;
             }
@@ -360,14 +385,16 @@ fn subpaths(path: &BezPath, transform: Affine) -> Vec<SubPath> {
                 let c1 = last + (c - last) * (2.0 / 3.0);
                 let c2 = p + (c - p) * (2.0 / 3.0);
                 if let Some(sp) = out.last_mut() {
-                    sp.segments.push(Segment::Cubic(pt(last), pt(c1), pt(c2), pt(p)));
+                    sp.segments
+                        .push(Segment::Cubic(pt(last), pt(c1), pt(c2), pt(p)));
                 }
                 last = p;
             }
             PathEl::CurveTo(c1, c2, p) => {
                 let (c1, c2, p) = (transform * c1, transform * c2, transform * p);
                 if let Some(sp) = out.last_mut() {
-                    sp.segments.push(Segment::Cubic(pt(last), pt(c1), pt(c2), pt(p)));
+                    sp.segments
+                        .push(Segment::Cubic(pt(last), pt(c1), pt(c2), pt(p)));
                 }
                 last = p;
             }
@@ -385,7 +412,10 @@ fn subpaths(path: &BezPath, transform: Affine) -> Vec<SubPath> {
     out.retain(|sp| !sp.segments.is_empty());
     // A path drawn back to its start without a close operator is closed.
     for sp in &mut out {
-        let (first, last) = (sp.segments[0].start(), sp.segments[sp.segments.len() - 1].end());
+        let (first, last) = (
+            sp.segments[0].start(),
+            sp.segments[sp.segments.len() - 1].end(),
+        );
         if !sp.closed && (first[0] - last[0]).hypot(first[1] - last[1]) < 1e-9 {
             sp.closed = true;
         }
@@ -396,7 +426,13 @@ fn subpaths(path: &BezPath, transform: Affine) -> Vec<SubPath> {
 impl<'a> Device<'a> for Collector {
     fn set_soft_mask(&mut self, _: Option<SoftMask<'a>>) {}
     fn set_blend_mode(&mut self, _: BlendMode) {}
-    fn draw_path(&mut self, path: &BezPath, transform: Affine, paint: &Paint<'a>, mode: &PathDrawMode) {
+    fn draw_path(
+        &mut self,
+        path: &BezPath,
+        transform: Affine,
+        paint: &Paint<'a>,
+        mode: &PathDrawMode,
+    ) {
         self.finish_text();
         let subpaths = subpaths(path, transform);
         if subpaths.is_empty() {
@@ -412,7 +448,11 @@ impl<'a> Device<'a> for Collector {
             PathDrawMode::Fill(_) => (None, Some(rgb(paint))),
         };
         self.order.push(Drawn::Path(self.paths.len()));
-        self.paths.push(PdfPath { subpaths, stroke, fill });
+        self.paths.push(PdfPath {
+            subpaths,
+            stroke,
+            fill,
+        });
     }
     fn push_clip_path(&mut self, _: &ClipPath) {}
     fn push_transparency_group(&mut self, _: f32, _: Option<SoftMask<'a>>, _: BlendMode) {}
@@ -593,22 +633,57 @@ pub fn circle_of(sp: &SubPath) -> Option<([f64; 2], f64)> {
     }
     let tol = r * 2e-3;
     let on_circle = cubics.iter().all(|s| {
-        [0.0, 0.25, 0.5, 0.75].iter().all(|t| (dist(bezier(s, *t)) - r).abs() <= tol)
+        [0.0, 0.25, 0.5, 0.75]
+            .iter()
+            .all(|t| (dist(bezier(s, *t)) - r).abs() <= tol)
     });
     on_circle.then_some((c, r))
 }
 
 // ── Snapping ────────────────────────────────────────────────────────────────
 
-static PDF_OSNAP: AtomicBool = AtomicBool::new(true);
+/// PDFOSNAP, DWFOSNAP and DGNOSNAP: whether object snaps find the geometry
+/// inside underlays of each kind.
+static UNDERLAY_OSNAP: [AtomicBool; 3] = [
+    AtomicBool::new(true),
+    AtomicBool::new(true),
+    AtomicBool::new(true),
+];
 
-/// PDFOSNAP: whether object snaps find the geometry inside PDF underlays.
-pub fn pdf_osnap() -> bool {
-    PDF_OSNAP.load(Ordering::Relaxed)
+fn osnap_slot(kind: codec::entities::UnderlayType) -> &'static AtomicBool {
+    match kind {
+        codec::entities::UnderlayType::Pdf => &UNDERLAY_OSNAP[0],
+        codec::entities::UnderlayType::Dwf => &UNDERLAY_OSNAP[1],
+        codec::entities::UnderlayType::Dgn => &UNDERLAY_OSNAP[2],
+    }
 }
 
-pub fn set_pdf_osnap(on: bool) {
-    PDF_OSNAP.store(on, Ordering::Relaxed);
+pub fn underlay_osnap(kind: codec::entities::UnderlayType) -> bool {
+    osnap_slot(kind).load(Ordering::Relaxed)
+}
+
+pub fn set_underlay_osnap(kind: codec::entities::UnderlayType, on: bool) {
+    osnap_slot(kind).store(on, Ordering::Relaxed);
+}
+
+/// UOSNAP: 1 when snaps find every kind of underlay geometry, 0 when none,
+/// 2 when the kinds differ.
+pub fn uosnap() -> i16 {
+    match UNDERLAY_OSNAP
+        .iter()
+        .filter(|s| s.load(Ordering::Relaxed))
+        .count()
+    {
+        0 => 0,
+        n if n == UNDERLAY_OSNAP.len() => 1,
+        _ => 2,
+    }
+}
+
+pub fn set_uosnap(on: bool) {
+    for slot in &UNDERLAY_OSNAP {
+        slot.store(on, Ordering::Relaxed);
+    }
 }
 
 /// Most snap points one underlay contributes.
@@ -623,14 +698,15 @@ pub fn underlay_snap_points(
     document: &codec::CadDocument,
 ) -> Vec<(glam::DVec3, crate::scene::model::wire_model::SnapHint)> {
     use crate::scene::model::wire_model::SnapHint;
-    if !pdf_osnap() || !u.flags.contains(codec::entities::UnderlayDisplayFlags::ON) {
+    if !underlay_osnap(u.underlay_type)
+        || !u.flags.contains(codec::entities::UnderlayDisplayFlags::ON)
+    {
         return Vec::new();
     }
     let Some(def) = crate::entities::underlay::definition(u, document) else {
         return Vec::new();
     };
-    let source = super::pdf_layers::underlay_source(u, &def.file_path);
-    let Some(vectors) = page_vectors(&source, crate::entities::underlay::page_of(def)) else {
+    let Some(vectors) = underlay_vectors(u, def) else {
         return Vec::new();
     };
     let world = |p: [f64; 2]| {
@@ -665,6 +741,26 @@ pub fn underlay_snap_points(
     out
 }
 
+/// The page's vectors in page units: PDF through its layer overrides, DWF
+/// and DGN from their sheet.
+fn underlay_vectors(
+    u: &codec::entities::Underlay,
+    def: &codec::entities::UnderlayDefinition,
+) -> Option<Arc<PageVectors>> {
+    let page = crate::entities::underlay::page_of(def);
+    match def.underlay_type {
+        codec::entities::UnderlayType::Pdf => {
+            page_vectors(&super::pdf_layers::underlay_source(u, &def.file_path), page)
+        }
+        kind => super::underlay_vector::page_vectors(
+            kind,
+            &def.file_path,
+            page,
+            &super::pdf_layers::hidden_layers(u),
+        ),
+    }
+}
+
 /// Most points of the snap-only geometry wire of one underlay.
 // ponytail: flat cap; a spatial index over page segments for huge drawings.
 const MAX_GEOMETRY_POINTS: usize = 200_000;
@@ -684,7 +780,9 @@ pub fn underlay_snap_geometry(
     u: &codec::entities::Underlay,
     document: &codec::CadDocument,
 ) -> Vec<SnapPiece> {
-    if !pdf_osnap() || !u.flags.contains(codec::entities::UnderlayDisplayFlags::ON) {
+    if !underlay_osnap(u.underlay_type)
+        || !u.flags.contains(codec::entities::UnderlayDisplayFlags::ON)
+    {
         return Vec::new();
     }
     let Some(def) = crate::entities::underlay::definition(u, document) else {
@@ -693,15 +791,18 @@ pub fn underlay_snap_geometry(
     if def.unloaded {
         return Vec::new();
     }
-    let source = super::pdf_layers::underlay_source(u, &def.file_path);
-    let Some(vectors) = page_vectors(&source, crate::entities::underlay::page_of(def)) else {
+    let Some(vectors) = underlay_vectors(u, def) else {
         return Vec::new();
     };
     let world = |p: [f64; 2]| crate::entities::underlay::local_to_world(u, p);
     // A circle stays one only while the placement scales both axes alike.
     let uniform = (u.x_scale.abs() - u.y_scale.abs()).abs() <= 1e-9 * u.x_scale.abs().max(1e-12);
     let flatten = |seg: &Segment, points: &mut Vec<[f64; 3]>| {
-        let steps = if matches!(seg, Segment::Cubic(..)) { 12 } else { 1 };
+        let steps = if matches!(seg, Segment::Cubic(..)) {
+            12
+        } else {
+            1
+        };
         for k in 1..=steps {
             points.push(world(bezier(seg, k as f64 / steps as f64)));
         }
@@ -719,14 +820,20 @@ pub fn underlay_snap_geometry(
                     flatten(seg, &mut points);
                 }
                 total += points.len();
-                out.push(SnapPiece { points, circle: Some((world(c), r * u.x_scale.abs())) });
+                out.push(SnapPiece {
+                    points,
+                    circle: Some((world(c), r * u.x_scale.abs())),
+                });
                 continue;
             }
             for seg in &sp.segments {
                 let mut points = vec![world(seg.start())];
                 flatten(seg, &mut points);
                 total += points.len();
-                out.push(SnapPiece { points, circle: None });
+                out.push(SnapPiece {
+                    points,
+                    circle: None,
+                });
             }
         }
     }

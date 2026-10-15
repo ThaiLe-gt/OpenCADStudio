@@ -1,8 +1,8 @@
 use codec::entities::{Dimension, DimensionArc};
 use codec::types::{Handle, Vector3};
 use codec::EntityType;
-use kernel::geom2d::tessellate::{arc, DEFAULT_SEGMENTS_PER_RADIAN};
 use glam::DVec3;
+use kernel::geom2d::tessellate::{arc, DEFAULT_SEGMENTS_PER_RADIAN};
 
 use crate::command::{
     CadCommand, CmdOption, CmdResult, DimensionAssociationInput, DimensionAssociationSource,

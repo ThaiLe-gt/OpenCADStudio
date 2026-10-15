@@ -8,8 +8,10 @@
 //! through the same `rest::plan` table as the headless server; requests are
 //! forwarded into the GUI's automation queue (`Envelope`, exactly like the
 //! native bridge in `transport`) and the JSON response is written back over
-//! HTTP. The channel binds loopback only — anything that can reach the port
-//! can drive the session, exactly like the headless server.
+//! HTTP. The channel binds loopback only and, like the headless server,
+//! answers only requests carrying the session's bearer token
+//! ([`rest::api_token`]): loopback is shared by every process and user on
+//! the machine, so reaching the port proves nothing.
 
 use super::{Envelope, Reply};
 use crate::rest::{self, HttpRequest, Plan, RETRYABLE};
@@ -17,7 +19,7 @@ use iced::futures::{channel::mpsc, Stream};
 use serde_json::{json, Value};
 use std::io::ErrorKind;
 use std::net::{TcpListener, TcpStream};
-use std::sync::atomic::{AtomicU64, AtomicU16, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU16, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -58,6 +60,7 @@ fn listen(
     let listener = TcpListener::bind(("127.0.0.1", port))?;
     bound_port.store(listener.local_addr()?.port(), Ordering::SeqCst);
     eprintln!("OpenCADStudio GUI REST listening on http://127.0.0.1:{port}/api/v1");
+    rest::announce_token();
     // One thread per connection: a `getpoint` or `user_select` request stays
     // open until the person answers, and must not block the other reads
     // (get_selection…).
@@ -79,8 +82,8 @@ fn listen(
             let _ = stream.set_read_timeout(Some(Duration::from_secs(15)));
             let _ = stream.set_write_timeout(Some(Duration::from_secs(15)));
             if let Ok(Some(request)) = rest::read_request(&mut stream) {
-                if request.method == "OPTIONS" {
-                    let _ = rest::write_response(&mut stream, 204, &Value::Null);
+                if !request.authorized() {
+                    let _ = rest::write_response(&mut stream, 401, &rest::unauthorized());
                 } else {
                     let (status, body) = forward(&request, &sender, &document_cache, &stream);
                     let _ = rest::write_response(&mut stream, status, &body);
@@ -108,7 +111,10 @@ fn forward(
     let path = if path.is_empty() { "/" } else { path };
     let segments: Vec<&str> = path.trim_start_matches('/').split('/').collect();
     if segments.first() != Some(&"api") || segments.get(1) != Some(&"v1") {
-        return (404, json!({"ok": false, "code": "unknown_route", "error": "Use /api/v1/…"}));
+        return (
+            404,
+            json!({"ok": false, "code": "unknown_route", "error": "Use /api/v1/…"}),
+        );
     }
     let plan = rest::plan(&request.method, &segments[2..], request);
     // The picks park until the person answers; an `operation` call is itself
@@ -123,20 +129,27 @@ fn forward(
         Plan::Ready => {
             let state = transact(sender, json!({"protocol":1,"op":"state"}), wait, stream);
             harvest(document_cache, &state);
-            (200, json!({
-                "ok": true,
-                "ready": true,
-                "version": state["version"],
-                "session_id": state["session_id"],
-                "document_id": state["document_id"],
-            }))
+            (
+                200,
+                json!({
+                    "ok": true,
+                    "ready": true,
+                    "version": state["version"],
+                    "session_id": state["session_id"],
+                    "document_id": state["document_id"],
+                }),
+            )
         }
         Plan::Run { request, created } => {
             let response = transact(sender, prepare(request), wait, stream);
             harvest(document_cache, &response);
             (rest::map_status(response.clone(), created == 201), response)
         }
-        Plan::Mutate { op, fields, created } => {
+        Plan::Mutate {
+            op,
+            fields,
+            created,
+        } => {
             let cached = *document_cache.lock().unwrap();
             let mut response = transact(sender, mutate_request(&op, &fields, cached), wait, stream);
             let code = response["code"].as_str().unwrap_or("");
@@ -150,7 +163,10 @@ fn forward(
             }
             harvest(document_cache, &response);
             let status = rest::map_status(response.clone(), created == 201);
-            (if status == 200 { created } else { status }, compact(response))
+            (
+                if status == 200 { created } else { status },
+                compact(response),
+            )
         }
     }
 }
@@ -204,7 +220,9 @@ fn transact(
         && std::time::Instant::now() < deadline
     {
         if interactive && peer_gone(stream) {
-            eprintln!("[pick] {op} {request_id}: client disconnected -- cancelling the pending pick");
+            eprintln!(
+                "[pick] {op} {request_id}: client disconnected -- cancelling the pending pick"
+            );
             // The cancel reuses the pick's own request id: if the person
             // answered in the race window, the settled id makes the retract
             // a harmless no-op instead of an Escape into the live session.
@@ -353,7 +371,8 @@ mod tests {
     fn post(port: u16, target: &str, body: &str) -> std::net::TcpStream {
         let mut stream = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
         let http = format!(
-            "POST {target} HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: {}\r\n\r\n{}",
+            "POST {target} HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {}\r\nContent-Length: {}\r\n\r\n{}",
+            rest::api_token(),
             body.len(),
             body
         );
@@ -432,7 +451,10 @@ mod tests {
         assert_eq!(body["status"], "completed");
         assert_eq!(body["result"]["count"], 1);
         assert_eq!(body["result"]["entities"][0]["handle"], handle.as_str());
-        assert!(body["result"]["entities"][0]["bounds"].is_object(), "{body}");
+        assert!(
+            body["result"]["entities"][0]["bounds"].is_object(),
+            "{body}"
+        );
         assert_eq!(body["result"]["entities"][0]["type"], "Line");
 
         // Unrouted paths are refused locally; the GUI is never woken for
@@ -447,7 +469,10 @@ mod tests {
     /// GET without a body — the read half of the REST surface.
     fn get(port: u16, target: &str) -> std::net::TcpStream {
         let mut stream = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
-        let http = format!("GET {target} HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n");
+        let http = format!(
+            "GET {target} HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {}\r\n\r\n",
+            rest::api_token()
+        );
         stream.write_all(http.as_bytes()).unwrap();
         stream
     }
@@ -501,8 +526,7 @@ mod tests {
                 // until the person answers. Simulate the click right away.
                 assert_eq!(reply["status"], "accepted", "{reply}");
                 envelope.reply.send(reply);
-                app.tabs[app.active_tab].last_cursor_world =
-                    glam::DVec3::new(1.5, 2.5, 0.0);
+                app.tabs[app.active_tab].last_cursor_world = glam::DVec3::new(1.5, 2.5, 0.0);
                 let _ = app.update(crate::app::Message::ViewportLeftPress);
             } else if envelope.request["op"] == "get_selection" {
                 envelope.reply.send(reply);
@@ -739,7 +763,11 @@ mod tests {
         let mut query_conn = get(port, "/api/v1/entities?type=Line&detail=full");
         drain(&mut app, &mut receiver, 1);
         let (_, body) = read_response(&mut query_conn);
-        assert_eq!(body["entities"][0]["start"], json!([5.0, 0.0, 0.0]), "{body}");
+        assert_eq!(
+            body["entities"][0]["start"],
+            json!([5.0, 0.0, 0.0]),
+            "{body}"
+        );
 
         // A stale cache (the person switched documents) costs one state
         // refresh and a retry, not an error.

@@ -1,6 +1,6 @@
 use codec::entities::acis::{SabReader, SatBody, SatDocument};
 use codec::entities::{Body, Region, Solid3D, Surface};
-use kernel::brep::{self, Body as KernelBody};
+use kernel::brep::Body as KernelBody;
 
 use crate::scene::model::mesh_model::{MeshLodSet, MeshModel};
 
@@ -59,9 +59,7 @@ pub(crate) fn body_transform(
             }
         }
     }
-    (values.len() >= 13
-        && values[..13].iter().all(|value| value.is_finite())
-        && values[12] > 0.0)
+    (values.len() >= 13 && values[..13].iter().all(|value| value.is_finite()) && values[12] > 0.0)
         .then(|| {
             (
                 [
@@ -170,36 +168,16 @@ pub fn kernel_surface_body(surface: &Surface) -> Option<KernelBody> {
 }
 
 pub(crate) fn kernel_acis_body(acis: &codec::entities::AcisData) -> Option<KernelBody> {
-    let sat = parse_acis(
-        || acis.parse(),
-        acis.is_binary,
-        &acis.sab_data,
-    )?;
+    let sat = parse_acis(|| acis.parse(), acis.is_binary, &acis.sab_data)?;
     let (mut bodies, loss) = kernel::acis::lift(&sat);
     if !loss.is_empty() || bodies.len() != 1 {
         return None;
     }
-    let body = bodies.pop()?;
-    let source = body.provenance.source()?;
-    let Some((matrix, translation, scale)) = body_transform(&sat, source.index() as usize).ok()?
-    else {
-        return Some(body);
-    };
-    brep::transform(
-        &body,
-        &brep::Placement {
-            x_axis: [scale * matrix[0], scale * matrix[1], scale * matrix[2]],
-            y_axis: [scale * matrix[3], scale * matrix[4], scale * matrix[5]],
-            z_axis: [scale * matrix[6], scale * matrix[7], scale * matrix[8]],
-            origin: translation,
-        },
-    )
+    // The kernel's lift already applies the body's transform record.
+    bodies.pop()
 }
 
-fn remap_acis_material_bindings(
-    set: &mut MeshLodSet,
-    acis: &codec::entities::AcisData,
-) {
+fn remap_acis_material_bindings(set: &mut MeshLodSet, acis: &codec::entities::AcisData) {
     for lod in &mut set.lods {
         for handle in lod.triangle_material_handles.iter_mut().flatten() {
             let reference = handle.value() as i32;

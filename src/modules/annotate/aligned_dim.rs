@@ -127,9 +127,7 @@ impl CadCommand for AlignedDimensionCommand {
                 "DIMALIGNED  Specify first extension line origin or press Enter to select object:"
             )
             .into_owned(),
-            Step::Second(_) => {
-                t!("DIMALIGNED  Specify second extension line origin:").into_owned()
-            }
+            Step::Second(_) => t!("DIMALIGNED  Specify second extension line origin:").into_owned(),
             Step::DimLine { .. } => {
                 t!("DIMALIGNED  Specify dimension line location  [Mtext/Text/Angle]:").into_owned()
             }
@@ -149,14 +147,12 @@ impl CadCommand for AlignedDimensionCommand {
                 self.step = Step::DimLine { p1, p2: pt };
                 CmdResult::NeedPoint
             }
-            Step::DimLine { p1, p2 } => {
-                CmdResult::CommitDimension {
-                    entity: self.build_dimension(p1, p2, pt),
-                    association: DimensionAssociationInput::Infer(self.source_handle),
-                    preserve_base_style: false,
-                    continue_command: false,
-                }
-            }
+            Step::DimLine { p1, p2 } => CmdResult::CommitDimension {
+                entity: self.build_dimension(p1, p2, pt),
+                association: DimensionAssociationInput::Infer(self.source_handle),
+                preserve_base_style: false,
+                continue_command: false,
+            },
         }
     }
 
@@ -340,6 +336,7 @@ impl CadCommand for AlignedDimensionCommand {
             world_width: 0.0,
             depth_override: None,
             display_visible: true,
+            snap_only: false,
             plot_visible: true,
             fill_is_3d: false,
             fill_is_2d_solid: false,
@@ -365,6 +362,8 @@ impl CadCommand for AlignedDimensionCommand {
             plinegen: true,
             fill_tris: vec![],
             fill_tris_low: Vec::new(),
+
+            ..Default::default()
         })
     }
 
@@ -432,6 +431,7 @@ fn preview_aligned(p1: DVec3, p2: DVec3, dim_pt: DVec3) -> WireModel {
         world_width: 0.0,
         depth_override: None,
         display_visible: true,
+        snap_only: false,
         plot_visible: true,
         fill_is_3d: false,
         fill_is_2d_solid: false,
@@ -480,9 +480,12 @@ fn preview_aligned(p1: DVec3, p2: DVec3, dim_pt: DVec3) -> WireModel {
         plinegen: true,
         fill_tris: vec![],
         fill_tris_low: Vec::new(),
+
+        ..Default::default()
     }
 }
 
-
 // ── Autocomplete registry ─────────────────────────────────
-inventory::submit!(crate::command::CommandRegistration { names: &["DIMALIGNED"] });  // AlignedDimensionCommand
+inventory::submit!(crate::command::CommandRegistration {
+    names: &["DIMALIGNED"]
+}); // AlignedDimensionCommand

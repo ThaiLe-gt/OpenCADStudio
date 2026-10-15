@@ -3,15 +3,34 @@ use super::*;
 impl OpenCADStudio {
     pub(super) fn dispatch_fileops(&mut self, cmd: &str, i: usize) -> Option<Task<Message>> {
         match cmd {
-            "NEW" => return Some(Task::done(Message::TabNew)),
+            // QNEW starts from the default template (Options > Files); NEW
+            // asks which template to start from (#1635).
+            "QNEW" => return Some(Task::done(Message::TabNew)),
+            "NEW" => {
+                return Some(Task::perform(
+                    async {
+                        crate::sys::file_dialog()
+                            .set_title(crate::t!("Select Template").as_ref())
+                            .add_filter(
+                                crate::t!("Drawing Template (*.dwt)").as_ref(),
+                                &["dwt", "DWT", "dwg", "DWG", "dxf", "DXF"],
+                            )
+                            .pick_file()
+                            .await
+                            .map(|handle| crate::sys::handle_path(&handle))
+                    },
+                    Message::NewFromTemplate,
+                ));
+            }
             "OPEN" => return Some(Task::done(Message::OpenFile)),
             "SAVE" | "QSAVE" => return Some(Task::done(Message::SaveFile)),
             // SAVEALL — write every open drawing that already has a file path.
             // Tabs without a path (never saved) are skipped with a note.
             "SAVEALL" => {
                 if self.read_only {
-                    self.command_line
-                        .push_error(crate::t!("Read-only session (--read-only): saving is disabled.").as_ref());
+                    self.command_line.push_error(
+                        crate::t!("Read-only session (--read-only): saving is disabled.").as_ref(),
+                    );
                     return Some(Task::none());
                 }
                 #[cfg(not(target_arch = "wasm32"))]
@@ -23,47 +42,47 @@ impl OpenCADStudio {
                             continue;
                         }
                         if let Some(path) = self.tabs[t].current_path.clone() {
-                            if self
-                                .active_save_jobs
-                                .contains_key(&self.tabs[t].id)
-                            {
-                                self.command_line.push_info(crate::tf!(
-                                    "SAVEALL: {} already has a save running",
-                                    path.display()
-                                ).as_ref());
+                            if self.active_save_jobs.contains_key(&self.tabs[t].id) {
+                                self.command_line.push_info(
+                                    crate::tf!(
+                                        "SAVEALL: {} already has a save running",
+                                        path.display()
+                                    )
+                                    .as_ref(),
+                                );
                                 skipped += 1;
                                 continue;
                             }
-                            match self.save_tab_synchronously_protected(
-                                t,
-                                path.clone(),
-                                false,
-                            ) {
+                            match self.save_tab_synchronously_protected(t, path.clone(), false) {
                                 Ok(()) => {
                                     saved += 1;
                                 }
-                                Err(e) => self.command_line.push_error(crate::tf!(
-                                    "SAVEALL: {} failed: {e}",
-                                    path.display()
-                                ).as_ref()),
+                                Err(e) => self.command_line.push_error(
+                                    crate::tf!("SAVEALL: {} failed: {e}", path.display()).as_ref(),
+                                ),
                             }
                         } else {
                             skipped += 1;
                         }
                     }
-                    self.command_line.push_output(crate::tf!(
-                        "SAVEALL: saved {saved} drawing(s){}.",
-                        if skipped > 0 {
-                            crate::tf!("; {skipped} need SAVEAS (no file path yet)").into_owned()
-                        } else {
-                            String::new()
-                        }
-                    ).as_ref());
+                    self.command_line.push_output(
+                        crate::tf!(
+                            "SAVEALL: saved {saved} drawing(s){}.",
+                            if skipped > 0 {
+                                crate::tf!("; {skipped} need SAVEAS (no file path yet)")
+                                    .into_owned()
+                            } else {
+                                String::new()
+                            }
+                        )
+                        .as_ref(),
+                    );
                 }
                 #[cfg(target_arch = "wasm32")]
                 {
-                    self.command_line
-                        .push_info(crate::t!("SAVEALL: save each tab individually in the web build.").as_ref());
+                    self.command_line.push_info(
+                        crate::t!("SAVEALL: save each tab individually in the web build.").as_ref(),
+                    );
                 }
                 return Some(Task::none());
             }
@@ -87,7 +106,8 @@ impl OpenCADStudio {
             // without undoing any work done since.
             "OOPS" => {
                 if self.oops_cache.is_empty() {
-                    self.command_line.push_info(crate::t!("OOPS: nothing to restore.").as_ref());
+                    self.command_line
+                        .push_info(crate::t!("OOPS: nothing to restore.").as_ref());
                 } else {
                     let restored = std::mem::take(&mut self.oops_cache);
                     let pending = self.begin_undo(i, "OOPS", restored.len(), true);
@@ -141,7 +161,10 @@ impl OpenCADStudio {
             // CLOSE — close the active drawing tab (with the unsaved-changes
             // prompt the tab-close handler already runs).
             "CLOSE" => {
-                return Some(Task::done(Message::TabClose(self.active_tab)));
+                return Some(match self.tabs.get(self.active_tab) {
+                    Some(tab) => Task::done(Message::TabClose(tab.id)),
+                    None => Task::none(),
+                });
             }
 
             // ARCHIVE / ETRANSMIT — package the drawing and its referenced files
@@ -181,7 +204,11 @@ impl OpenCADStudio {
                             }
                             for d in deps {
                                 let dp = PathBuf::from(&d);
-                                let resolved = if dp.is_absolute() { dp } else { parent.join(&dp) };
+                                let resolved = if dp.is_absolute() {
+                                    dp
+                                } else {
+                                    parent.join(&dp)
+                                };
                                 if resolved.exists() {
                                     if let Some(fname) = resolved.file_name() {
                                         if std::fs::copy(&resolved, folder.join(fname)).is_ok() {
@@ -190,18 +217,23 @@ impl OpenCADStudio {
                                     }
                                 }
                             }
-                            self.command_line.push_output(crate::tf!(
-                                "{cmd}: packaged {copied} file(s) into {}",
-                                folder.display()
-                            ).as_ref());
+                            self.command_line.push_output(
+                                crate::tf!(
+                                    "{cmd}: packaged {copied} file(s) into {}",
+                                    folder.display()
+                                )
+                                .as_ref(),
+                            );
                         }
                         Err(e) => self
                             .command_line
                             .push_error(crate::tf!("{cmd}: cannot create folder ({e}).").as_ref()),
                     }
                 } else {
-                    self.command_line
-                        .push_error(crate::t!("ARCHIVE: save the drawing first (it has no file path yet).").as_ref());
+                    self.command_line.push_error(
+                        crate::t!("ARCHIVE: save the drawing first (it has no file path yet).")
+                            .as_ref(),
+                    );
                 }
             }
 
@@ -220,11 +252,14 @@ impl OpenCADStudio {
             "PERF" => {
                 self.perf_hud = !self.perf_hud;
                 crate::perf::set_ui_enabled(self.perf_hud);
-                self.command_line.push_info(crate::t!(if self.perf_hud {
-                    "PERF panel on — tracing render and interaction costs"
-                } else {
-                    "PERF panel off"
-                }).as_ref());
+                self.command_line.push_info(
+                    crate::t!(if self.perf_hud {
+                        "PERF panel on — tracing render and interaction costs"
+                    } else {
+                        "PERF panel off"
+                    })
+                    .as_ref(),
+                );
                 return Some(Task::none());
             }
 
@@ -256,14 +291,16 @@ impl OpenCADStudio {
                     self.model_space.mode = crate::app::config::ModelSpaceMode::MatchTheme;
                     self.sync_model_space_theme(true);
                     self.persist_settings_if_changed();
-                    self.command_line
-                        .push_output(crate::t!("Model space background set to Match Theme.").as_ref());
+                    self.command_line.push_output(
+                        crate::t!("Model space background set to Match Theme.").as_ref(),
+                    );
                 } else if first_arg == "CLASSIC" {
                     self.model_space.mode = crate::app::config::ModelSpaceMode::ClassicDark;
                     self.sync_model_space_theme(true);
                     self.persist_settings_if_changed();
-                    self.command_line
-                        .push_output(crate::t!("Model space background set to Classic CAD Dark.").as_ref());
+                    self.command_line.push_output(
+                        crate::t!("Model space background set to Classic CAD Dark.").as_ref(),
+                    );
                 } else if first_arg == "DEFAULT" || first_arg == "RESET" {
                     if is_paper {
                         self.model_space.custom_paper_bg = None;
@@ -279,31 +316,48 @@ impl OpenCADStudio {
                         .push_output(crate::t!("Background reset to default.").as_ref());
                 } else if first_arg == "DESK" {
                     let sub_args = &args[1..];
-                    let sub_first = sub_args.first().map(|s| s.to_uppercase()).unwrap_or_default();
+                    let sub_first = sub_args
+                        .first()
+                        .map(|s| s.to_uppercase())
+                        .unwrap_or_default();
                     if sub_first == "DEFAULT" || sub_first == "RESET" {
                         self.model_space.custom_desk_bg = None;
                         self.sync_model_space_theme(false);
                         self.persist_settings_if_changed();
-                        self.command_line
-                            .push_output(crate::t!("Paper desk surround background reset to default.").as_ref());
+                        self.command_line.push_output(
+                            crate::t!("Paper desk surround background reset to default.").as_ref(),
+                        );
                     } else if let Some(rgba) = parse_background_color(sub_args) {
                         let [r, g, b, _] = rgba;
-                        let rgb = [(r * 255.0).round() as u8, (g * 255.0).round() as u8, (b * 255.0).round() as u8];
+                        let rgb = [
+                            (r * 255.0).round() as u8,
+                            (g * 255.0).round() as u8,
+                            (b * 255.0).round() as u8,
+                        ];
                         self.model_space.custom_desk_bg = Some(rgb);
                         self.sync_model_space_theme(false);
                         self.persist_settings_if_changed();
-                        self.command_line.push_output(crate::tf!(
-                            "Desk surround background: rgb({}, {}, {})",
-                            rgb[0],
-                            rgb[1],
-                            rgb[2]
-                        ).as_ref());
+                        self.command_line.push_output(
+                            crate::tf!(
+                                "Desk surround background: rgb({}, {}, {})",
+                                rgb[0],
+                                rgb[1],
+                                rgb[2]
+                            )
+                            .as_ref(),
+                        );
                     } else {
-                        self.command_line.push_info(crate::t!("Usage: BACKGROUND DESK <r> <g> <b> | DEFAULT").as_ref());
+                        self.command_line.push_info(
+                            crate::t!("Usage: BACKGROUND DESK <r> <g> <b> | DEFAULT").as_ref(),
+                        );
                     }
                 } else if let Some(rgba) = parse_background_color(&args) {
                     let [r, g, b, _] = rgba;
-                    let rgb = [(r * 255.0).round() as u8, (g * 255.0).round() as u8, (b * 255.0).round() as u8];
+                    let rgb = [
+                        (r * 255.0).round() as u8,
+                        (g * 255.0).round() as u8,
+                        (b * 255.0).round() as u8,
+                    ];
                     if is_paper {
                         self.model_space.custom_paper_bg = Some(rgb);
                         self.paper_bg_input = crate::app::config::rgb_to_hex(rgb);
@@ -314,12 +368,9 @@ impl OpenCADStudio {
                     }
                     self.sync_model_space_theme(true);
                     self.persist_settings_if_changed();
-                    self.command_line.push_output(crate::tf!(
-                        "Background: rgb({}, {}, {})",
-                        rgb[0],
-                        rgb[1],
-                        rgb[2]
-                    ).as_ref());
+                    self.command_line.push_output(
+                        crate::tf!("Background: rgb({}, {}, {})", rgb[0], rgb[1], rgb[2]).as_ref(),
+                    );
                 } else {
                     self.command_line.push_info(
                         crate::t!("Usage: BACKGROUND <r> <g> <b> (0–255) | THEME|CLASSIC|DEFAULT|DESK|BLACK|DARKGRAY|GRAY|LIGHTGRAY|WHITE").as_ref(),
@@ -339,33 +390,59 @@ impl OpenCADStudio {
             // line is fed through the same command path the `--script` startup
             // flag uses. Blank rows submit Enter to the active command.
             "SCRIPT" | "SCR" => {
-                use crate::command::ValuePromptCommand;
-                let c = ValuePromptCommand::new("SCRIPT", "SCRIPT  path to the .scr file:");
-                self.command_line.push_info(&c.prompt());
-                self.tabs[i].active_cmd = Some(Box::new(c));
+                #[cfg(not(target_arch = "wasm32"))]
+                {
+                    return Some(Task::perform(
+                        async move {
+                            crate::sys::file_dialog()
+                                .add_filter("Script files (*.scr)", &["scr"])
+                                .pick_file()
+                                .await
+                                .map(|h| crate::sys::handle_path(&h))
+                        },
+                        |path| match path {
+                            Some(p) => Message::Command(format!("SCRIPT \"{}\"", p.display())),
+                            None => Message::Noop,
+                        },
+                    ));
+                }
+                #[cfg(target_arch = "wasm32")]
+                {
+                    use crate::command::ValuePromptCommand;
+                    let c = ValuePromptCommand::new("SCRIPT", "SCRIPT  path to the .scr file:");
+                    self.command_line.push_info(&c.prompt());
+                    self.tabs[i].active_cmd = Some(Box::new(c));
+                }
             }
             cmd if cmd.starts_with("SCRIPT ") || cmd.starts_with("SCR ") => {
                 let path = cmd.split_once(' ').map(|(_, r)| r.trim().to_string());
                 match path {
-                    Some(p) if !p.is_empty() => match std::fs::read_to_string(&p) {
-                        Ok(text) => {
-                            let cmds: Vec<Task<Message>> = text
-                                .lines()
-                                .map(str::trim)
-                                .filter(|l| !l.starts_with('#') && !l.starts_with(';'))
-                                .map(|l| Task::done(Message::ScriptLine(l.to_string())))
-                                .collect();
-                            self.command_line.push_output(crate::tf!(
-                                "SCRIPT: running {} command(s) from {p}.",
-                                cmds.len()
-                            ).as_ref());
-                            return Some(Task::batch(cmds));
+                    Some(p) if !p.is_empty() => {
+                        let clean_path = p.trim().trim_matches(|c| c == '"' || c == '\'');
+                        match std::fs::read_to_string(clean_path) {
+                            Ok(text) => {
+                                let cmds: Vec<Task<Message>> = text
+                                    .lines()
+                                    .map(str::trim)
+                                    .filter(|l| !l.starts_with('#') && !l.starts_with(';'))
+                                    .map(|l| Task::done(Message::ScriptLine(l.to_string())))
+                                    .collect();
+                                self.command_line.push_output(
+                                    crate::tf!(
+                                        "SCRIPT: running {} command(s) from {clean_path}.",
+                                        cmds.len()
+                                    )
+                                    .as_ref(),
+                                );
+                                return Some(Task::batch(cmds));
+                            }
+                            Err(e) => {
+                                self.command_line.push_error(
+                                    crate::tf!("SCRIPT: cannot read {clean_path}: {e}").as_ref(),
+                                );
+                            }
                         }
-                        Err(e) => {
-                            self.command_line
-                                .push_error(crate::tf!("SCRIPT: cannot read {p}: {e}").as_ref());
-                        }
-                    },
+                    }
                     _ => {
                         self.command_line
                             .push_info(crate::t!("Usage: SCRIPT <path to .scr file>").as_ref());
@@ -417,4 +494,170 @@ fn parse_background_color(args: &[&str]) -> Option<[f32; 4]> {
         return Some(to_rgba([r, g, b]));
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::app::{Message, OpenCADStudio};
+
+    fn fresh_app() -> OpenCADStudio {
+        let mut app = OpenCADStudio::new_for_test();
+        app.automation_op(r#"{"op":"new"}"#);
+        app
+    }
+
+    #[test]
+    fn multiline_script_draws_line() {
+        let mut app = fresh_app();
+        let i = app.active_tab;
+        let before_count = app.tabs[i].scene.document.entities().count();
+
+        // Feed standard multi-line CAD script sequence
+        let _ = app.update(Message::ScriptLine("LINE".into()));
+        assert!(
+            app.tabs[i].active_cmd.is_some(),
+            "LINE command should be active"
+        );
+
+        let _ = app.update(Message::ScriptLine("0,0".into()));
+        assert!(
+            app.tabs[i].active_cmd.is_some(),
+            "LINE command should stay active after first point"
+        );
+
+        let _ = app.update(Message::ScriptLine("10,10".into()));
+        let _ = app.update(Message::ScriptLine("".into())); // Enter to finish
+
+        let after_count = app.tabs[i].scene.document.entities().count();
+        assert_eq!(
+            after_count,
+            before_count + 1,
+            "Line entity should have been created"
+        );
+        assert!(
+            app.tabs[i].active_cmd.is_none(),
+            "LINE command should be finished"
+        );
+    }
+
+    #[test]
+    fn single_line_script_still_works() {
+        let mut app = fresh_app();
+        let i = app.active_tab;
+        let before_count = app.tabs[i].scene.document.entities().count();
+
+        let _ = app.update(Message::ScriptLine("CIRCLE 5,5 2".into()));
+
+        let after_count = app.tabs[i].scene.document.entities().count();
+        assert_eq!(
+            after_count,
+            before_count + 1,
+            "Circle entity should have been created"
+        );
+        assert!(
+            app.tabs[i].active_cmd.is_none(),
+            "CIRCLE command should be finished"
+        );
+    }
+
+    #[test]
+    fn command_name_prefixes_are_stripped() {
+        let mut app = fresh_app();
+        let i = app.active_tab;
+        let before_count = app.tabs[i].scene.document.entities().count();
+
+        let _ = app.update(Message::ScriptLine("_CIRCLE 10,10 3".into()));
+
+        let after_count = app.tabs[i].scene.document.entities().count();
+        assert_eq!(
+            after_count,
+            before_count + 1,
+            "_CIRCLE should resolve to CIRCLE and create entity"
+        );
+    }
+
+    #[test]
+    fn test_script_scr_draws_all_entities() {
+        let mut app = fresh_app();
+        let i = app.active_tab;
+        const SCRIPT: &str = r#"
+_LINE
+0,0
+100,0
+100,100
+0,100
+C
+
+_LINE
+0,0
+100,100
+
+_LINE
+0,100
+100,0
+
+CIRCLE
+50,50
+35
+
+CIRCLE 50,50 15
+
+ZOOM EXTENTS
+"#;
+        for line in SCRIPT
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.starts_with('#') && !l.starts_with(';'))
+        {
+            let _ = app.update(Message::ScriptLine(line.to_string()));
+        }
+        // 4 square edges + 2 diagonal lines + 2 circles = 8 entities
+        assert_eq!(app.tabs[i].scene.document.entities().count(), 8);
+    }
+
+    #[test]
+    fn blank_line_repeats_last_command_when_idle() {
+        let mut app = fresh_app();
+        let i = app.active_tab;
+
+        // Blank line before any command does nothing and does not panic
+        let _ = app.update(Message::ScriptLine("".into()));
+        assert!(app.tabs[i].active_cmd.is_none());
+
+        // 1. Draw a line
+        let _ = app.update(Message::ScriptLine("LINE".into()));
+        let _ = app.update(Message::ScriptLine("0,0".into()));
+        let _ = app.update(Message::ScriptLine("10,10".into()));
+        let _ = app.update(Message::ScriptLine("".into())); // finishes LINE
+        assert_eq!(app.tabs[i].scene.document.entities().count(), 1);
+        assert!(app.tabs[i].active_cmd.is_none());
+
+        // 2. Blank line when idle repeats LINE
+        let _ = app.update(Message::ScriptLine("".into()));
+        assert!(
+            app.tabs[i].active_cmd.is_some(),
+            "Blank line should repeat LINE"
+        );
+        let _ = app.update(Message::ScriptLine("20,20".into()));
+        let _ = app.update(Message::ScriptLine("30,30".into()));
+        let _ = app.update(Message::ScriptLine("".into())); // finishes second LINE
+        assert_eq!(app.tabs[i].scene.document.entities().count(), 2);
+        assert!(app.tabs[i].active_cmd.is_none());
+
+        // 3. Single-line command repeat
+        let _ = app.update(Message::ScriptLine("CIRCLE 5,5 2".into()));
+        assert_eq!(app.tabs[i].scene.document.entities().count(), 3);
+        assert!(app.tabs[i].active_cmd.is_none());
+
+        // Blank line repeats CIRCLE
+        let _ = app.update(Message::ScriptLine("".into()));
+        assert!(
+            app.tabs[i].active_cmd.is_some(),
+            "Blank line should repeat CIRCLE"
+        );
+        let _ = app.update(Message::ScriptLine("15,15".into()));
+        let _ = app.update(Message::ScriptLine("3".into()));
+        assert_eq!(app.tabs[i].scene.document.entities().count(), 4);
+        assert!(app.tabs[i].active_cmd.is_none());
+    }
 }

@@ -737,9 +737,9 @@ fn midpoint_constraint_pulls_a_point_onto_a_lines_midpoint() {
 fn midpoint_constraint_supports_a_point_entity() {
     let mut scene = Scene::new();
     let base = add_line(&mut scene, 0.0, 0.0, 10.0, 6.0);
-    let point = scene.add_entity(EntityType::Point(codec::entities::Point::at(
-        Vector3::new(20.0, 20.0, 0.0),
-    )));
+    let point = scene.add_entity(EntityType::Point(codec::entities::Point::at(Vector3::new(
+        20.0, 20.0, 0.0,
+    ))));
     scene
         .parametric_constraint_set_mut(ParametricScope::ModelSpace)
         .add(

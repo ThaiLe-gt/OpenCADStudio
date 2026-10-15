@@ -169,7 +169,9 @@ impl<'a> HostSession<'a> {
                     .document()
                     .entities()
                     .filter_map(|e| match e {
-                        EntityType::Viewport(other) if other.common.owner_handle == owner => Some(other.id),
+                        EntityType::Viewport(other) if other.common.owner_handle == owner => {
+                            Some(other.id)
+                        }
                         _ => None,
                     })
                     .max()
@@ -198,14 +200,14 @@ impl<'a> HostSession<'a> {
         }
         if let EntityType::Helix(new) = entity {
             let old = match old {
-                Some(EntityType::Helix(old)) => Some(old),
+                Some(EntityType::Helix(old)) => Some(&**old),
                 _ => None,
             };
             crate::entities::helix::normalize_scripted_helix(old, new)?;
         }
         if let EntityType::Table(new) = entity {
             let old = match old {
-                Some(EntityType::Table(old)) => Some(old),
+                Some(EntityType::Table(old)) => Some(&**old),
                 _ => None,
             };
             crate::entities::table::normalize_scripted_table(old, new);
@@ -225,11 +227,15 @@ impl<'a> HostSession<'a> {
     fn ensure_image_dictionary(&mut self) -> Option<Handle> {
         use codec::objects::{Dictionary, ObjectType};
         let root = self.document().header.named_objects_dict_handle;
-        let Some(ObjectType::Dictionary(root_dictionary)) = self.document().objects.get(&root) else {
+        let Some(ObjectType::Dictionary(root_dictionary)) = self.document().objects.get(&root)
+        else {
             return None;
         };
         if let Some(existing) = root_dictionary.get("ACAD_IMAGE_DICT") {
-            if matches!(self.document().objects.get(&existing), Some(ObjectType::Dictionary(_))) {
+            if matches!(
+                self.document().objects.get(&existing),
+                Some(ObjectType::Dictionary(_))
+            ) {
                 return Some(existing);
             }
         }
@@ -237,8 +243,12 @@ impl<'a> HostSession<'a> {
         let mut dictionary = Dictionary::new();
         dictionary.handle = handle;
         dictionary.owner = root;
-        self.document_mut().objects.insert(handle, ObjectType::Dictionary(dictionary));
-        if let Some(ObjectType::Dictionary(root_dictionary)) = self.document_mut().objects.get_mut(&root) {
+        self.document_mut()
+            .objects
+            .insert(handle, ObjectType::Dictionary(dictionary));
+        if let Some(ObjectType::Dictionary(root_dictionary)) =
+            self.document_mut().objects.get_mut(&root)
+        {
             root_dictionary.add_entry("ACAD_IMAGE_DICT", handle);
         }
         Some(handle)
@@ -250,17 +260,27 @@ impl<'a> HostSession<'a> {
         let EntityType::RasterImage(image) = entity else {
             return Ok(());
         };
-        if image.definition_handle.is_some_and(|handle| !handle.is_null()) {
+        if image
+            .definition_handle
+            .is_some_and(|handle| !handle.is_null())
+        {
             return Ok(());
         }
         let (width, height) = image::image_dimensions(&image.file_path)
             .map_err(|error| format!("cannot read image {:?}: {error}", image.file_path))?;
         // One definition per file, as AutoCAD keeps it: reuse an existing one.
-        let existing = self.document().objects.iter().find_map(|(handle, object)| match object {
-            codec::objects::ObjectType::ImageDefinition(definition)
-                if definition.file_name == image.file_path => Some(*handle),
-            _ => None,
-        });
+        let existing = self
+            .document()
+            .objects
+            .iter()
+            .find_map(|(handle, object)| match object {
+                codec::objects::ObjectType::ImageDefinition(definition)
+                    if definition.file_name == image.file_path =>
+                {
+                    Some(*handle)
+                }
+                _ => None,
+            });
         let handle = match existing {
             Some(handle) => handle,
             None => {
@@ -294,9 +314,10 @@ impl<'a> HostSession<'a> {
                         entries.add_entry(key, handle);
                     }
                 }
-                self.document_mut()
-                    .objects
-                    .insert(handle, codec::objects::ObjectType::ImageDefinition(definition));
+                self.document_mut().objects.insert(
+                    handle,
+                    codec::objects::ObjectType::ImageDefinition(definition),
+                );
                 handle
             }
         };
@@ -307,10 +328,8 @@ impl<'a> HostSession<'a> {
             == codec::entities::ClipBoundary::full_image(image.size.x, image.size.y);
         image.size = codec::types::Vector2::new(f64::from(width), f64::from(height));
         if untouched_clip {
-            image.clip_boundary = codec::entities::ClipBoundary::full_image(
-                f64::from(width),
-                f64::from(height),
-            );
+            image.clip_boundary =
+                codec::entities::ClipBoundary::full_image(f64::from(width), f64::from(height));
         }
         Ok(())
     }
@@ -350,6 +369,7 @@ impl<'a> HostSession<'a> {
             return handle;
         }
         let handle = self.app.tabs[self.tab].scene.add_entity(entity);
+        self.app.sync_registered_layers(self.tab);
         self.publish_document_view();
         handle
     }
@@ -362,6 +382,7 @@ impl<'a> HostSession<'a> {
             let _ = self.normalize_scripted_entity(None, entity);
         }
         let handles = self.app.tabs[self.tab].scene.add_entities(entities);
+        self.app.sync_registered_layers(self.tab);
         self.publish_document_view();
         handles
     }
@@ -374,13 +395,17 @@ impl<'a> HostSession<'a> {
     /// scene's derived caches. Returns `false` when no entity has that handle.
     pub fn update_entity(&mut self, mut entity: EntityType) -> bool {
         let old = self.document().get_entity(entity.common().handle).cloned();
-        if self.normalize_scripted_entity(old.as_ref(), &mut entity).is_err() {
+        if self
+            .normalize_scripted_entity(old.as_ref(), &mut entity)
+            .is_err()
+        {
             return false;
         }
         let ok = match entity {
             EntityType::AttributeEntity(attribute) => self.replace_nested_attribute(attribute),
             entity => self.app.tabs[self.tab].scene.update_entity(entity),
         };
+        self.app.sync_registered_layers(self.tab);
         if ok {
             self.publish_document_view();
         }
@@ -439,6 +464,7 @@ impl<'a> HostSession<'a> {
             };
             assert!(updated);
         }
+        self.app.sync_registered_layers(self.tab);
         self.set_dirty();
         self.publish_document_view();
         Ok(())
@@ -485,7 +511,7 @@ impl<'a> HostSession<'a> {
     pub fn remove_entity(&mut self, handle: Handle) -> bool {
         if self.document().get_entity(handle).is_none() {
             let Some(EntityType::AttributeEntity(attribute)) = self.nested_attribute(handle) else {
-            return false;
+                return false;
             };
             let owner = attribute.common.owner_handle;
             let Some(EntityType::Insert(mut insert)) = self.document().get_entity(owner).cloned()
@@ -503,7 +529,10 @@ impl<'a> HostSession<'a> {
             }
             return removed;
         }
-        let owner = self.document().get_entity(handle).map(|entity| entity.common().owner_handle);
+        let owner = self
+            .document()
+            .get_entity(handle)
+            .map(|entity| entity.common().owner_handle);
         self.app.tabs[self.tab].scene.erase_entities(&[handle]);
         let removed = self.document().get_entity(handle).is_none();
         if removed {
@@ -511,7 +540,12 @@ impl<'a> HostSession<'a> {
             // entity store, and removing an entity leaves its handle listed; drop
             // it so a definition never lists a member that no longer exists.
             if let Some(owner) = owner {
-                if let Some(record) = self.document_mut().block_records.iter_mut().find(|record| record.handle == owner) {
+                if let Some(record) = self
+                    .document_mut()
+                    .block_records
+                    .iter_mut()
+                    .find(|record| record.handle == owner)
+                {
                     record.entity_handles.retain(|member| *member != handle);
                 }
             }
@@ -659,19 +693,27 @@ impl<'a> HostSession<'a> {
                 let body = match primitive {
                     SolidPrimitive::Box { center, size } => {
                         finite3("box center", center)?;
-                        for (name, v) in [("length", size[0]), ("width", size[1]), ("height", size[2])] {
+                        for (name, v) in
+                            [("length", size[0]), ("width", size[1]), ("height", size[2])]
+                        {
                             positive(&format!("box {name}"), v)?;
                         }
                         model::box_solid(center, size[0], size[1], size[2])
                     }
                     SolidPrimitive::Wedge { origin, size } => {
                         finite3("wedge origin", origin)?;
-                        for (name, v) in [("length", size[0]), ("width", size[1]), ("height", size[2])] {
+                        for (name, v) in
+                            [("length", size[0]), ("width", size[1]), ("height", size[2])]
+                        {
                             positive(&format!("wedge {name}"), v)?;
                         }
                         model::wedge_solid(origin, size[0], size[1], size[2])
                     }
-                    SolidPrimitive::Cylinder { center, radius, height } => {
+                    SolidPrimitive::Cylinder {
+                        center,
+                        radius,
+                        height,
+                    } => {
                         finite3("cylinder center", center)?;
                         positive("cylinder radius", radius)?;
                         positive("cylinder height", height)?;
@@ -682,16 +724,27 @@ impl<'a> HostSession<'a> {
                         positive("sphere radius", radius)?;
                         model::sphere_solid(center, radius)
                     }
-                    SolidPrimitive::Torus { center, major, minor } => {
+                    SolidPrimitive::Torus {
+                        center,
+                        major,
+                        minor,
+                    } => {
                         finite3("torus center", center)?;
                         positive("torus major radius", major)?;
                         positive("torus minor radius", minor)?;
                         if minor >= major {
-                            return Err("torus minor radius must be smaller than the major radius".into());
+                            return Err(
+                                "torus minor radius must be smaller than the major radius".into()
+                            );
                         }
                         model::torus_solid(center, major, minor)
                     }
-                    SolidPrimitive::Pyramid { center, radius, height, sides } => {
+                    SolidPrimitive::Pyramid {
+                        center,
+                        radius,
+                        height,
+                        sides,
+                    } => {
                         finite3("pyramid center", center)?;
                         positive("pyramid radius", radius)?;
                         positive("pyramid height", height)?;
@@ -720,8 +773,13 @@ impl<'a> HostSession<'a> {
                 }
                 Ok(handle)
             }
-            SolidOperation::RegionFromProfile { source, layer, delete_source } => {
-                let (entity, plane, loops, closed, layer) = self.profile_source(source, layer, delete_source)?;
+            SolidOperation::RegionFromProfile {
+                source,
+                layer,
+                delete_source,
+            } => {
+                let (entity, plane, loops, closed, layer) =
+                    self.profile_source(source, layer, delete_source)?;
                 if matches!(entity, EntityType::Region(_)) {
                     return Err("the source is already a region".into());
                 }
@@ -738,10 +796,20 @@ impl<'a> HostSession<'a> {
                 region.wires = model::edge_wires(&body);
                 region.set_sat_document(&sat);
                 region.common.layer = layer;
-                self.commit_profile_result(EntityType::Region(region), source, delete_source, "Create region")
+                self.commit_profile_result(
+                    EntityType::Region(region),
+                    source,
+                    delete_source,
+                    "Create region",
+                )
             }
-            SolidOperation::SurfaceFromProfile { source, layer, delete_source } => {
-                let (entity, plane, loops, closed, layer) = self.profile_source(source, layer, delete_source)?;
+            SolidOperation::SurfaceFromProfile {
+                source,
+                layer,
+                delete_source,
+            } => {
+                let (entity, plane, loops, closed, layer) =
+                    self.profile_source(source, layer, delete_source)?;
                 if matches!(entity, EntityType::Region(_)) {
                     return Err("the source is already a region".into());
                 }
@@ -752,27 +820,41 @@ impl<'a> HostSession<'a> {
                     .ok_or("the geometry kernel could not build a surface from this profile")?;
                 let sat = crate::scene::convert::acis_export::solid_to_sat(&body)
                     .ok_or("the surface could not be exported losslessly")?;
-                let mut surface = codec::entities::Surface::new(codec::entities::SurfaceKind::Plane);
+                let mut surface =
+                    codec::entities::Surface::new(codec::entities::SurfaceKind::Plane);
                 surface.point_of_reference =
                     codec::types::Vector3::new(plane.origin[0], plane.origin[1], plane.origin[2]);
                 surface.wires = model::edge_wires(&body);
                 surface.acis_data = codec::entities::AcisData::from_sat(&sat.to_sat_string());
                 surface.common.layer = layer;
-                self.commit_profile_result(EntityType::Surface(surface), source, delete_source, "Create surface")
+                self.commit_profile_result(
+                    EntityType::Surface(Box::new(surface)),
+                    source,
+                    delete_source,
+                    "Create surface",
+                )
             }
-            SolidOperation::Extrude { source, direction, layer, delete_source } => {
+            SolidOperation::Extrude {
+                source,
+                direction,
+                layer,
+                delete_source,
+            } => {
                 if direction.iter().any(|v| !v.is_finite()) {
                     return Err("extrusion direction must be finite".into());
                 }
                 if direction.iter().map(|v| v * v).sum::<f64>().sqrt() <= 1e-9 {
                     return Err("extrusion direction must be nonzero".into());
                 }
-                let (entity, _plane, _loops, closed, layer) = self.profile_source(source, layer, delete_source)?;
+                let (entity, _plane, _loops, closed, layer) =
+                    self.profile_source(source, layer, delete_source)?;
                 if matches!(entity, EntityType::Region(_)) {
                     return Err("extrude a curve profile; a region cannot be extruded here".into());
                 }
                 let body = crate::scene::model::presspull_model::extrusion_body(&entity, direction)
-                    .ok_or("the geometry kernel could not extrude this profile in that direction")?;
+                    .ok_or(
+                        "the geometry kernel could not extrude this profile in that direction",
+                    )?;
                 let sat = crate::scene::convert::acis_export::solid_to_sat(&body)
                     .ok_or("the extrusion could not be exported losslessly")?;
                 let result = if closed {
@@ -784,28 +866,36 @@ impl<'a> HostSession<'a> {
                 } else {
                     // An open profile sweeps to a surface. The generic kind
                     // carries only the payload, as OCS does after a boolean.
-                    let mut surface = codec::entities::Surface::new(codec::entities::SurfaceKind::Generic);
+                    let mut surface =
+                        codec::entities::Surface::new(codec::entities::SurfaceKind::Generic);
                     surface.wires = model::edge_wires(&body);
                     surface.acis_data = codec::entities::AcisData::from_sat(&sat.to_sat_string());
                     surface.common.layer = layer;
-                    EntityType::Surface(surface)
+                    EntityType::Surface(Box::new(surface))
                 };
                 self.commit_profile_result(result, source, delete_source, "Extrude profile")
             }
-            SolidOperation::EmbedPicture { path, origin, width, layer } => {
+            SolidOperation::EmbedPicture {
+                path,
+                origin,
+                width,
+                layer,
+            } => {
                 finite3("picture origin", origin)?;
                 positive("picture width", width)?;
                 if layer.as_ref().is_some_and(|name| name.trim().is_empty()) {
                     return Err("layer name is empty".into());
                 }
-                let picture = crate::io::ole_embed::EmbeddedImage::from_file(std::path::Path::new(&path))
-                    .map_err(|error| format!("cannot read the picture {path:?}: {error}"))?;
+                let picture =
+                    crate::io::ole_embed::EmbeddedImage::from_file(std::path::Path::new(&path))
+                        .map_err(|error| format!("cannot read the picture {path:?}: {error}"))?;
                 let (upper_left, lower_right) = crate::io::ole_embed::corners_from_placement(
                     codec::types::Vector3::new(origin[0], origin[1], origin[2]),
                     width,
                     picture.aspect(),
                 );
-                let mut frame = crate::io::ole_embed::build_embedded_ole(&picture, upper_left, lower_right);
+                let mut frame =
+                    crate::io::ole_embed::build_embedded_ole(&picture, upper_left, lower_right);
                 if let Some(layer) = layer {
                     frame.common.layer = layer;
                 }
@@ -816,7 +906,13 @@ impl<'a> HostSession<'a> {
                 }
                 Ok(handle)
             }
-            SolidOperation::Boolean { first, second, operation, layer, keep_operands } => {
+            SolidOperation::Boolean {
+                first,
+                second,
+                operation,
+                layer,
+                keep_operands,
+            } => {
                 use ocs_plugin_api::host::SolidBoolean;
                 if first == second {
                     return Err("a solid cannot be combined with itself".into());
@@ -824,7 +920,10 @@ impl<'a> HostSession<'a> {
                 if layer.as_ref().is_some_and(|name| name.trim().is_empty()) {
                     return Err("layer name is empty".into());
                 }
-                let operand = |host: &Self, handle: Handle, which: &str| -> Result<codec::entities::Solid3D, String> {
+                let operand = |host: &Self,
+                               handle: Handle,
+                               which: &str|
+                 -> Result<codec::entities::Solid3D, String> {
                     match host.document().get_entity(handle) {
                         Some(EntityType::Solid3D(solid)) => Ok(solid.clone()),
                         Some(_) => Err(format!("the {which} operand must be a Solid3D")),
@@ -876,7 +975,9 @@ impl<'a> HostSession<'a> {
                     return Err("the result could not be added".into());
                 }
                 if !keep_operands {
-                    self.app.tabs[self.tab].scene.erase_entities(&[first, second]);
+                    self.app.tabs[self.tab]
+                        .scene
+                        .erase_entities(&[first, second]);
                     self.publish_document_view();
                 }
                 Ok(handle)
@@ -897,7 +998,10 @@ impl<'a> HostSession<'a> {
                     && matrix[11].abs() < 1e-9
                     && (matrix[15] - 1.0).abs() < 1e-9;
                 if !rigid {
-                    return Err("only rigid moves and mirrors are supported; scaling and shear are not".into());
+                    return Err(
+                        "only rigid moves and mirrors are supported; scaling and shear are not"
+                            .into(),
+                    );
                 }
                 let mut entity = self
                     .document()
@@ -943,7 +1047,12 @@ impl<'a> HostSession<'a> {
                             value.surface_data = codec::entities::SurfaceData::Generic;
                         }
                     }
-                    _ => return Err("transform applies to Solid3D, Body, Region and Surface entities".into()),
+                    _ => {
+                        return Err(
+                            "transform applies to Solid3D, Body, Region and Surface entities"
+                                .into(),
+                        )
+                    }
                 }
                 self.push_undo("Transform solid");
                 if !self.update_entity(entity) {
@@ -963,7 +1072,16 @@ impl<'a> HostSession<'a> {
         source: Handle,
         layer: Option<String>,
         delete_source: bool,
-    ) -> Result<(EntityType, kernel::space::Plane, Vec<Vec<kernel::geom2d::Curve>>, bool, String), String> {
+    ) -> Result<
+        (
+            EntityType,
+            kernel::space::Plane,
+            Vec<Vec<kernel::geom2d::Curve>>,
+            bool,
+            String,
+        ),
+        String,
+    > {
         if layer.as_ref().is_some_and(|name| name.trim().is_empty()) {
             return Err("layer name is empty".into());
         }
@@ -975,11 +1093,17 @@ impl<'a> HostSession<'a> {
         if delete_source && self.app.tabs[self.tab].scene.is_layer_locked(source) {
             return Err(format!("entity {source:?} is on a locked layer"));
         }
-        if matches!(entity, EntityType::Solid3D(_) | EntityType::Body(_) | EntityType::Surface(_)) {
-            return Err("the source must be a curve profile, not an existing solid or surface".into());
+        if matches!(
+            entity,
+            EntityType::Solid3D(_) | EntityType::Body(_) | EntityType::Surface(_)
+        ) {
+            return Err(
+                "the source must be a curve profile, not an existing solid or surface".into(),
+            );
         }
-        let (plane, loops, closed) = crate::scene::model::presspull_model::profile_geometry(&entity)
-            .ok_or("the source is not a planar profile")?;
+        let (plane, loops, closed) =
+            crate::scene::model::presspull_model::profile_geometry(&entity)
+                .ok_or("the source is not a planar profile")?;
         let layer = layer.unwrap_or_else(|| entity.common().layer.clone());
         Ok((entity, plane, loops, closed, layer))
     }
@@ -1018,7 +1142,9 @@ impl<'a> HostSession<'a> {
                 self.document().header.current_layer_name.clone(),
             )),
             "SNAPANG" => Some(HostSettingValue::Number(self.app.snap_angle_deg as f64)),
-            "CTAB" => Some(HostSettingValue::Text(self.app.tabs[self.tab].scene.current_layout.clone())),
+            "CTAB" => Some(HostSettingValue::Text(
+                self.app.tabs[self.tab].scene.current_layout.clone(),
+            )),
             _ => None,
         }
     }
@@ -1085,7 +1211,9 @@ impl<'a> HostSession<'a> {
         layer.handle = handle;
         layer.color = config.color.unwrap_or(codec::types::Color::Index(7));
         layer.line_type = resolved_lt;
-        layer.line_weight = config.lineweight.unwrap_or(codec::types::LineWeight::ByLayer);
+        layer.line_weight = config
+            .lineweight
+            .unwrap_or(codec::types::LineWeight::ByLayer);
         layer.flags.off = config.off.unwrap_or(false);
         if let Some(frz) = config.frozen {
             if frz {
@@ -1096,7 +1224,9 @@ impl<'a> HostSession<'a> {
         }
         layer.flags.locked = config.locked.unwrap_or(false);
         layer.is_plottable = config.plottable.unwrap_or(true);
-        layer.transparency = config.transparency.unwrap_or(codec::types::Transparency::ByLayer);
+        layer.transparency = config
+            .transparency
+            .unwrap_or(codec::types::Transparency::ByLayer);
         layer.description = config.description.unwrap_or_default();
 
         let _ = doc.layers.add(layer);
@@ -1132,7 +1262,9 @@ impl<'a> HostSession<'a> {
         let check_color = |color: &codec::types::Color| match color {
             codec::types::Color::ByLayer
             | codec::types::Color::ByBlock
-            | codec::types::Color::None => Err("a layer color must be an index 1-255 or an RGB value".to_owned()),
+            | codec::types::Color::None => {
+                Err("a layer color must be an index 1-255 or an RGB value".to_owned())
+            }
             codec::types::Color::Index(0) => Err("a layer color index must be 1-255".to_owned()),
             _ => Ok(()),
         };
@@ -1142,7 +1274,9 @@ impl<'a> HostSession<'a> {
             }
             if let Some(codec::types::LineWeight::Value(value)) = config.lineweight {
                 if !(0..=211).contains(&value) {
-                    return Err("a layer lineweight must be between 0 and 211 (1/100 mm)".to_owned());
+                    return Err(
+                        "a layer lineweight must be between 0 and 211 (1/100 mm)".to_owned()
+                    );
                 }
             }
             Ok(())
@@ -1156,12 +1290,15 @@ impl<'a> HostSession<'a> {
                 check_config(&config)?;
                 if let Some(linetype) = &config.linetype {
                     if resolve_linetype(self.document_mut(), linetype).is_none() {
-                        return Err(format!("linetype {linetype:?} does not exist in this drawing"));
+                        return Err(format!(
+                            "linetype {linetype:?} does not exist in this drawing"
+                        ));
                     }
                 }
                 self.push_undo("Create layer");
                 let config = ocs_plugin_api::host::LayerConfig { name, ..config };
-                self.add_layer(config).ok_or_else(|| "the layer could not be created".to_owned())
+                self.add_layer(config)
+                    .ok_or_else(|| "the layer could not be created".to_owned())
             }
             TableOperation::LayerModify { config } => {
                 let name = config.name.trim().to_owned();
@@ -1186,7 +1323,9 @@ impl<'a> HostSession<'a> {
                 }
                 if let Some(linetype) = &config.linetype {
                     if resolve_linetype(self.document_mut(), linetype).is_none() {
-                        return Err(format!("linetype {linetype:?} does not exist in this drawing"));
+                        return Err(format!(
+                            "linetype {linetype:?} does not exist in this drawing"
+                        ));
                     }
                 }
                 self.push_undo("Modify layer");
@@ -1215,7 +1354,10 @@ impl<'a> HostSession<'a> {
                 self.finish_layer_change(&[from.trim().to_owned(), to]);
                 Ok(handle)
             }
-            TableOperation::LayerDelete { name, erase_objects } => {
+            TableOperation::LayerDelete {
+                name,
+                erase_objects,
+            } => {
                 let name = name.trim().to_owned();
                 let handle = layer_handle(self.document(), &name)?;
                 if protected(&name) {
@@ -1251,7 +1393,12 @@ impl<'a> HostSession<'a> {
             TableOperation::LayerSetCurrent { name } => {
                 let name = name.trim().to_owned();
                 let handle = layer_handle(self.document(), &name)?;
-                let stored = self.document().layers.get(&name).map(|l| l.name.clone()).unwrap_or(name);
+                let stored = self
+                    .document()
+                    .layers
+                    .get(&name)
+                    .map(|l| l.name.clone())
+                    .unwrap_or(name);
                 self.app.set_current_layer_name(self.tab, &stored)?;
                 Ok(handle)
             }
@@ -1294,8 +1441,21 @@ impl<'a> HostSession<'a> {
     /// (`Q` for `QUIT`, added with ALIASEDIT) walk straight past it.
     pub(super) fn script_command_allowed(&self, line: &str) -> Result<(), String> {
         const DENIED: &[&str] = &[
-            "QUIT", "EXIT", "CLOSE", "CLOSEALL", "NEW", "QNEW", "OPEN", "SAVE", "QSAVE", "SAVEAS",
-            "SAVEALL", "RECOVER", "SCRIPT", "RUNSCRIPT", "SCRIPTCOMMANDS",
+            "QUIT",
+            "EXIT",
+            "CLOSE",
+            "CLOSEALL",
+            "NEW",
+            "QNEW",
+            "OPEN",
+            "SAVE",
+            "QSAVE",
+            "SAVEAS",
+            "SAVEALL",
+            "RECOVER",
+            "SCRIPT",
+            "RUNSCRIPT",
+            "SCRIPTCOMMANDS",
         ];
         let Some(token) = line.split_whitespace().next() else {
             return Ok(());
@@ -1391,7 +1551,13 @@ impl<'a> HostSession<'a> {
                     R::Token { text } => {
                         let task = self.app.feed_active_cmd(&text);
                         self.app.drive_headless_task(task)?;
-                        return Ok(self.finish_command_step(before, error_revision, editor_before, mtext_before, modal_before));
+                        return Ok(self.finish_command_step(
+                            before,
+                            error_revision,
+                            editor_before,
+                            mtext_before,
+                            modal_before,
+                        ));
                     }
                     R::Entity { handle, point } => {
                         if point.iter().any(|v| !v.is_finite()) {
@@ -1400,9 +1566,14 @@ impl<'a> HostSession<'a> {
                         if self.document().get_entity(handle).is_none() {
                             return Err(format!("entity {} does not exist", handle.value()));
                         }
-                        StepInput::EntityPick(handle, glam::DVec3::new(point[0], point[1], point[2]))
+                        StepInput::EntityPick(
+                            handle,
+                            glam::DVec3::new(point[0], point[1], point[2]),
+                        )
                     }
-                    R::Selection => StepInput::SelectionComplete(self.app.tabs[tab].scene.selected_handles_in_order()),
+                    R::Selection => StepInput::SelectionComplete(
+                        self.app.tabs[tab].scene.selected_handles_in_order(),
+                    ),
                     R::Enter => StepInput::Enter,
                     R::Run { .. } | R::Start { .. } | R::Cancel => unreachable!(),
                 };
@@ -1410,7 +1581,13 @@ impl<'a> HostSession<'a> {
             }
         };
         self.app.drive_headless_task(task)?;
-        Ok(self.finish_command_step(before, error_revision, editor_before, mtext_before, modal_before))
+        Ok(self.finish_command_step(
+            before,
+            error_revision,
+            editor_before,
+            mtext_before,
+            modal_before,
+        ))
     }
 
     fn finish_command_step(
@@ -1441,27 +1618,57 @@ impl<'a> HostSession<'a> {
         outcome
     }
 
-    fn command_outcome(&self, before: i64, blocked_by: Option<String>) -> ocs_plugin_api::host::CommandOutcome {
+    fn command_outcome(
+        &self,
+        before: i64,
+        blocked_by: Option<String>,
+    ) -> ocs_plugin_api::host::CommandOutcome {
         let now = self.document().entities().count() as i64;
         let metadata = self.app.tabs[self.tab]
             .active_cmd
             .as_deref()
             .map(crate::app::control::active_command_metadata);
-        let text = |key: &str| metadata.as_ref().and_then(|m| m[key].as_str()).unwrap_or("").to_owned();
+        let text = |key: &str| {
+            metadata
+                .as_ref()
+                .and_then(|m| m[key].as_str())
+                .unwrap_or("")
+                .to_owned()
+        };
         let list = |key: &str| -> Vec<String> {
             metadata
                 .as_ref()
                 .and_then(|m| m[key].as_array())
-                .map(|items| items.iter().filter_map(|v| v.as_str().map(str::to_owned)).collect())
+                .map(|items| {
+                    items
+                        .iter()
+                        .filter_map(|v| v.as_str().map(str::to_owned))
+                        .collect()
+                })
                 .unwrap_or_default()
         };
         let options = metadata
             .as_ref()
             .and_then(|m| m["options"].as_array())
-            .map(|items| items.iter().filter_map(|o| o["keyword"].as_str().filter(|k| !k.is_empty()).map(str::to_owned)).collect())
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(|o| {
+                        o["keyword"]
+                            .as_str()
+                            .filter(|k| !k.is_empty())
+                            .map(str::to_owned)
+                    })
+                    .collect()
+            })
             .unwrap_or_default();
         ocs_plugin_api::host::CommandOutcome {
-            status: if blocked_by.is_some() { "waiting_input" } else { "completed" }.to_owned(),
+            status: if blocked_by.is_some() {
+                "waiting_input"
+            } else {
+                "completed"
+            }
+            .to_owned(),
             blocked_by,
             command: text("name"),
             prompt: text("prompt"),
@@ -1475,7 +1682,10 @@ impl<'a> HostSession<'a> {
     }
 
     /// Simple linetype create/modify/rename/delete.
-    fn linetype_operation(&mut self, operation: ocs_plugin_api::host::TableOperation) -> Result<Handle, String> {
+    fn linetype_operation(
+        &mut self,
+        operation: ocs_plugin_api::host::TableOperation,
+    ) -> Result<Handle, String> {
         use ocs_plugin_api::host::TableOperation;
         let protected = |name: &str| {
             ["CONTINUOUS", "BYLAYER", "BYBLOCK"].contains(&name.trim().to_uppercase().as_str())
@@ -1488,7 +1698,9 @@ impl<'a> HostSession<'a> {
                 return Err("linetype pattern lengths must be finite and within 1e6".to_owned());
             }
             if !pattern.iter().any(|v| *v >= 0.0) || !pattern.iter().any(|v| *v < 0.0) {
-                return Err("a linetype pattern needs at least one dash or dot and one gap".to_owned());
+                return Err(
+                    "a linetype pattern needs at least one dash or dot and one gap".to_owned(),
+                );
             }
             if pattern.iter().map(|v| v.abs()).sum::<f64>() <= 0.0 {
                 return Err("a linetype pattern must have a nonzero length".to_owned());
@@ -1498,7 +1710,10 @@ impl<'a> HostSession<'a> {
         let build = |lt: &mut codec::tables::LineType, pattern: &[f64]| {
             lt.elements = pattern
                 .iter()
-                .map(|length| codec::tables::linetype::LineTypeElement { length: *length, complex: None })
+                .map(|length| codec::tables::linetype::LineTypeElement {
+                    length: *length,
+                    complex: None,
+                })
                 .collect();
             lt.pattern_length = pattern.iter().map(|v| v.abs()).sum();
         };
@@ -1513,7 +1728,11 @@ impl<'a> HostSession<'a> {
         // standard pattern (Dashed, Center, ...) is seen as taken.
         crate::io::linetypes::populate_document(self.document_mut());
         match operation {
-            TableOperation::LinetypeCreate { name, description, pattern } => {
+            TableOperation::LinetypeCreate {
+                name,
+                description,
+                pattern,
+            } => {
                 let name = validated_symbol_name(&name, "a linetype name")?;
                 if self.document().line_types.contains(&name) {
                     return Err(format!("linetype {name:?} already exists"));
@@ -1526,11 +1745,18 @@ impl<'a> HostSession<'a> {
                 build(&mut lt, &pattern);
                 let handle = self.document_mut().allocate_handle();
                 lt.handle = handle;
-                self.document_mut().line_types.add(lt).map_err(|e| format!("the linetype could not be created: {e}"))?;
+                self.document_mut()
+                    .line_types
+                    .add(lt)
+                    .map_err(|e| format!("the linetype could not be created: {e}"))?;
                 self.finish_linetype_change(&[name]);
                 Ok(handle)
             }
-            TableOperation::LinetypeModify { name, description, pattern } => {
+            TableOperation::LinetypeModify {
+                name,
+                description,
+                pattern,
+            } => {
                 let existing = self
                     .document()
                     .line_types
@@ -1541,7 +1767,10 @@ impl<'a> HostSession<'a> {
                     return Err(format!("linetype {:?} cannot be changed", existing.name));
                 }
                 if existing.elements.iter().any(|e| e.complex.is_some()) {
-                    return Err("a linetype with text or shape elements cannot be changed from a script".to_owned());
+                    return Err(
+                        "a linetype with text or shape elements cannot be changed from a script"
+                            .to_owned(),
+                    );
                 }
                 if description.is_none() && pattern.is_none() {
                     return Err("no linetype properties to change".to_owned());
@@ -1590,7 +1819,9 @@ impl<'a> HostSession<'a> {
                 let mut lt = existing;
                 lt.name = to.clone();
                 doc.line_types.remove(&old);
-                doc.line_types.add(lt).map_err(|e| format!("the linetype could not be renamed: {e}"))?;
+                doc.line_types
+                    .add(lt)
+                    .map_err(|e| format!("the linetype could not be renamed: {e}"))?;
                 for layer in doc.layers.iter_mut() {
                     if layer.line_type.eq_ignore_ascii_case(&old) {
                         layer.line_type = to.clone();
@@ -1618,14 +1849,33 @@ impl<'a> HostSession<'a> {
                     return Err(format!("linetype {:?} cannot be deleted", existing.name));
                 }
                 let doc = self.document();
-                let in_use = doc.header.current_linetype_name.eq_ignore_ascii_case(&existing.name)
-                    || doc.layers.iter().any(|layer| layer.line_type.eq_ignore_ascii_case(&existing.name))
-                    || doc.entities().any(|entity| entity.common().linetype.eq_ignore_ascii_case(&existing.name))
+                let in_use = doc
+                    .header
+                    .current_linetype_name
+                    .eq_ignore_ascii_case(&existing.name)
+                    || doc
+                        .layers
+                        .iter()
+                        .any(|layer| layer.line_type.eq_ignore_ascii_case(&existing.name))
+                    || doc.entities().any(|entity| {
+                        entity
+                            .common()
+                            .linetype
+                            .eq_ignore_ascii_case(&existing.name)
+                    })
                     || doc.dim_styles.iter().any(|style| {
-                        [style.dimltex_handle, style.dimltex1_handle, style.dimltex2_handle].contains(&existing.handle)
+                        [
+                            style.dimltex_handle,
+                            style.dimltex1_handle,
+                            style.dimltex2_handle,
+                        ]
+                        .contains(&existing.handle)
                     });
                 if in_use {
-                    return Err(format!("linetype {:?} is current or still in use", existing.name));
+                    return Err(format!(
+                        "linetype {:?} is current or still in use",
+                        existing.name
+                    ));
                 }
                 self.push_undo("Delete linetype");
                 self.document_mut().line_types.remove(&existing.name);
@@ -1638,7 +1888,9 @@ impl<'a> HostSession<'a> {
 
     fn finish_linetype_change(&mut self, names: &[String]) {
         self.app.tabs[self.tab].dirty = true;
-        self.app.tabs[self.tab].scene.invalidate_layer_dependencies(names);
+        self.app.tabs[self.tab]
+            .scene
+            .invalidate_layer_dependencies(names);
         self.app.tabs[self.tab].scene.bump_geometry();
         self.publish_document_view();
     }
@@ -1646,18 +1898,24 @@ impl<'a> HostSession<'a> {
     /// Paper-space layout operations (create, rename, delete, switch, page).
     /// They act on the active document because switching layouts drives the
     /// application's view state.
-    fn layout_operation(&mut self, operation: ocs_plugin_api::host::TableOperation) -> Result<Handle, String> {
+    fn layout_operation(
+        &mut self,
+        operation: ocs_plugin_api::host::TableOperation,
+    ) -> Result<Handle, String> {
         use codec::objects::ObjectType;
         use ocs_plugin_api::host::TableOperation;
         if self.tab != self.app.active_tab {
-            return Err("layout operations act on the active document; switch to it first".to_owned());
+            return Err(
+                "layout operations act on the active document; switch to it first".to_owned(),
+            );
         }
         let find = |doc: &CadDocument, name: &str| -> Result<(String, Handle), String> {
             doc.objects
                 .values()
                 .find_map(|object| match object {
                     ObjectType::Layout(layout)
-                        if !layout.block_record.is_null() && layout.name.eq_ignore_ascii_case(name) =>
+                        if !layout.block_record.is_null()
+                            && layout.name.eq_ignore_ascii_case(name) =>
                     {
                         Some((layout.name.clone(), layout.handle))
                     }
@@ -1666,7 +1924,11 @@ impl<'a> HostSession<'a> {
                 .ok_or_else(|| format!("layout {name:?} does not exist"))
         };
         let names_taken = |app: &crate::app::OpenCADStudio, tab: usize, name: &str| {
-            app.tabs[tab].scene.layout_names().iter().any(|existing| existing.eq_ignore_ascii_case(name))
+            app.tabs[tab]
+                .scene
+                .layout_names()
+                .iter()
+                .any(|existing| existing.eq_ignore_ascii_case(name))
         };
         match operation {
             TableOperation::LayoutCreate { name } => {
@@ -1719,7 +1981,9 @@ impl<'a> HostSession<'a> {
                 self.app.tabs[self.tab].scene.rename_layout(&from, &to);
                 // The layout dictionary is keyed by name; keep it in step.
                 let dict = self.document().header.acad_layout_dict_handle;
-                if let Some(ObjectType::Dictionary(dictionary)) = self.document_mut().objects.get_mut(&dict) {
+                if let Some(ObjectType::Dictionary(dictionary)) =
+                    self.document_mut().objects.get_mut(&dict)
+                {
                     for (key, _) in dictionary.entries.iter_mut() {
                         if *key == from {
                             *key = to.clone();
@@ -1758,7 +2022,12 @@ impl<'a> HostSession<'a> {
                 self.publish_document_view();
                 Ok(handle)
             }
-            TableOperation::LayoutSetPage { name, paper_size, rotation, scale } => {
+            TableOperation::LayoutSetPage {
+                name,
+                paper_size,
+                rotation,
+                scale,
+            } => {
                 let (name, handle) = find(self.document(), name.trim())?;
                 if name.eq_ignore_ascii_case("Model") {
                     return Err("the Model layout has no sheet setup".to_owned());
@@ -1767,8 +2036,17 @@ impl<'a> HostSession<'a> {
                     return Err("no page setup properties to change".to_owned());
                 }
                 if let Some([width, height]) = paper_size {
-                    if !(width.is_finite() && height.is_finite() && width > 0.0 && height > 0.0 && width <= 100_000.0 && height <= 100_000.0) {
-                        return Err("the paper size must be positive and at most 100000 mm each way".to_owned());
+                    if !(width.is_finite()
+                        && height.is_finite()
+                        && width > 0.0
+                        && height > 0.0
+                        && width <= 100_000.0
+                        && height <= 100_000.0)
+                    {
+                        return Err(
+                            "the paper size must be positive and at most 100000 mm each way"
+                                .to_owned(),
+                        );
                     }
                 }
                 let rotation_code = match rotation {
@@ -1777,16 +2055,26 @@ impl<'a> HostSession<'a> {
                     Some(90) => Some(codec::objects::PlotRotation::Degrees90),
                     Some(180) => Some(codec::objects::PlotRotation::Degrees180),
                     Some(270) => Some(codec::objects::PlotRotation::Degrees270),
-                    Some(_) => return Err("the plot rotation must be 0, 90, 180 or 270 degrees".to_owned()),
+                    Some(_) => {
+                        return Err("the plot rotation must be 0, 90, 180 or 270 degrees".to_owned())
+                    }
                 };
                 if let Some([numerator, denominator]) = scale {
-                    if !(numerator.is_finite() && denominator.is_finite() && numerator > 0.0 && denominator > 0.0) {
-                        return Err("the plot scale numerator and denominator must be positive".to_owned());
+                    if !(numerator.is_finite()
+                        && denominator.is_finite()
+                        && numerator > 0.0
+                        && denominator > 0.0)
+                    {
+                        return Err(
+                            "the plot scale numerator and denominator must be positive".to_owned()
+                        );
                     }
                 }
                 self.push_undo("Layout page setup");
                 for object in self.document_mut().objects.values_mut() {
-                    let ObjectType::Layout(layout) = object else { continue };
+                    let ObjectType::Layout(layout) = object else {
+                        continue;
+                    };
                     if layout.name != name {
                         continue;
                     }
@@ -1805,8 +2093,10 @@ impl<'a> HostSession<'a> {
                         layout.plot_scale_type = codec::objects::ScaledType::CustomScale.to_code();
                         layout.plot_flags.use_standard_scale = false;
                     }
-                    let quarter_turn = layout.plot_rotation == codec::objects::PlotRotation::Degrees90.to_code()
-                        || layout.plot_rotation == codec::objects::PlotRotation::Degrees270.to_code();
+                    let quarter_turn = layout.plot_rotation
+                        == codec::objects::PlotRotation::Degrees90.to_code()
+                        || layout.plot_rotation
+                            == codec::objects::PlotRotation::Degrees270.to_code();
                     let (x, y) = if quarter_turn {
                         (layout.paper_height, layout.paper_width)
                     } else {
@@ -1818,7 +2108,9 @@ impl<'a> HostSession<'a> {
                     layout.max_extents = (x, y, 0.0);
                     break;
                 }
-                self.app.tabs[self.tab].scene.invalidate_display_plot_style();
+                self.app.tabs[self.tab]
+                    .scene
+                    .invalidate_display_plot_style();
                 self.finish_layout_change();
                 Ok(handle)
             }
@@ -1834,7 +2126,10 @@ impl<'a> HostSession<'a> {
 
     /// Block definition operations: create from entities, modify settings,
     /// rename (inserts follow) and delete an unreferenced definition.
-    fn block_operation(&mut self, operation: ocs_plugin_api::host::TableOperation) -> Result<Handle, String> {
+    fn block_operation(
+        &mut self,
+        operation: ocs_plugin_api::host::TableOperation,
+    ) -> Result<Handle, String> {
         use codec::entities::EntityType as E;
         use ocs_plugin_api::host::TableOperation;
         let editable_block = |doc: &CadDocument, name: &str| -> Result<(String, Handle), String> {
@@ -1842,13 +2137,27 @@ impl<'a> HostSession<'a> {
                 .block_records
                 .get(name)
                 .ok_or_else(|| format!("block {name:?} does not exist"))?;
-            if record.is_layout() || record.is_anonymous() || record.flags.is_xref || record.flags.is_xref_overlay || record.name.contains('|') {
-                return Err(format!("block {:?} is a layout, anonymous or externally referenced block", record.name));
+            if record.is_layout()
+                || record.is_anonymous()
+                || record.flags.is_xref
+                || record.flags.is_xref_overlay
+                || record.name.contains('|')
+            {
+                return Err(format!(
+                    "block {:?} is a layout, anonymous or externally referenced block",
+                    record.name
+                ));
             }
             Ok((record.name.clone(), record.handle))
         };
         match operation {
-            TableOperation::BlockCreate { name, entities, base_point, erase_originals, description } => {
+            TableOperation::BlockCreate {
+                name,
+                entities,
+                base_point,
+                erase_originals,
+                description,
+            } => {
                 let name = validated_symbol_name(&name, "a block name")?;
                 if name.starts_with('*') {
                     return Err("a block name cannot start with '*'".to_owned());
@@ -1879,16 +2188,31 @@ impl<'a> HostSession<'a> {
                         .iter()
                         .any(|record| record.handle == owner && record.is_layout());
                     if !in_canvas {
-                        return Err(format!("entity {} is not in model or paper space", handle.value()));
+                        return Err(format!(
+                            "entity {} is not in model or paper space",
+                            handle.value()
+                        ));
                     }
-                    if matches!(entity, E::Viewport(_) | E::Block(_) | E::BlockEnd(_) | E::AttributeEntity(_) | E::Unknown(_)) {
-                        return Err(format!("entity {} of this kind cannot be placed in a block", handle.value()));
+                    if matches!(
+                        entity,
+                        E::Viewport(_)
+                            | E::Block(_)
+                            | E::BlockEnd(_)
+                            | E::AttributeEntity(_)
+                            | E::Unknown(_)
+                    ) {
+                        return Err(format!(
+                            "entity {} of this kind cannot be placed in a block",
+                            handle.value()
+                        ));
                     }
                     sources.push(entity.clone());
                 }
                 if let Some(text) = &description {
                     if text.chars().any(|c| c.is_control() && c != '\n') {
-                        return Err("a block description cannot contain control characters".to_owned());
+                        return Err(
+                            "a block description cannot contain control characters".to_owned()
+                        );
                     }
                 }
                 self.push_undo("Create block");
@@ -1898,15 +2222,21 @@ impl<'a> HostSession<'a> {
                     .define_block_from_owned_entities(sources, &name, base)?;
                 let (stored, handle) = editable_block(self.document(), &name)?;
                 if let Some(record) = self.document_mut().block_records.get_mut(&stored) {
-                    record.base_point = codec::types::Vector3::new(base_point[0], base_point[1], base_point[2]);
+                    record.base_point =
+                        codec::types::Vector3::new(base_point[0], base_point[1], base_point[2]);
                     if let Some(text) = description {
                         record.description = text;
                     }
                 }
-                let marker = self.document().block_records.get(&stored).map(|r| r.block_entity_handle);
+                let marker = self
+                    .document()
+                    .block_records
+                    .get(&stored)
+                    .map(|r| r.block_entity_handle);
                 if let Some(marker) = marker {
                     if let Some(E::Block(block)) = self.document_mut().get_entity_mut(marker) {
-                        block.base_point = codec::types::Vector3::new(base_point[0], base_point[1], base_point[2]);
+                        block.base_point =
+                            codec::types::Vector3::new(base_point[0], base_point[1], base_point[2]);
                     }
                 }
                 if erase_originals {
@@ -1919,22 +2249,45 @@ impl<'a> HostSession<'a> {
                 let (name, record_handle) = editable_block(self.document(), block.trim())?;
                 if matches!(
                     entity,
-                    E::Viewport(_) | E::Block(_) | E::BlockEnd(_) | E::AttributeEntity(_) | E::Unknown(_) | E::RasterImage(_)
+                    E::Viewport(_)
+                        | E::Block(_)
+                        | E::BlockEnd(_)
+                        | E::AttributeEntity(_)
+                        | E::Unknown(_)
+                        | E::RasterImage(_)
                 ) {
-                    return Err("an entity of this kind cannot be added to a block from a script".to_owned());
+                    return Err(
+                        "an entity of this kind cannot be added to a block from a script"
+                            .to_owned(),
+                    );
                 }
                 if self.app.tabs[self.tab].scene.block_edit_block.is_some() {
-                    return Err("finish the open block editor before adding entities to a block".to_owned());
+                    return Err(
+                        "finish the open block editor before adding entities to a block".to_owned(),
+                    );
                 }
                 if let E::Insert(insert) = &entity {
-                    if insert.block_name.eq_ignore_ascii_case(&name) || block_nests(self.document(), &insert.block_name, &name, 0) {
-                        return Err(format!("inserting {:?} into {name:?} would nest a block inside itself", insert.block_name));
+                    if insert.block_name.eq_ignore_ascii_case(&name)
+                        || block_nests(self.document(), &insert.block_name, &name, 0)
+                    {
+                        return Err(format!(
+                            "inserting {:?} into {name:?} would nest a block inside itself",
+                            insert.block_name
+                        ));
                     }
                 }
                 entity.common_mut().owner_handle = record_handle;
                 ocs_plugin_api::entity_coverage::validate_new_canvas_entity(&entity)?;
-                ocs_plugin_api::entity_coverage::bind_canvas_entity_references(self.document(), &mut entity)?;
-                if self.document().layers.get(&entity.common().layer).is_some_and(|layer| layer.is_locked()) {
+                ocs_plugin_api::entity_coverage::bind_canvas_entity_references(
+                    self.document(),
+                    &mut entity,
+                )?;
+                if self
+                    .document()
+                    .layers
+                    .get(&entity.common().layer)
+                    .is_some_and(|layer| layer.is_locked())
+                {
                     return Err(format!("layer {:?} is locked", entity.common().layer));
                 }
                 self.push_undo("Add to block");
@@ -1951,14 +2304,21 @@ impl<'a> HostSession<'a> {
                 self.finish_block_change();
                 Ok(handle)
             }
-            TableOperation::BlockModify { name, description, explodable, scale_uniformly } => {
+            TableOperation::BlockModify {
+                name,
+                description,
+                explodable,
+                scale_uniformly,
+            } => {
                 let (name, handle) = editable_block(self.document(), name.trim())?;
                 if description.is_none() && explodable.is_none() && scale_uniformly.is_none() {
                     return Err("no block properties to change".to_owned());
                 }
                 if let Some(text) = &description {
                     if text.chars().any(|c| c.is_control() && c != '\n') {
-                        return Err("a block description cannot contain control characters".to_owned());
+                        return Err(
+                            "a block description cannot contain control characters".to_owned()
+                        );
                     }
                 }
                 self.push_undo("Modify block");
@@ -2009,7 +2369,9 @@ impl<'a> HostSession<'a> {
                     [style.dimblk, style.dimblk1, style.dimblk2, style.dimldrblk].contains(&handle)
                 });
                 if referenced {
-                    return Err(format!("block {name:?} is still inserted or used by a style or leader"));
+                    return Err(format!(
+                        "block {name:?} is still inserted or used by a style or leader"
+                    ));
                 }
                 let members: Vec<Handle> = {
                     let record = doc.block_records.get(&name).expect("checked above");
@@ -2025,11 +2387,16 @@ impl<'a> HostSession<'a> {
                 }
                 doc.block_records.remove(&name);
                 let orphans: Vec<Handle> = {
-                    let live: std::collections::HashSet<Handle> = doc.block_records.iter().map(|r| r.handle).collect();
+                    let live: std::collections::HashSet<Handle> =
+                        doc.block_records.iter().map(|r| r.handle).collect();
                     doc.objects
                         .iter()
                         .filter_map(|(h, object)| match object {
-                            codec::objects::ObjectType::SortEntitiesTable(table) if !live.contains(&table.block_owner_handle) => Some(*h),
+                            codec::objects::ObjectType::SortEntitiesTable(table)
+                                if !live.contains(&table.block_owner_handle) =>
+                            {
+                                Some(*h)
+                            }
                             _ => None,
                         })
                         .collect()
@@ -2054,25 +2421,41 @@ impl<'a> HostSession<'a> {
     /// Text and dimension style operations. They act on the active document
     /// because the shared style machinery (in-use scan, rename, ribbon sync) is
     /// keyed by the active tab.
-    fn style_operation(&mut self, operation: ocs_plugin_api::host::TableOperation) -> Result<Handle, String> {
+    fn style_operation(
+        &mut self,
+        operation: ocs_plugin_api::host::TableOperation,
+    ) -> Result<Handle, String> {
         use crate::app::style_ops::StyleKind;
         use ocs_plugin_api::host::{TableOperation, TableStyleKind};
         if self.tab != self.app.active_tab {
-            return Err("style operations act on the active document; switch to it first".to_owned());
+            return Err(
+                "style operations act on the active document; switch to it first".to_owned(),
+            );
         }
         let kind_of = |kind: TableStyleKind| match kind {
             TableStyleKind::Text => StyleKind::Text,
             TableStyleKind::Dim => StyleKind::Dim,
         };
-        let stored = |doc: &CadDocument, kind: TableStyleKind, name: &str| -> Result<(String, Handle), String> {
+        let stored = |doc: &CadDocument,
+                      kind: TableStyleKind,
+                      name: &str|
+         -> Result<(String, Handle), String> {
             let found = match kind {
-                TableStyleKind::Text => doc.text_styles.get(name).map(|s| (s.name.clone(), s.handle)),
+                TableStyleKind::Text => doc
+                    .text_styles
+                    .get(name)
+                    .map(|s| (s.name.clone(), s.handle)),
                 TableStyleKind::Dim => doc.dim_styles.get(name).map(|s| (s.name.clone(), s.handle)),
             };
-            found.ok_or_else(|| format!("{} style {name:?} does not exist", match kind {
-                TableStyleKind::Text => "text",
-                TableStyleKind::Dim => "dimension",
-            }))
+            found.ok_or_else(|| {
+                format!(
+                    "{} style {name:?} does not exist",
+                    match kind {
+                        TableStyleKind::Text => "text",
+                        TableStyleKind::Dim => "dimension",
+                    }
+                )
+            })
         };
         match operation {
             TableOperation::TextStyleCreate { config } => {
@@ -2085,15 +2468,29 @@ impl<'a> HostSession<'a> {
                 self.push_undo("Create text style");
                 let handle = self.document_mut().allocate_handle();
                 style.handle = handle;
-                self.document_mut().text_styles.add(style).map_err(|e| format!("the text style could not be created: {e}"))?;
+                self.document_mut()
+                    .text_styles
+                    .add(style)
+                    .map_err(|e| format!("the text style could not be created: {e}"))?;
                 self.finish_style_change(StyleKind::Text);
                 Ok(handle)
             }
             TableOperation::TextStyleModify { config } => {
-                let (name, handle) = stored(self.document(), TableStyleKind::Text, config.name.trim())?;
-                let mut style = self.document().text_styles.get(&name).cloned().expect("checked above");
+                let (name, handle) =
+                    stored(self.document(), TableStyleKind::Text, config.name.trim())?;
+                let mut style = self
+                    .document()
+                    .text_styles
+                    .get(&name)
+                    .cloned()
+                    .expect("checked above");
                 let before = style.clone();
-                if config == (ocs_plugin_api::host::TextStyleConfig { name: config.name.clone(), ..Default::default() }) {
+                if config
+                    == (ocs_plugin_api::host::TextStyleConfig {
+                        name: config.name.clone(),
+                        ..Default::default()
+                    })
+                {
                     return Err("no text style properties to change".to_owned());
                 }
                 apply_text_style_config(&mut style, &config)?;
@@ -2107,15 +2504,24 @@ impl<'a> HostSession<'a> {
                 self.finish_style_change(StyleKind::Text);
                 Ok(handle)
             }
-            TableOperation::DimStyleCreate { name, copy_from, properties } => {
+            TableOperation::DimStyleCreate {
+                name,
+                copy_from,
+                properties,
+            } => {
                 let name = validated_symbol_name(&name, "a dimension style name")?;
                 if self.app.style_exists(StyleKind::Dim, &name) {
                     return Err(format!("dimension style {name:?} already exists"));
                 }
                 let base = match &copy_from {
                     Some(source) => {
-                        let (source, _) = stored(self.document(), TableStyleKind::Dim, source.trim())?;
-                        self.document().dim_styles.get(&source).cloned().expect("checked above")
+                        let (source, _) =
+                            stored(self.document(), TableStyleKind::Dim, source.trim())?;
+                        self.document()
+                            .dim_styles
+                            .get(&source)
+                            .cloned()
+                            .expect("checked above")
                     }
                     None => codec::tables::DimStyle::new(name.clone()),
                 };
@@ -2124,13 +2530,21 @@ impl<'a> HostSession<'a> {
                 let handle = self.document_mut().allocate_handle();
                 style.handle = handle;
                 style.name = name;
-                self.document_mut().dim_styles.add(style).map_err(|e| format!("the dimension style could not be created: {e}"))?;
+                self.document_mut()
+                    .dim_styles
+                    .add(style)
+                    .map_err(|e| format!("the dimension style could not be created: {e}"))?;
                 self.finish_style_change(StyleKind::Dim);
                 Ok(handle)
             }
             TableOperation::DimStyleModify { name, properties } => {
                 let (name, handle) = stored(self.document(), TableStyleKind::Dim, name.trim())?;
-                let base = self.document().dim_styles.get(&name).cloned().expect("checked above");
+                let base = self
+                    .document()
+                    .dim_styles
+                    .get(&name)
+                    .cloned()
+                    .expect("checked above");
                 let style = apply_dim_style_json(self.document(), &base, &properties)?;
                 if style == base {
                     return Ok(handle);
@@ -2156,14 +2570,7 @@ impl<'a> HostSession<'a> {
                 }
                 self.push_undo("Rename style");
                 self.app.rename_style_storage(kind_of(kind), &from, &to);
-                if kind == TableStyleKind::Text {
-                    // A dimension style names its text style; follow the rename.
-                    for dim in self.document_mut().dim_styles.iter_mut() {
-                        if dim.dimtxsty.eq_ignore_ascii_case(&from) {
-                            dim.dimtxsty = to.clone();
-                        }
-                    }
-                }
+                // dimtxsty follow lives in rename_style_storage (#42).
                 self.finish_style_change(kind_of(kind));
                 Ok(handle)
             }
@@ -2213,7 +2620,9 @@ impl<'a> HostSession<'a> {
 
     fn finish_layer_change(&mut self, names: &[String]) {
         self.app.tabs[self.tab].dirty = true;
-        self.app.tabs[self.tab].scene.invalidate_layer_dependencies(names);
+        self.app.tabs[self.tab]
+            .scene
+            .invalidate_layer_dependencies(names);
         self.app.refresh_layer_panel();
         self.publish_document_view();
     }
@@ -2352,8 +2761,7 @@ impl<'a> HostSession<'a> {
         self.app.suppress_plugin_dispatch = true;
         let task = if self.app.tabs[tab].active_cmd.is_some() {
             // A running command owns these tokens: they answer its prompts.
-            let mut queue: Vec<String> =
-                trimmed.split_whitespace().map(str::to_string).collect();
+            let mut queue: Vec<String> = trimmed.split_whitespace().map(str::to_string).collect();
             if has_newline {
                 queue.push("ENTER".to_string());
             }
@@ -2379,12 +2787,17 @@ fn block_nests(doc: &CadDocument, outer: &str, target: &str, depth: usize) -> bo
     let Some(record) = doc.block_records.get(outer) else {
         return false;
     };
-    record.entity_handles.iter().filter_map(|h| doc.get_entity(*h)).any(|entity| match entity {
-        EntityType::Insert(insert) => {
-            insert.block_name.eq_ignore_ascii_case(target) || block_nests(doc, &insert.block_name, target, depth + 1)
-        }
-        _ => false,
-    })
+    record
+        .entity_handles
+        .iter()
+        .filter_map(|h| doc.get_entity(*h))
+        .any(|entity| match entity {
+            EntityType::Insert(insert) => {
+                insert.block_name.eq_ignore_ascii_case(target)
+                    || block_nests(doc, &insert.block_name, target, depth + 1)
+            }
+            _ => false,
+        })
 }
 
 /// A layer name AutoCAD would accept: 1-255 characters, none of `<>/\":;?*|=\``.
@@ -2402,7 +2815,10 @@ fn validated_symbol_name(raw: &str, what: &str) -> Result<String, String> {
     if name.chars().count() > 255 {
         return Err(format!("{what} is limited to 255 characters"));
     }
-    if let Some(bad) = name.chars().find(|c| "<>/\\\":;?*|=`".contains(*c) || c.is_control()) {
+    if let Some(bad) = name
+        .chars()
+        .find(|c| "<>/\\\":;?*|=`".contains(*c) || c.is_control())
+    {
         return Err(format!("{what} cannot contain {bad:?}"));
     }
     Ok(name.to_owned())
@@ -2421,13 +2837,17 @@ fn apply_text_style_config(
     };
     if let Some(height) = config.height {
         if !height.is_finite() || height < 0.0 {
-            return Err("text style height must be finite and not negative (0 = variable)".to_owned());
+            return Err(
+                "text style height must be finite and not negative (0 = variable)".to_owned(),
+            );
         }
         style.height = height;
     }
     if let Some(width) = config.width_factor {
         if !width.is_finite() || width <= 0.0 || width > 100.0 {
-            return Err("text style width factor must be greater than 0 and at most 100".to_owned());
+            return Err(
+                "text style width factor must be greater than 0 and at most 100".to_owned(),
+            );
         }
         style.width_factor = width;
     }
@@ -2479,18 +2899,23 @@ fn apply_dim_style_json(
         return Err("dimension style properties must be an object".to_owned());
     };
     let mut value = serde_json::to_value(base).map_err(|e| e.to_string())?;
-    let object = value.as_object_mut().ok_or("dimension style did not serialize to an object")?;
+    let object = value
+        .as_object_mut()
+        .ok_or("dimension style did not serialize to an object")?;
     for (key, new) in patch {
-        if key == "handle" || key == "name" || key.starts_with("xref_") || key.ends_with("_handle") {
-            return Err(format!("dimension style property {key:?} is managed by the host"));
+        if key == "handle" || key == "name" || key.starts_with("xref_") || key.ends_with("_handle")
+        {
+            return Err(format!(
+                "dimension style property {key:?} is managed by the host"
+            ));
         }
         if !object.contains_key(&key) {
             return Err(format!("unknown dimension style property {key:?}"));
         }
         object.insert(key, new);
     }
-    let mut style: codec::tables::DimStyle = serde_json::from_value(value)
-        .map_err(|e| format!("invalid dimension style value: {e}"))?;
+    let mut style: codec::tables::DimStyle =
+        serde_json::from_value(value).map_err(|e| format!("invalid dimension style value: {e}"))?;
     if !(style.dimscale.is_finite() && style.dimscale > 0.0) {
         return Err("dimscale must be greater than zero".to_owned());
     }
@@ -2501,7 +2926,10 @@ fn apply_dim_style_json(
         return Err("dimasz (arrow size) cannot be negative".to_owned());
     }
     let Some(text_style) = doc.text_styles.get(&style.dimtxsty) else {
-        return Err(format!("dimtxsty {:?} is not a text style in this drawing", style.dimtxsty));
+        return Err(format!(
+            "dimtxsty {:?} is not a text style in this drawing",
+            style.dimtxsty
+        ));
     };
     style.dimtxsty = text_style.name.clone();
     style.dimtxsty_handle = text_style.handle;
@@ -2612,12 +3040,14 @@ impl HostApi for HostSession<'_> {
         &mut self,
         plugin_id: &'static str,
         init: &mut dyn FnMut() -> Box<dyn Any + Send + Sync>,
-    ) -> &mut (dyn Any + Send + Sync) {
-        self.app.tabs[self.tab]
-            .plugin_state
-            .entry(plugin_id)
-            .or_insert_with(|| init())
-            .as_mut()
+    ) -> Option<&mut (dyn Any + Send + Sync)> {
+        Some(
+            self.app.tabs[self.tab]
+                .plugin_state
+                .entry(plugin_id)
+                .or_insert_with(|| init())
+                .as_mut(),
+        )
     }
     fn document_reader(&self) -> Box<dyn ocs_plugin_api::host::DocumentReader + '_> {
         Box::new(ocs_plugin_api::host::CadDocumentReader(self.document()))
@@ -2658,10 +3088,16 @@ impl HostApi for HostSession<'_> {
     fn execute_command(&mut self, cmd: &str) -> bool {
         self.execute_command(cmd)
     }
-    fn table_operation(&mut self, operation: ocs_plugin_api::host::TableOperation) -> Result<Handle, String> {
+    fn table_operation(
+        &mut self,
+        operation: ocs_plugin_api::host::TableOperation,
+    ) -> Result<Handle, String> {
         self.table_operation(operation)
     }
-    fn run_command(&mut self, request: ocs_plugin_api::host::CommandRequest) -> Result<ocs_plugin_api::host::CommandOutcome, String> {
+    fn run_command(
+        &mut self,
+        request: ocs_plugin_api::host::CommandRequest,
+    ) -> Result<ocs_plugin_api::host::CommandOutcome, String> {
         self.run_command(request)
     }
 }
@@ -2710,9 +3146,13 @@ impl crate::command::CadCommand for PluginInteractiveAdapter {
         .map(plugin_step_to_result)
         .unwrap_or(crate::command::CmdResult::Cancel)
     }
-    fn on_preview_wires(&mut self, pt: glam::DVec3) -> Vec<crate::scene::model::wire_model::WireModel> {
+    fn on_preview_wires(
+        &mut self,
+        pt: glam::DVec3,
+    ) -> Vec<crate::scene::model::wire_model::WireModel> {
         let raw_wires = crate::plugin::guard("InteractiveCommand::on_cursor_move", || {
-            self.inner.on_cursor_move([pt.x as f64, pt.y as f64, pt.z as f64])
+            self.inner
+                .on_cursor_move([pt.x as f64, pt.y as f64, pt.z as f64])
         })
         .unwrap_or_default();
         convert_preview_wires(raw_wires)
@@ -2756,7 +3196,9 @@ impl PluginProcessInteractiveAdapter {
         if !self.is_done {
             self.is_done = true;
             use ocs_plugin_api::ipc::protocol::InteractiveEvent;
-            let _ = self.process.interactive_event(self.command_id, InteractiveEvent::Cancel);
+            let _ = self
+                .process
+                .interactive_event(self.command_id, InteractiveEvent::Cancel);
         }
     }
 }
@@ -2844,7 +3286,10 @@ impl crate::command::CadCommand for PluginProcessInteractiveAdapter {
         self.refresh();
         result
     }
-    fn on_preview_wires(&mut self, pt: glam::DVec3) -> Vec<crate::scene::model::wire_model::WireModel> {
+    fn on_preview_wires(
+        &mut self,
+        pt: glam::DVec3,
+    ) -> Vec<crate::scene::model::wire_model::WireModel> {
         let raw_wires = self
             .process
             .on_cursor_move(self.command_id, [pt.x as f64, pt.y as f64, pt.z as f64])
@@ -2856,8 +3301,8 @@ impl crate::command::CadCommand for PluginProcessInteractiveAdapter {
 fn convert_preview_wires(
     raw_wires: Vec<ocs_plugin_api::host::PreviewWire>,
 ) -> Vec<crate::scene::model::wire_model::WireModel> {
-    use ocs_plugin_api::host::PreviewWire;
     use crate::scene::model::wire_model::{TangentGeom, WireModel};
+    use ocs_plugin_api::host::PreviewWire;
 
     raw_wires
         .into_iter()
@@ -2869,7 +3314,11 @@ fn convert_preview_wires(
                 let c = color.unwrap_or(WireModel::CYAN);
                 Some(WireModel::solid_f64("rubber_band".into(), points, c, false))
             }
-            PreviewWire::Circle { center, radius, color } => {
+            PreviewWire::Circle {
+                center,
+                radius,
+                color,
+            } => {
                 if radius <= 0.0 || !radius.is_finite() {
                     return None;
                 }
@@ -2985,8 +3434,7 @@ mod tests {
             record.block_entity_handle = block_handle;
             record.block_end_handle = block_end_handle;
             host.document_mut().block_records.add(record).unwrap();
-            let mut block =
-                codec::entities::Block::new("TAGBLOCK", codec::types::Vector3::ZERO);
+            let mut block = codec::entities::Block::new("TAGBLOCK", codec::types::Vector3::ZERO);
             block.common.handle = block_handle;
             block.common.owner_handle = record_handle;
             host.document_mut()
@@ -3189,9 +3637,9 @@ mod tests {
         dispatch(
             &mut host,
             concat!(
-            "PY_EVAL ocs.active_document.create_entity('Line',",
-            "start={'x':0.0,'y':0.0,'z':0.0},",
-            "end={'x':1.0,'y':0.0,'z':0.0}).handle"
+                "PY_EVAL ocs.active_document.create_entity('Line',",
+                "start={'x':0.0,'y':0.0,'z':0.0},",
+                "end={'x':1.0,'y':0.0,'z':0.0}).handle"
             ),
         );
         let handles: Vec<_> = host
@@ -3244,8 +3692,7 @@ mod tests {
             matches!(host.document().get_entity(handle), Some(EntityType::Line(line)) if line.end.x == 5.0),
             "rejected batch changed the line"
         );
-        let dwg_bytes =
-            codec::DwgWriter::write_to_vec(host.document()).expect("write edited DWG");
+        let dwg_bytes = codec::DwgWriter::write_to_vec(host.document()).expect("write edited DWG");
         let dwg_doc = codec::DwgReader::from_stream(std::io::Cursor::new(dwg_bytes))
             .read()
             .expect("reopen edited DWG");
@@ -3320,9 +3767,9 @@ mod tests {
         dispatch(
             &mut host,
             concat!(
-            "PY_EVAL ocs.active_document.create_entity('Tolerance',",
-            "insertion_point={'x':1.0,'y':2.0,'z':0.0},",
-            "text='POSITION%%v0.1').handle"
+                "PY_EVAL ocs.active_document.create_entity('Tolerance',",
+                "insertion_point={'x':1.0,'y':2.0,'z':0.0},",
+                "text='POSITION%%v0.1').handle"
             ),
         );
         let handle = host
@@ -3365,13 +3812,13 @@ mod tests {
             &script_path,
             format!(
                 concat!(
-            "doc = ocs.active_document\n",
-            "tolerance = doc.entities[{}]\n",
-            "with doc.transaction('Edit tolerance'):\n",
-            "    tolerance.insertion_point = (4.0, 5.0, 0.0)\n",
-            "    tolerance.direction = (0.0, 1.0, 0.0)\n",
-            "    tolerance.text = 'POSITION%%v0.2'\n",
-            "doc.selection = [tolerance]\n"
+                    "doc = ocs.active_document\n",
+                    "tolerance = doc.entities[{}]\n",
+                    "with doc.transaction('Edit tolerance'):\n",
+                    "    tolerance.insertion_point = (4.0, 5.0, 0.0)\n",
+                    "    tolerance.direction = (0.0, 1.0, 0.0)\n",
+                    "    tolerance.text = 'POSITION%%v0.2'\n",
+                    "doc.selection = [tolerance]\n"
                 ),
                 handle.value()
             ),
@@ -3520,9 +3967,9 @@ mod tests {
         dispatch(
             &mut host,
             concat!(
-            "PY_EVAL ocs.active_document.create_entity('Shape',",
-            "insertion_point={'x':1.0,'y':2.0,'z':0.0},size=2.0,",
-            "shape_name='ARROW',shape_number=1,style_name='TestShapes').handle"
+                "PY_EVAL ocs.active_document.create_entity('Shape',",
+                "insertion_point={'x':1.0,'y':2.0,'z':0.0},size=2.0,",
+                "shape_name='ARROW',shape_number=1,style_name='TestShapes').handle"
             ),
         );
         let handle = host
@@ -3561,14 +4008,14 @@ mod tests {
             &script_path,
             format!(
                 concat!(
-            "doc = ocs.active_document\n",
-            "shape = doc.entities[{}]\n",
-            "with doc.transaction('Edit shape'):\n",
-            "    shape.insertion_point = (4.0, 5.0, 0.0)\n",
-            "    shape.size = 3.0\n",
-            "    shape.rotation = 0.5\n",
-            "    shape.relative_x_scale = 1.5\n",
-            "doc.selection = [shape]\n"
+                    "doc = ocs.active_document\n",
+                    "shape = doc.entities[{}]\n",
+                    "with doc.transaction('Edit shape'):\n",
+                    "    shape.insertion_point = (4.0, 5.0, 0.0)\n",
+                    "    shape.size = 3.0\n",
+                    "    shape.rotation = 0.5\n",
+                    "    shape.relative_x_scale = 1.5\n",
+                    "doc.selection = [shape]\n"
                 ),
                 handle.value()
             ),
@@ -3617,7 +4064,7 @@ mod tests {
         dispatch(
             &mut host,
             &format!(
-            "PY_EVAL ocs.update_many('Reject size', [{{'handle':{},'size':0.0}}])",
+                "PY_EVAL ocs.update_many('Reject size', [{{'handle':{},'size':0.0}}])",
                 handle.value()
             ),
         );
@@ -3625,7 +4072,7 @@ mod tests {
         dispatch(
             &mut host,
             &format!(
-            "PY_EVAL ocs.update_many('Reject style', [{{'handle':{},'style_name':'Missing'}}])",
+                "PY_EVAL ocs.update_many('Reject style', [{{'handle':{},'style_name':'Missing'}}])",
                 handle.value()
             ),
         );
@@ -3716,10 +4163,8 @@ mod tests {
         host.document_mut()
             .add_entity(EntityType::BlockEnd(block_end))
             .unwrap();
-        let insert = codec::entities::Insert::new(
-            "TAGBLOCK",
-            codec::types::Vector3::new(10.0, 0.0, 0.0),
-        );
+        let insert =
+            codec::entities::Insert::new("TAGBLOCK", codec::types::Vector3::new(10.0, 0.0, 0.0));
         let insert_handle = host
             .document_mut()
             .add_entity(EntityType::Insert(insert))
@@ -3740,9 +4185,9 @@ mod tests {
             &mut host,
             &format!(
                 concat!(
-            "PY_EVAL ocs.active_document.create_entity('AttributeDefinition',",
-            "owner_handle={},tag='PART_NO',prompt='Part number',default_value='PN-001',",
-            "insertion_point={{'x':1.0,'y':2.0,'z':0.0}},height=2.5).handle"
+                    "PY_EVAL ocs.active_document.create_entity('AttributeDefinition',",
+                    "owner_handle={},tag='PART_NO',prompt='Part number',default_value='PN-001',",
+                    "insertion_point={{'x':1.0,'y':2.0,'z':0.0}},height=2.5).handle"
                 ),
                 block_record_handle.value()
             ),
@@ -3786,14 +4231,14 @@ mod tests {
             &script_path,
             format!(
                 concat!(
-            "doc = ocs.active_document\n",
-            "definition = doc.entities[{}]\n",
-            "with doc.transaction('Edit attribute definition'):\n",
-            "    definition.insertion_point = (4.0, 5.0, 0.0)\n",
-            "    definition.default_value = 'PN-002'\n",
-            "    definition.rotation = 0.25\n",
-            "    definition.width_factor = 1.25\n",
-            "doc.selection = [definition]\n"
+                    "doc = ocs.active_document\n",
+                    "definition = doc.entities[{}]\n",
+                    "with doc.transaction('Edit attribute definition'):\n",
+                    "    definition.insertion_point = (4.0, 5.0, 0.0)\n",
+                    "    definition.default_value = 'PN-002'\n",
+                    "    definition.rotation = 0.25\n",
+                    "    definition.width_factor = 1.25\n",
+                    "doc.selection = [definition]\n"
                 ),
                 handle.value()
             ),
@@ -4209,9 +4654,12 @@ mod tests {
         )
         .unwrap();
         let dispatch = |host: &mut HostSession<'_>, command: &str| {
-            assert!(process.dispatch(host, command, &mut |_| {}).expect("Python dispatch"));
+            assert!(process
+                .dispatch(host, command, &mut |_| {})
+                .expect("Python dispatch"));
         };
-        let script = std::env::temp_dir().join(format!("ocs_hatch_create_{}.py", std::process::id()));
+        let script =
+            std::env::temp_dir().join(format!("ocs_hatch_create_{}.py", std::process::id()));
         std::fs::write(&script, concat!(
             "def p(x, y): return {'x': x, 'y': y}\n",
             "def boundary(size):\n",
@@ -4223,17 +4671,44 @@ mod tests {
         )).unwrap();
         dispatch(&mut host, &format!("PY_RUN {}", script.display()));
         let _ = std::fs::remove_file(&script);
-        let hatch_handle = host.document().entities().find_map(|entity| match entity {
-            EntityType::Hatch(hatch) => Some(hatch.common.handle),
-            _ => None,
-        }).unwrap_or_else(|| panic!("Python did not create Hatch: {:?}",
-            host.app.command_line.history.last().map(|entry| &entry.text)));
+        let hatch_handle = host
+            .document()
+            .entities()
+            .find_map(|entity| match entity {
+                EntityType::Hatch(hatch) => Some(hatch.common.handle),
+                _ => None,
+            })
+            .unwrap_or_else(|| {
+                panic!(
+                    "Python did not create Hatch: {:?}",
+                    host.app
+                        .command_line
+                        .history
+                        .last()
+                        .map(|entry| &entry.text)
+                )
+            });
         let created = host.document().get_entity(hatch_handle).unwrap().clone();
-        assert!(host.app.tabs[0].scene.hatches.get(&hatch_handle)
+        assert!(host.app.tabs[0]
+            .scene
+            .hatches
+            .get(&hatch_handle)
             .is_some_and(|model| model.boundary.len() >= 4 && model.name == "SOLID"));
-        dispatch(&mut host, &format!(
-            "PY_EVAL ocs.active_document.entities[{}].pattern['name']", hatch_handle.value()));
-        assert!(host.app.command_line.history.last().unwrap().text.contains("SOLID"));
+        dispatch(
+            &mut host,
+            &format!(
+                "PY_EVAL ocs.active_document.entities[{}].pattern['name']",
+                hatch_handle.value()
+            ),
+        );
+        assert!(host
+            .app
+            .command_line
+            .history
+            .last()
+            .unwrap()
+            .text
+            .contains("SOLID"));
 
         let script = std::env::temp_dir().join(format!("ocs_hatch_edit_{}.py", std::process::id()));
         std::fs::write(&script, format!(concat!(
@@ -4256,16 +4731,28 @@ mod tests {
         dispatch(&mut host, &format!("PY_RUN {}", script.display()));
         let _ = std::fs::remove_file(&script);
         let expected = host.document().get_entity(hatch_handle).unwrap().clone();
-        let EntityType::Hatch(edited) = &expected else { unreachable!() };
+        let EntityType::Hatch(edited) = &expected else {
+            unreachable!()
+        };
         assert!(!edited.is_solid);
         assert_eq!(edited.pattern.name, "TEST");
         assert_eq!(edited.pattern.lines.len(), 1);
         assert_eq!(edited.paths[0].edges.len(), 4);
         assert!((edited.pattern_scale - 2.0).abs() < 1e-12);
-        assert_eq!(edited.gradient_color, match &created { EntityType::Hatch(value) => value.gradient_color.clone(), _ => unreachable!() });
+        assert_eq!(
+            edited.gradient_color,
+            match &created {
+                EntityType::Hatch(value) => value.gradient_color.clone(),
+                _ => unreachable!(),
+            }
+        );
         assert_eq!(host.selection(), vec![hatch_handle]);
-        assert!(host.app.tabs[0].scene.hatches.get(&hatch_handle).is_some_and(|model|
-            model.boundary.len() >= 4 && model.name == "TEST"
+        assert!(host.app.tabs[0]
+            .scene
+            .hatches
+            .get(&hatch_handle)
+            .is_some_and(|model| model.boundary.len() >= 4
+                && model.name == "TEST"
                 && matches!(&model.pattern,
                     crate::scene::model::hatch_model::HatchPattern::Pattern(lines)
                         if !lines.is_empty())));
@@ -4284,22 +4771,36 @@ mod tests {
         }
 
         let assert_saved = |document: &CadDocument| {
-            assert!(matches!(document.get_entity(hatch_handle), Some(EntityType::Hatch(hatch))
+            assert!(
+                matches!(document.get_entity(hatch_handle), Some(EntityType::Hatch(hatch))
                 if !hatch.is_solid && hatch.pattern.name == "TEST"
                     && hatch.pattern.lines.len() == 1 && hatch.paths[0].edges.len() == 4
-                    && (hatch.pattern_scale - 2.0).abs() < 1e-12));
+                    && (hatch.pattern_scale - 2.0).abs() < 1e-12)
+            );
         };
-        let reopened_dwg = crate::io::load_bytes("hatch.dwg",
-            codec::DwgWriter::write_to_vec(host.document()).unwrap()).unwrap();
-        let reopened_dxf = crate::io::load_bytes("hatch.dxf",
-            codec::DxfWriter::new(host.document()).write_to_vec().unwrap()).unwrap();
+        let reopened_dwg = crate::io::load_bytes(
+            "hatch.dwg",
+            codec::DwgWriter::write_to_vec(host.document()).unwrap(),
+        )
+        .unwrap();
+        let reopened_dxf = crate::io::load_bytes(
+            "hatch.dxf",
+            codec::DxfWriter::new(host.document())
+                .write_to_vec()
+                .unwrap(),
+        )
+        .unwrap();
         assert_saved(&reopened_dwg);
         assert_saved(&reopened_dxf);
-        for (name, mut document) in [("hatch-reedit.dwg", reopened_dwg),
-            ("hatch-reedit.dxf", reopened_dxf)] {
+        for (name, mut document) in [
+            ("hatch-reedit.dwg", reopened_dwg),
+            ("hatch-reedit.dxf", reopened_dxf),
+        ] {
             let before = document.get_entity(hatch_handle).unwrap().clone();
             let mut after = before.clone();
-            let EntityType::Hatch(hatch) = &mut after else { unreachable!() };
+            let EntityType::Hatch(hatch) = &mut after else {
+                unreachable!()
+            };
             hatch.elevation = 3.0;
             ocs_plugin_api::entity_coverage::validate_entity_mutation(&before, &after).unwrap();
             *document.get_entity_mut(hatch_handle).unwrap() = after;
@@ -4308,30 +4809,62 @@ mod tests {
             } else {
                 codec::DxfWriter::new(&document).write_to_vec().unwrap()
             };
-            assert!(matches!(crate::io::load_bytes(name, bytes).unwrap().get_entity(hatch_handle),
-                Some(EntityType::Hatch(hatch)) if (hatch.elevation - 3.0).abs() < 1e-12));
+            assert!(
+                matches!(crate::io::load_bytes(name, bytes).unwrap().get_entity(hatch_handle),
+                Some(EntityType::Hatch(hatch)) if (hatch.elevation - 3.0).abs() < 1e-12)
+            );
         }
-        dispatch(&mut host, &format!(
-            "PY_EVAL ocs.active_document.delete_entity({})", hatch_handle.value()));
+        dispatch(
+            &mut host,
+            &format!(
+                "PY_EVAL ocs.active_document.delete_entity({})",
+                hatch_handle.value()
+            ),
+        );
         assert!(host.document().get_entity(hatch_handle).is_none());
         for (name, bytes) in [
-            ("hatch-deleted.dwg", codec::DwgWriter::write_to_vec(host.document()).unwrap()),
-            ("hatch-deleted.dxf", codec::DxfWriter::new(host.document()).write_to_vec().unwrap()),
+            (
+                "hatch-deleted.dwg",
+                codec::DwgWriter::write_to_vec(host.document()).unwrap(),
+            ),
+            (
+                "hatch-deleted.dxf",
+                codec::DxfWriter::new(host.document())
+                    .write_to_vec()
+                    .unwrap(),
+            ),
         ] {
-            assert!(crate::io::load_bytes(name, bytes).unwrap().get_entity(hatch_handle).is_none());
+            assert!(crate::io::load_bytes(name, bytes)
+                .unwrap()
+                .get_entity(hatch_handle)
+                .is_none());
         }
         drop(process);
         drop(host);
         app.finish_pending_history(0);
         assert_eq!(app.tabs[0].history.undo_stack.len(), 3);
         app.undo_steps(1);
-        assert_eq!(app.tabs[0].scene.document.get_entity(hatch_handle), Some(&expected));
+        assert_eq!(
+            app.tabs[0].scene.document.get_entity(hatch_handle),
+            Some(&expected)
+        );
         app.undo_steps(1);
-        assert_eq!(app.tabs[0].scene.document.get_entity(hatch_handle), Some(&created));
+        assert_eq!(
+            app.tabs[0].scene.document.get_entity(hatch_handle),
+            Some(&created)
+        );
         app.undo_steps(1);
-        assert!(app.tabs[0].scene.document.get_entity(hatch_handle).is_none());
+        assert!(app.tabs[0]
+            .scene
+            .document
+            .get_entity(hatch_handle)
+            .is_none());
         app.redo_steps(3);
-        assert!(app.tabs[0].scene.document.get_entity(hatch_handle).is_none());
+        assert!(app.tabs[0]
+            .scene
+            .document
+            .get_entity(hatch_handle)
+            .is_none());
     }
 
     #[test]
@@ -4352,48 +4885,83 @@ mod tests {
         )
         .unwrap();
         let dispatch = |host: &mut HostSession<'_>, command: &str| {
-            assert!(process.dispatch(host, command, &mut |_| {}).expect("Python dispatch"));
+            assert!(process
+                .dispatch(host, command, &mut |_| {})
+                .expect("Python dispatch"));
         };
-        let last_output = |host: &HostSession<'_>| host.app.command_line.history.last().unwrap().text.clone();
+        let last_output =
+            |host: &HostSession<'_>| host.app.command_line.history.last().unwrap().text.clone();
 
-        dispatch(&mut host, concat!(
-            "PY_EVAL ocs.active_document.create_entity('Text', text='NOTE', ",
-            "insertion={'x':20.0,'y':10.0,'z':0.0}, height=2.5).handle"
-        ));
-        let text_handle = host.document().entities().find_map(|entity| match entity {
-            EntityType::Text(text) => Some(text.common.handle),
-            _ => None,
-        }).unwrap_or_else(|| panic!("Python did not create Text: {}", last_output(&host)));
-        let script = std::env::temp_dir().join(format!("ocs_leader_create_{}.py", std::process::id()));
-        std::fs::write(&script, format!(concat!(
-            "doc = ocs.active_document\n",
-            "doc.create_entity('Leader', vertices=[{{'x':0.0,'y':0.0,'z':0.0}},",
-            "{{'x':10.0,'y':10.0,'z':0.0}},{{'x':20.0,'y':10.0,'z':0.0}}], ",
-            "annotation_handle={}, hookline_enabled=True)\n"
-        ), text_handle.value())).unwrap();
+        dispatch(
+            &mut host,
+            concat!(
+                "PY_EVAL ocs.active_document.create_entity('Text', text='NOTE', ",
+                "insertion={'x':20.0,'y':10.0,'z':0.0}, height=2.5).handle"
+            ),
+        );
+        let text_handle = host
+            .document()
+            .entities()
+            .find_map(|entity| match entity {
+                EntityType::Text(text) => Some(text.common.handle),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("Python did not create Text: {}", last_output(&host)));
+        let script =
+            std::env::temp_dir().join(format!("ocs_leader_create_{}.py", std::process::id()));
+        std::fs::write(
+            &script,
+            format!(
+                concat!(
+                    "doc = ocs.active_document\n",
+                    "doc.create_entity('Leader', vertices=[{{'x':0.0,'y':0.0,'z':0.0}},",
+                    "{{'x':10.0,'y':10.0,'z':0.0}},{{'x':20.0,'y':10.0,'z':0.0}}], ",
+                    "annotation_handle={}, hookline_enabled=True)\n"
+                ),
+                text_handle.value()
+            ),
+        )
+        .unwrap();
         dispatch(&mut host, &format!("PY_RUN {}", script.display()));
         let _ = std::fs::remove_file(&script);
-        let leader_handle = host.document().entities().find_map(|entity| match entity {
-            EntityType::Leader(leader) => Some(leader.common.handle),
-            _ => None,
-        }).unwrap_or_else(|| panic!("Python did not create Leader: {}", last_output(&host)));
+        let leader_handle = host
+            .document()
+            .entities()
+            .find_map(|entity| match entity {
+                EntityType::Leader(leader) => Some(leader.common.handle),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("Python did not create Leader: {}", last_output(&host)));
         let created = host.document().get_entity(leader_handle).unwrap().clone();
-        let EntityType::Leader(created_leader) = &created else { unreachable!() };
+        let EntityType::Leader(created_leader) = &created else {
+            unreachable!()
+        };
         assert_eq!(created_leader.annotation_handle, text_handle);
         assert_eq!(created_leader.vertices.len(), 3);
 
         let assert_geometry = |entity: &EntityType, document: &CadDocument| {
-            let EntityType::Leader(leader) = entity else { panic!("expected Leader") };
+            let EntityType::Leader(leader) = entity else {
+                panic!("expected Leader")
+            };
             let render = leader.to_render(document).expect("leader render");
-            let crate::scene::convert::acad_to_render::RenderObject::Lines(points) = render.object else {
+            let crate::scene::convert::acad_to_render::RenderObject::Lines(points) = render.object
+            else {
                 panic!("expected leader linework");
             };
             assert!(points.len() >= leader.vertices.len());
-            assert!(points.iter().flatten().all(|value| value.is_nan() || value.is_finite()));
+            assert!(points
+                .iter()
+                .flatten()
+                .all(|value| value.is_nan() || value.is_finite()));
         };
         assert_geometry(&created, host.document());
-        dispatch(&mut host, &format!(
-            "PY_EVAL ocs.active_document.entities[{}].annotation_handle", leader_handle.value()));
+        dispatch(
+            &mut host,
+            &format!(
+                "PY_EVAL ocs.active_document.entities[{}].annotation_handle",
+                leader_handle.value()
+            ),
+        );
         assert!(last_output(&host).contains(&text_handle.value().to_string()));
 
         // GUI picking groups a leader with its annotation, while scripted
@@ -4404,8 +4972,12 @@ mod tests {
         assert_eq!(grouped, vec![text_handle, leader_handle]);
         host.app.tabs[0].scene.replace_selection_exact(&[]);
 
-        let script = std::env::temp_dir().join(format!("ocs_leader_edit_{}.py", std::process::id()));
-        std::fs::write(&script, format!(concat!(
+        let script =
+            std::env::temp_dir().join(format!("ocs_leader_edit_{}.py", std::process::id()));
+        std::fs::write(
+            &script,
+            format!(
+                concat!(
             "doc = ocs.active_document\n",
             "leader = doc.entities[{}]\n",
             "with doc.transaction('Edit leader'):\n",
@@ -4416,108 +4988,188 @@ mod tests {
             "    leader.annotation_offset = (1.0, 2.0, 0.0)\n",
             "    leader.override_color = {{'kind':'Rgb','value':{{'r':255,'g':0,'b':0}}}}\n",
             "doc.selection = [leader]\n"
-        ), leader_handle.value())).unwrap();
+        ),
+                leader_handle.value()
+            ),
+        )
+        .unwrap();
         dispatch(&mut host, &format!("PY_RUN {}", script.display()));
         let _ = std::fs::remove_file(&script);
         let expected = host.document().get_entity(leader_handle).unwrap().clone();
-        let EntityType::Leader(edited) = &expected else { unreachable!() };
-        assert_eq!(edited.vertices.len(), 4, "edit failed: {}", last_output(&host));
+        let EntityType::Leader(edited) = &expected else {
+            unreachable!()
+        };
+        assert_eq!(
+            edited.vertices.len(),
+            4,
+            "edit failed: {}",
+            last_output(&host)
+        );
         assert_eq!(edited.text_height, 4.0);
         assert!(!edited.arrow_enabled);
-        assert_eq!(edited.annotation_offset, codec::types::Vector3::new(1.0, 2.0, 0.0));
+        assert_eq!(
+            edited.annotation_offset,
+            codec::types::Vector3::new(1.0, 2.0, 0.0)
+        );
         assert_eq!(edited.annotation_handle, text_handle);
         assert_eq!(edited.common, created_leader.common);
         assert_eq!(edited.dimension_style, created_leader.dimension_style);
         assert_eq!(edited.hookline_enabled, created_leader.hookline_enabled);
         assert_eq!(edited.normal, created_leader.normal);
         assert_eq!(edited.origin, created_leader.origin);
-        assert_eq!(edited.override_color, codec::types::Color::Rgb { r: 255, g: 0, b: 0 });
+        assert_eq!(
+            edited.override_color,
+            codec::types::Color::Rgb { r: 255, g: 0, b: 0 }
+        );
         assert_eq!(host.selection(), vec![leader_handle]);
         assert_geometry(&expected, host.document());
 
         for (patch, message) in [
             ("'annotation_handle':999999", "does not exist"),
-            ("'creation_type':'WithTolerance'", "does not match creation_type"),
+            (
+                "'creation_type':'WithTolerance'",
+                "does not match creation_type",
+            ),
             ("'creation_type':'NoAnnotation'", "no annotation"),
             ("'vertices':[{'x':0.0,'y':0.0,'z':0.0}]", "at least 2"),
             ("'text_height':0.0", "greater than zero"),
             ("'dimension_style':'Missing'", "dimension style"),
             ("'override_color':{'kind':'Index','value':300}", "Color"),
         ] {
-            dispatch(&mut host, &format!(
-                "PY_EVAL ocs.update_many('Reject leader', [{{'handle':{}, {patch}}}])",
-                leader_handle.value()));
-            assert_eq!(host.document().get_entity(leader_handle), Some(&expected), "{patch}");
-            assert!(last_output(&host).contains(message), "{patch}: {}", last_output(&host));
+            dispatch(
+                &mut host,
+                &format!(
+                    "PY_EVAL ocs.update_many('Reject leader', [{{'handle':{}, {patch}}}])",
+                    leader_handle.value()
+                ),
+            );
+            assert_eq!(
+                host.document().get_entity(leader_handle),
+                Some(&expected),
+                "{patch}"
+            );
+            assert!(
+                last_output(&host).contains(message),
+                "{patch}: {}",
+                last_output(&host)
+            );
         }
         // A valid edit paired with an invalid one is atomic across entities.
-        dispatch(&mut host, &format!(concat!(
-            "PY_EVAL ocs.update_many('Atomic', [{{'handle':{},'text_width':5.0}},",
-            "{{'handle':{},'text_height':0.0}}])"
-        ), leader_handle.value(), text_handle.value()));
+        dispatch(
+            &mut host,
+            &format!(
+                concat!(
+                    "PY_EVAL ocs.update_many('Atomic', [{{'handle':{},'text_width':5.0}},",
+                    "{{'handle':{},'text_height':0.0}}])"
+                ),
+                leader_handle.value(),
+                text_handle.value()
+            ),
+        );
         assert_eq!(host.document().get_entity(leader_handle), Some(&expected));
 
         // Both formats keep the path, annotation link, arrow flag and offset.
         // DWG R2010+ derives text_height/text_width/hookline_enabled instead of
         // storing them (opencadcodec writes them for R13-R2007/R13-R14 only), so
         // only DXF must round-trip those three.
-        let assert_saved = |document: &CadDocument, is_dxf: bool| {
-            let Some(EntityType::Leader(leader)) = document.get_entity(leader_handle) else {
-                panic!("Leader missing after reopen");
-            };
-            assert_eq!(leader.vertices.len(), 4);
-            assert_eq!(leader.annotation_handle, text_handle);
-            assert!(!leader.arrow_enabled);
-            // The script sets a true colour. DXF's LEADER group 77 holds an ACI
-            // index only, so it cannot carry one, and the DWG writer does not
-            // store `override_color` at all (BLOCKER, opencadcodec): it reopens as
-            // ByLayer in both formats.
-            assert_eq!(leader.override_color, codec::types::Color::ByLayer,
+        let assert_saved =
+            |document: &CadDocument, is_dxf: bool| {
+                let Some(EntityType::Leader(leader)) = document.get_entity(leader_handle) else {
+                    panic!("Leader missing after reopen");
+                };
+                assert_eq!(leader.vertices.len(), 4);
+                assert_eq!(leader.annotation_handle, text_handle);
+                assert!(!leader.arrow_enabled);
+                // The script sets a true colour. DXF's LEADER group 77 holds an ACI
+                // index only, so it cannot carry one, and the DWG writer does not
+                // store `override_color` at all (BLOCKER, opencadcodec): it reopens as
+                // ByLayer in both formats.
+                assert_eq!(leader.override_color, codec::types::Color::ByLayer,
                 "opencadcodec now persists a true-colour Leader.override_color; drop the blocker");
-            assert_eq!(leader.annotation_offset, codec::types::Vector3::new(1.0, 2.0, 0.0));
-            assert_eq!(leader.dimension_style, "Standard");
-            if is_dxf {
-                assert!((leader.text_height - 4.0).abs() < 1e-12);
-                assert!(leader.hookline_enabled);
-            } else {
-                assert_eq!(leader.text_height, 2.5, "DWG R2010+ does not store text_height");
-                assert!(!leader.hookline_enabled, "DWG R2010+ does not store hookline_enabled");
-            }
-            assert!(matches!(document.get_entity(text_handle), Some(EntityType::Text(_))));
-        };
-        let reopened_dwg = crate::io::load_bytes("leader.dwg",
-            codec::DwgWriter::write_to_vec(host.document()).unwrap()).unwrap();
-        let reopened_dxf = crate::io::load_bytes("leader.dxf",
-            codec::DxfWriter::new(host.document()).write_to_vec().unwrap()).unwrap();
+                assert_eq!(
+                    leader.annotation_offset,
+                    codec::types::Vector3::new(1.0, 2.0, 0.0)
+                );
+                assert_eq!(leader.dimension_style, "Standard");
+                if is_dxf {
+                    assert!((leader.text_height - 4.0).abs() < 1e-12);
+                    assert!(leader.hookline_enabled);
+                } else {
+                    assert_eq!(
+                        leader.text_height, 2.5,
+                        "DWG R2010+ does not store text_height"
+                    );
+                    assert!(
+                        !leader.hookline_enabled,
+                        "DWG R2010+ does not store hookline_enabled"
+                    );
+                }
+                assert!(matches!(
+                    document.get_entity(text_handle),
+                    Some(EntityType::Text(_))
+                ));
+            };
+        let reopened_dwg = crate::io::load_bytes(
+            "leader.dwg",
+            codec::DwgWriter::write_to_vec(host.document()).unwrap(),
+        )
+        .unwrap();
+        let reopened_dxf = crate::io::load_bytes(
+            "leader.dxf",
+            codec::DxfWriter::new(host.document())
+                .write_to_vec()
+                .unwrap(),
+        )
+        .unwrap();
         assert_saved(&reopened_dwg, false);
         assert_saved(&reopened_dxf, true);
-        for (name, mut document) in [("leader-reedit.dwg", reopened_dwg),
-            ("leader-reedit.dxf", reopened_dxf)] {
+        for (name, mut document) in [
+            ("leader-reedit.dwg", reopened_dwg),
+            ("leader-reedit.dxf", reopened_dxf),
+        ] {
             assert_geometry(document.get_entity(leader_handle).unwrap(), &document);
             let before = document.get_entity(leader_handle).unwrap().clone();
             let mut after = before.clone();
-            let EntityType::Leader(leader) = &mut after else { unreachable!() };
+            let EntityType::Leader(leader) = &mut after else {
+                unreachable!()
+            };
             leader.vertices[3] = codec::types::Vector3::new(35.0, 12.0, 0.0);
             ocs_plugin_api::entity_coverage::validate_entity_mutation(&before, &after).unwrap();
-            ocs_plugin_api::entity_coverage::validate_canvas_entity_references(&document, &after).unwrap();
+            ocs_plugin_api::entity_coverage::validate_canvas_entity_references(&document, &after)
+                .unwrap();
             *document.get_entity_mut(leader_handle).unwrap() = after;
             let bytes = if name.ends_with("dwg") {
                 codec::DwgWriter::write_to_vec(&document).unwrap()
             } else {
                 codec::DxfWriter::new(&document).write_to_vec().unwrap()
             };
-            assert!(matches!(crate::io::load_bytes(name, bytes).unwrap().get_entity(leader_handle),
-                Some(EntityType::Leader(leader)) if (leader.vertices[3].x - 35.0).abs() < 1e-9));
+            assert!(
+                matches!(crate::io::load_bytes(name, bytes).unwrap().get_entity(leader_handle),
+                Some(EntityType::Leader(leader)) if (leader.vertices[3].x - 35.0).abs() < 1e-9)
+            );
         }
 
         // Erasing a leader also erases its annotation (scene leader grouping).
-        dispatch(&mut host, &format!(
-            "PY_EVAL ocs.active_document.delete_entity({})", leader_handle.value()));
+        dispatch(
+            &mut host,
+            &format!(
+                "PY_EVAL ocs.active_document.delete_entity({})",
+                leader_handle.value()
+            ),
+        );
         assert!(host.document().get_entity(leader_handle).is_none());
         assert!(host.document().get_entity(text_handle).is_none());
         for (name, bytes) in [
-            ("leader-deleted.dwg", codec::DwgWriter::write_to_vec(host.document()).unwrap()),
-            ("leader-deleted.dxf", codec::DxfWriter::new(host.document()).write_to_vec().unwrap()),
+            (
+                "leader-deleted.dwg",
+                codec::DwgWriter::write_to_vec(host.document()).unwrap(),
+            ),
+            (
+                "leader-deleted.dxf",
+                codec::DxfWriter::new(host.document())
+                    .write_to_vec()
+                    .unwrap(),
+            ),
         ] {
             let document = crate::io::load_bytes(name, bytes).unwrap();
             assert!(document.get_entity(leader_handle).is_none());
@@ -4529,17 +5181,31 @@ mod tests {
         // Text create, Leader create, edit transaction, Leader delete.
         assert_eq!(app.tabs[0].history.undo_stack.len(), 4);
         app.undo_steps(1);
-        assert_eq!(app.tabs[0].scene.document.get_entity(leader_handle), Some(&expected));
+        assert_eq!(
+            app.tabs[0].scene.document.get_entity(leader_handle),
+            Some(&expected)
+        );
         assert!(app.tabs[0].scene.document.get_entity(text_handle).is_some());
         app.undo_steps(1);
-        assert_eq!(app.tabs[0].scene.document.get_entity(leader_handle), Some(&created));
+        assert_eq!(
+            app.tabs[0].scene.document.get_entity(leader_handle),
+            Some(&created)
+        );
         app.undo_steps(1);
-        assert!(app.tabs[0].scene.document.get_entity(leader_handle).is_none());
+        assert!(app.tabs[0]
+            .scene
+            .document
+            .get_entity(leader_handle)
+            .is_none());
         assert!(app.tabs[0].scene.document.get_entity(text_handle).is_some());
         app.undo_steps(1);
         assert!(app.tabs[0].scene.document.get_entity(text_handle).is_none());
         app.redo_steps(4);
-        assert!(app.tabs[0].scene.document.get_entity(leader_handle).is_none());
+        assert!(app.tabs[0]
+            .scene
+            .document
+            .get_entity(leader_handle)
+            .is_none());
         assert!(app.tabs[0].scene.document.get_entity(text_handle).is_none());
     }
 
@@ -4561,65 +5227,114 @@ mod tests {
         )
         .unwrap();
         let dispatch = |host: &mut HostSession<'_>, command: &str| {
-            assert!(process.dispatch(host, command, &mut |_| {}).expect("Python dispatch"));
+            assert!(process
+                .dispatch(host, command, &mut |_| {})
+                .expect("Python dispatch"));
         };
-        let last_output = |host: &HostSession<'_>| host.app.command_line.history.last().unwrap().text.clone();
-        let style_handle = host.document().objects.iter().find_map(|(handle, object)| match object {
-            codec::objects::ObjectType::MLineStyle(style) if style.name == "Standard" => Some(*handle),
-            _ => None,
-        }).expect("document carries the Standard MLineStyle");
+        let last_output =
+            |host: &HostSession<'_>| host.app.command_line.history.last().unwrap().text.clone();
+        let style_handle = host
+            .document()
+            .objects
+            .iter()
+            .find_map(|(handle, object)| match object {
+                codec::objects::ObjectType::MLineStyle(style) if style.name == "Standard" => {
+                    Some(*handle)
+                }
+                _ => None,
+            })
+            .expect("document carries the Standard MLineStyle");
 
-        let script = std::env::temp_dir().join(format!("ocs_mline_create_{}.py", std::process::id()));
-        std::fs::write(&script, concat!(
-            "def p(x, y): return {'position': {'x': x, 'y': y, 'z': 0.0}}\n",
-            "doc = ocs.active_document\n",
-            "doc.create_entity('MLine', vertices=[p(0.0, 0.0), p(10.0, 0.0)])\n",
-        )).unwrap();
+        let script =
+            std::env::temp_dir().join(format!("ocs_mline_create_{}.py", std::process::id()));
+        std::fs::write(
+            &script,
+            concat!(
+                "def p(x, y): return {'position': {'x': x, 'y': y, 'z': 0.0}}\n",
+                "doc = ocs.active_document\n",
+                "doc.create_entity('MLine', vertices=[p(0.0, 0.0), p(10.0, 0.0)])\n",
+            ),
+        )
+        .unwrap();
         dispatch(&mut host, &format!("PY_RUN {}", script.display()));
         let _ = std::fs::remove_file(&script);
-        let handle = host.document().entities().find_map(|entity| match entity {
-            EntityType::MLine(mline) => Some(mline.common.handle),
-            _ => None,
-        }).unwrap_or_else(|| panic!("Python did not create MLine: {}", last_output(&host)));
+        let handle = host
+            .document()
+            .entities()
+            .find_map(|entity| match entity {
+                EntityType::MLine(mline) => Some(mline.common.handle),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("Python did not create MLine: {}", last_output(&host)));
         let created = host.document().get_entity(handle).unwrap().clone();
-        let EntityType::MLine(created_mline) = &created else { unreachable!() };
+        let EntityType::MLine(created_mline) = &created else {
+            unreachable!()
+        };
         assert_eq!(created_mline.style_handle, Some(style_handle));
         assert_eq!(created_mline.style_element_count, 2);
         assert_eq!(created_mline.start_point, codec::types::Vector3::ZERO);
         let first_parameters = |mline: &codec::entities::MLine, vertex: usize| -> Vec<f64> {
-            mline.vertices[vertex].segments.iter().map(|segment| segment.parameters[0]).collect()
+            mline.vertices[vertex]
+                .segments
+                .iter()
+                .map(|segment| segment.parameters[0])
+                .collect()
         };
         assert_eq!(first_parameters(created_mline, 0), vec![0.5, -0.5]);
         assert!(created_mline.vertices.iter().all(|vertex| {
             (vertex.direction.x - 1.0).abs() < 1e-9 && (vertex.miter.y.abs() - 1.0).abs() < 1e-9
         }));
-        let assert_lines = |entity: &EntityType, document: &CadDocument, expected_vertices: usize| {
-            let EntityType::MLine(mline) = entity else { panic!("expected MLine") };
-            assert_eq!(mline.vertices.len(), expected_vertices);
-            let lines = crate::entities::mline::mline_lines(mline, document);
-            assert!(lines.len() >= 2, "expected styled element lines");
-            assert!(lines.iter().flat_map(|line| &line.points).flatten().all(|v| v.is_finite()));
-        };
+        let assert_lines =
+            |entity: &EntityType, document: &CadDocument, expected_vertices: usize| {
+                let EntityType::MLine(mline) = entity else {
+                    panic!("expected MLine")
+                };
+                assert_eq!(mline.vertices.len(), expected_vertices);
+                let lines = crate::entities::mline::mline_lines(mline, document);
+                assert!(lines.len() >= 2, "expected styled element lines");
+                assert!(lines
+                    .iter()
+                    .flat_map(|line| &line.points)
+                    .flatten()
+                    .all(|v| v.is_finite()));
+            };
         assert_lines(&created, host.document(), 2);
 
         let script = std::env::temp_dir().join(format!("ocs_mline_edit_{}.py", std::process::id()));
-        std::fs::write(&script, format!(concat!(
-            "def p(x, y): return {{'position': {{'x': x, 'y': y, 'z': 0.0}}}}\n",
-            "doc = ocs.active_document\n",
-            "mline = doc.entities[{}]\n",
-            "with doc.transaction('Edit mline'):\n",
-            "    mline.vertices = [p(0.0, 0.0), p(10.0, 0.0), p(10.0, 10.0)]\n",
-            "    mline.scale_factor = 2.0\n",
-            "    mline.justification = 'Top'\n",
-            "doc.selection = [mline]\n"
-        ), handle.value())).unwrap();
+        std::fs::write(
+            &script,
+            format!(
+                concat!(
+                    "def p(x, y): return {{'position': {{'x': x, 'y': y, 'z': 0.0}}}}\n",
+                    "doc = ocs.active_document\n",
+                    "mline = doc.entities[{}]\n",
+                    "with doc.transaction('Edit mline'):\n",
+                    "    mline.vertices = [p(0.0, 0.0), p(10.0, 0.0), p(10.0, 10.0)]\n",
+                    "    mline.scale_factor = 2.0\n",
+                    "    mline.justification = 'Top'\n",
+                    "doc.selection = [mline]\n"
+                ),
+                handle.value()
+            ),
+        )
+        .unwrap();
         dispatch(&mut host, &format!("PY_RUN {}", script.display()));
         let _ = std::fs::remove_file(&script);
         let expected = host.document().get_entity(handle).unwrap().clone();
-        let EntityType::MLine(edited) = &expected else { unreachable!() };
-        assert_eq!(edited.vertices.len(), 3, "edit failed: {}", last_output(&host));
+        let EntityType::MLine(edited) = &expected else {
+            unreachable!()
+        };
+        assert_eq!(
+            edited.vertices.len(),
+            3,
+            "edit failed: {}",
+            last_output(&host)
+        );
         assert_eq!(edited.scale_factor, 2.0);
-        assert_eq!(edited.justification, codec::entities::MLineJustification::Top);
+        assert_eq!(
+            edited.justification,
+            codec::entities::MLineJustification::Top
+        );
         assert_eq!(edited.style_handle, created_mline.style_handle);
         assert_eq!(edited.common, created_mline.common);
         assert_eq!(edited.normal, created_mline.normal);
@@ -4627,9 +5342,15 @@ mod tests {
         // Top justification with scale 2: first element sits on the path,
         // the second 2.0 to the right of travel; the corner miter widens it.
         let end = first_parameters(edited, 0);
-        assert!(end[0].abs() < 1e-9 && (end[1] + 2.0).abs() < 1e-9, "{end:?}");
+        assert!(
+            end[0].abs() < 1e-9 && (end[1] + 2.0).abs() < 1e-9,
+            "{end:?}"
+        );
         let corner = first_parameters(edited, 1);
-        assert!(corner[1].abs() > 2.0 && corner[1].is_finite(), "miter must widen at the corner: {corner:?}");
+        assert!(
+            corner[1].abs() > 2.0 && corner[1].is_finite(),
+            "miter must widen at the corner: {corner:?}"
+        );
         assert!((edited.vertices[1].direction.y - edited.vertices[1].direction.x).abs() > 1e-6);
         assert_lines(&expected, host.document(), 3);
         assert_eq!(host.selection(), vec![handle]);
@@ -4650,10 +5371,17 @@ mod tests {
             assert_eq!(host.document().get_entity(handle), Some(&expected), "{patch}");
             assert!(last_output(&host).contains(message), "{patch}: {}", last_output(&host));
         }
-        dispatch(&mut host, &format!(concat!(
-            "PY_EVAL ocs.update_many('Atomic', [{{'handle':{},'scale_factor':3.0}},",
-            "{{'handle':{},'scale_factor':0.0}}])"
-        ), handle.value(), handle.value()));
+        dispatch(
+            &mut host,
+            &format!(
+                concat!(
+                    "PY_EVAL ocs.update_many('Atomic', [{{'handle':{},'scale_factor':3.0}},",
+                    "{{'handle':{},'scale_factor':0.0}}])"
+                ),
+                handle.value(),
+                handle.value()
+            ),
+        );
         assert_eq!(host.document().get_entity(handle), Some(&expected));
 
         let assert_saved = |document: &CadDocument| {
@@ -4662,28 +5390,56 @@ mod tests {
             };
             assert_eq!(mline.vertices.len(), 3);
             assert_eq!(mline.scale_factor, 2.0);
-            assert_eq!(mline.justification, codec::entities::MLineJustification::Top);
+            assert_eq!(
+                mline.justification,
+                codec::entities::MLineJustification::Top
+            );
             assert_eq!(mline.style_name, "Standard");
-            assert_eq!(mline.vertices[2].position, codec::types::Vector3::new(10.0, 10.0, 0.0));
+            assert_eq!(
+                mline.vertices[2].position,
+                codec::types::Vector3::new(10.0, 10.0, 0.0)
+            );
             let (a, b) = (first_parameters(mline, 1), first_parameters(edited, 1));
-            assert!(a.iter().zip(&b).all(|(x, y)| (x - y).abs() < 1e-9), "{a:?} vs {b:?}");
+            assert!(
+                a.iter().zip(&b).all(|(x, y)| (x - y).abs() < 1e-9),
+                "{a:?} vs {b:?}"
+            );
             assert_lines(&document.get_entity(handle).unwrap().clone(), document, 3);
         };
-        let reopened_dwg = crate::io::load_bytes("mline.dwg",
-            codec::DwgWriter::write_to_vec(host.document()).unwrap()).unwrap();
-        let reopened_dxf = crate::io::load_bytes("mline.dxf",
-            codec::DxfWriter::new(host.document()).write_to_vec().unwrap()).unwrap();
+        let reopened_dwg = crate::io::load_bytes(
+            "mline.dwg",
+            codec::DwgWriter::write_to_vec(host.document()).unwrap(),
+        )
+        .unwrap();
+        let reopened_dxf = crate::io::load_bytes(
+            "mline.dxf",
+            codec::DxfWriter::new(host.document())
+                .write_to_vec()
+                .unwrap(),
+        )
+        .unwrap();
         assert_saved(&reopened_dwg);
         assert_saved(&reopened_dxf);
-        for (name, mut document) in [("mline-reedit.dwg", reopened_dwg), ("mline-reedit.dxf", reopened_dxf)] {
+        for (name, mut document) in [
+            ("mline-reedit.dwg", reopened_dwg),
+            ("mline-reedit.dxf", reopened_dxf),
+        ] {
             let before = document.get_entity(handle).unwrap().clone();
             let mut after = before.clone();
-            let EntityType::MLine(mline) = &mut after else { unreachable!() };
+            let EntityType::MLine(mline) = &mut after else {
+                unreachable!()
+            };
             mline.vertices[2].position = codec::types::Vector3::new(10.0, 12.0, 0.0);
             ocs_plugin_api::entity_coverage::validate_entity_mutation(&before, &after).unwrap();
-            ocs_plugin_api::entity_coverage::validate_canvas_entity_references(&document, &after).unwrap();
-            let EntityType::MLine(mline) = &mut after else { unreachable!() };
-            let old = match &before { EntityType::MLine(old) => old, _ => unreachable!() };
+            ocs_plugin_api::entity_coverage::validate_canvas_entity_references(&document, &after)
+                .unwrap();
+            let EntityType::MLine(mline) = &mut after else {
+                unreachable!()
+            };
+            let old = match &before {
+                EntityType::MLine(old) => old,
+                _ => unreachable!(),
+            };
             crate::entities::mline::normalize_scripted_mline(Some(old), mline, &document).unwrap();
             *document.get_entity_mut(handle).unwrap() = after;
             let bytes = if name.ends_with("dwg") {
@@ -4691,26 +5447,51 @@ mod tests {
             } else {
                 codec::DxfWriter::new(&document).write_to_vec().unwrap()
             };
-            assert!(matches!(crate::io::load_bytes(name, bytes).unwrap().get_entity(handle),
-                Some(EntityType::MLine(mline)) if (mline.vertices[2].position.y - 12.0).abs() < 1e-9));
+            assert!(
+                matches!(crate::io::load_bytes(name, bytes).unwrap().get_entity(handle),
+                Some(EntityType::MLine(mline)) if (mline.vertices[2].position.y - 12.0).abs() < 1e-9)
+            );
         }
 
-        dispatch(&mut host, &format!("PY_EVAL ocs.active_document.delete_entity({})", handle.value()));
+        dispatch(
+            &mut host,
+            &format!(
+                "PY_EVAL ocs.active_document.delete_entity({})",
+                handle.value()
+            ),
+        );
         assert!(host.document().get_entity(handle).is_none());
         for (name, bytes) in [
-            ("mline-deleted.dwg", codec::DwgWriter::write_to_vec(host.document()).unwrap()),
-            ("mline-deleted.dxf", codec::DxfWriter::new(host.document()).write_to_vec().unwrap()),
+            (
+                "mline-deleted.dwg",
+                codec::DwgWriter::write_to_vec(host.document()).unwrap(),
+            ),
+            (
+                "mline-deleted.dxf",
+                codec::DxfWriter::new(host.document())
+                    .write_to_vec()
+                    .unwrap(),
+            ),
         ] {
-            assert!(crate::io::load_bytes(name, bytes).unwrap().get_entity(handle).is_none());
+            assert!(crate::io::load_bytes(name, bytes)
+                .unwrap()
+                .get_entity(handle)
+                .is_none());
         }
         drop(process);
         drop(host);
         app.finish_pending_history(0);
         assert_eq!(app.tabs[0].history.undo_stack.len(), 3);
         app.undo_steps(1);
-        assert_eq!(app.tabs[0].scene.document.get_entity(handle), Some(&expected));
+        assert_eq!(
+            app.tabs[0].scene.document.get_entity(handle),
+            Some(&expected)
+        );
         app.undo_steps(1);
-        assert_eq!(app.tabs[0].scene.document.get_entity(handle), Some(&created));
+        assert_eq!(
+            app.tabs[0].scene.document.get_entity(handle),
+            Some(&created)
+        );
         app.undo_steps(1);
         assert!(app.tabs[0].scene.document.get_entity(handle).is_none());
         app.redo_steps(3);
@@ -4735,9 +5516,12 @@ mod tests {
         )
         .unwrap();
         let dispatch = |host: &mut HostSession<'_>, command: &str| {
-            assert!(process.dispatch(host, command, &mut |_| {}).expect("Python dispatch"));
+            assert!(process
+                .dispatch(host, command, &mut |_| {})
+                .expect("Python dispatch"));
         };
-        let last_output = |host: &HostSession<'_>| host.app.command_line.history.last().unwrap().text.clone();
+        let last_output =
+            |host: &HostSession<'_>| host.app.command_line.history.last().unwrap().text.clone();
 
         // (subtype, python fields, expected measurement)
         let fixtures: [(&str, &str, f64); 9] = [
@@ -4751,21 +5535,31 @@ mod tests {
             ("Arc", "definition_point=P(3.5,3.5), first_extension_point=P(5,0), second_extension_point=P(0,5), center_point=P(0,0), arc_start_parameter=0.0, arc_end_parameter=1.5707963267948966", 5.0 * std::f64::consts::FRAC_PI_2),
             ("LargeRadial", "definition_point=P(10,0), chord_point=P(4,0)", 6.0),
         ];
-        let mut script = String::from("def P(x, y): return {'x': x, 'y': y, 'z': 0.0}\ndoc = ocs.active_document\n");
+        let mut script = String::from(
+            "def P(x, y): return {'x': x, 'y': y, 'z': 0.0}\ndoc = ocs.active_document\n",
+        );
         for (subtype, fields, _) in &fixtures {
-            script.push_str(&format!("doc.create_entity('Dimension', subtype='{subtype}', {fields})\n"));
+            script.push_str(&format!(
+                "doc.create_entity('Dimension', subtype='{subtype}', {fields})\n"
+            ));
         }
-        let path = std::env::temp_dir().join(format!("ocs_dimension_create_{}.py", std::process::id()));
+        let path =
+            std::env::temp_dir().join(format!("ocs_dimension_create_{}.py", std::process::id()));
         std::fs::write(&path, script).unwrap();
         dispatch(&mut host, &format!("PY_RUN {}", path.display()));
         let _ = std::fs::remove_file(&path);
         let subtype_of = |dimension: &codec::entities::Dimension| -> &'static str {
             use codec::entities::Dimension as D;
             match dimension {
-                D::Aligned(_) => "Aligned", D::Linear(_) => "Linear", D::Radius(_) => "Radius",
-                D::Diameter(_) => "Diameter", D::Angular2Ln(_) => "Angular2Ln",
-                D::Angular3Pt(_) => "Angular3Pt", D::Ordinate(_) => "Ordinate",
-                D::Arc(_) => "Arc", D::LargeRadial(_) => "LargeRadial",
+                D::Aligned(_) => "Aligned",
+                D::Linear(_) => "Linear",
+                D::Radius(_) => "Radius",
+                D::Diameter(_) => "Diameter",
+                D::Angular2Ln(_) => "Angular2Ln",
+                D::Angular3Pt(_) => "Angular3Pt",
+                D::Ordinate(_) => "Ordinate",
+                D::Arc(_) => "Arc",
+                D::LargeRadial(_) => "LargeRadial",
             }
         };
         let handles_by_subtype = |document: &CadDocument| {
@@ -4778,7 +5572,12 @@ mod tests {
             map
         };
         let handles = handles_by_subtype(host.document());
-        assert_eq!(handles.len(), 9, "created: {handles:?}; {}", last_output(&host));
+        assert_eq!(
+            handles.len(),
+            9,
+            "created: {handles:?}; {}",
+            last_output(&host)
+        );
         let measured = |document: &CadDocument, handle: Handle| -> f64 {
             let Some(EntityType::Dimension(dimension)) = document.get_entity(handle) else {
                 panic!("Dimension missing");
@@ -4787,68 +5586,149 @@ mod tests {
         };
         for (subtype, _, expected) in &fixtures {
             let value = measured(host.document(), handles[subtype]);
-            assert!((value - expected).abs() < 1e-6, "{subtype}: measured {value}, expected {expected}");
-            let Some(EntityType::Dimension(dimension)) = host.document().get_entity(handles[subtype]) else { unreachable!() };
-            assert_eq!(dimension.measurement(), value, "{subtype}: stored measurement is derived");
+            assert!(
+                (value - expected).abs() < 1e-6,
+                "{subtype}: measured {value}, expected {expected}"
+            );
+            let Some(EntityType::Dimension(dimension)) =
+                host.document().get_entity(handles[subtype])
+            else {
+                unreachable!()
+            };
+            assert_eq!(
+                dimension.measurement(),
+                value,
+                "{subtype}: stored measurement is derived"
+            );
             let wires = host.app.tabs[0].scene.wire_models_for(&[handles[subtype]]);
-            assert!(!wires.is_empty(), "{subtype}: dimension produced no canvas geometry");
+            assert!(
+                !wires.is_empty(),
+                "{subtype}: dimension produced no canvas geometry"
+            );
         }
         let linear = handles["Linear"];
         let created_linear = host.document().get_entity(linear).unwrap().clone();
 
         // Edit: move a defining point (the measurement follows), change text
         // and style-independent placement; untouched fields survive.
-        let script = std::env::temp_dir().join(format!("ocs_dimension_edit_{}.py", std::process::id()));
-        std::fs::write(&script, format!(concat!(
-            "doc = ocs.active_document\n",
-            "linear = doc.entities[{}]\n",
-            "radius = doc.entities[{}]\n",
-            "with doc.transaction('Edit dimensions'):\n",
-            "    linear.second_point = (20.0, 0.0, 0.0)\n",
-            "    linear.text = '<> mm'\n",
-            "    linear.attachment_point = 'TopCenter'\n",
-            "    radius.definition_point = (8.0, 0.0, 0.0)\n",
-            "doc.selection = [linear]\n"
-        ), linear.value(), handles["Radius"].value())).unwrap();
+        let script =
+            std::env::temp_dir().join(format!("ocs_dimension_edit_{}.py", std::process::id()));
+        std::fs::write(
+            &script,
+            format!(
+                concat!(
+                    "doc = ocs.active_document\n",
+                    "linear = doc.entities[{}]\n",
+                    "radius = doc.entities[{}]\n",
+                    "with doc.transaction('Edit dimensions'):\n",
+                    "    linear.second_point = (20.0, 0.0, 0.0)\n",
+                    "    linear.text = '<> mm'\n",
+                    "    linear.attachment_point = 'TopCenter'\n",
+                    "    radius.definition_point = (8.0, 0.0, 0.0)\n",
+                    "doc.selection = [linear]\n"
+                ),
+                linear.value(),
+                handles["Radius"].value()
+            ),
+        )
+        .unwrap();
         dispatch(&mut host, &format!("PY_RUN {}", script.display()));
         let _ = std::fs::remove_file(&script);
         let expected_linear = host.document().get_entity(linear).unwrap().clone();
-        let EntityType::Dimension(edited) = &expected_linear else { unreachable!() };
-        let EntityType::Dimension(before) = &created_linear else { unreachable!() };
-        assert!((edited.base().actual_measurement - 20.0).abs() < 1e-9, "edit failed: {}", last_output(&host));
+        let EntityType::Dimension(edited) = &expected_linear else {
+            unreachable!()
+        };
+        let EntityType::Dimension(before) = &created_linear else {
+            unreachable!()
+        };
+        assert!(
+            (edited.base().actual_measurement - 20.0).abs() < 1e-9,
+            "edit failed: {}",
+            last_output(&host)
+        );
         assert!((measured(host.document(), handles["Radius"]) - 8.0).abs() < 1e-9);
         assert_eq!(edited.base().text, "<> mm");
-        assert_eq!(edited.base().attachment_point, codec::entities::AttachmentPointType::TopCenter);
+        assert_eq!(
+            edited.base().attachment_point,
+            codec::entities::AttachmentPointType::TopCenter
+        );
         assert_eq!(edited.base().common, before.base().common);
         assert_eq!(edited.base().style_name, before.base().style_name);
         assert_eq!(edited.base().normal, before.base().normal);
         assert_eq!(host.selection(), vec![linear]);
-        let expected_radius = host.document().get_entity(handles["Radius"]).unwrap().clone();
+        let expected_radius = host
+            .document()
+            .get_entity(handles["Radius"])
+            .unwrap()
+            .clone();
         assert!(!host.app.tabs[0].scene.wire_models_for(&[linear]).is_empty());
 
         let reject_cases: [(&str, &str, &str); 9] = [
-            ("Linear", "'leader_length':2.0", "does not apply to the Linear subtype"),
+            (
+                "Linear",
+                "'leader_length':2.0",
+                "does not apply to the Linear subtype",
+            ),
             ("Linear", "'subtype':'Radius'", "read-only"),
             ("Linear", "'actual_measurement':5.0", "read-only"),
             ("Linear", "'style_name':'Missing'", "does not exist"),
-            ("Linear", "'first_point':{'x':20.0,'y':0.0,'z':0.0}", "must not coincide"),
-            ("Linear", "'first_point':{'x':float('nan'),'y':0.0,'z':0.0}", "finite"),
+            (
+                "Linear",
+                "'first_point':{'x':20.0,'y':0.0,'z':0.0}",
+                "must not coincide",
+            ),
+            (
+                "Linear",
+                "'first_point':{'x':float('nan'),'y':0.0,'z':0.0}",
+                "finite",
+            ),
             ("Linear", "'normal':{'x':0.0,'y':0.0,'z':0.0}", "nonzero"),
-            ("Radius", "'angle_vertex':{'x':8.0,'y':0.0,'z':0.0}", "must not coincide"),
-            ("Linear", "'attachment_point':'Nowhere'", "unsupported AttachmentPointType"),
+            (
+                "Radius",
+                "'angle_vertex':{'x':8.0,'y':0.0,'z':0.0}",
+                "must not coincide",
+            ),
+            (
+                "Linear",
+                "'attachment_point':'Nowhere'",
+                "unsupported AttachmentPointType",
+            ),
         ];
         for (subtype, patch, message) in reject_cases {
-            dispatch(&mut host, &format!(
-                "PY_EVAL ocs.update_many('Reject dimension', [{{'handle':{}, {patch}}}])",
-                handles[subtype].value()));
-            assert_eq!(host.document().get_entity(linear), Some(&expected_linear), "{patch}");
-            assert_eq!(host.document().get_entity(handles["Radius"]), Some(&expected_radius), "{patch}");
-            assert!(last_output(&host).contains(message), "{patch}: {}", last_output(&host));
+            dispatch(
+                &mut host,
+                &format!(
+                    "PY_EVAL ocs.update_many('Reject dimension', [{{'handle':{}, {patch}}}])",
+                    handles[subtype].value()
+                ),
+            );
+            assert_eq!(
+                host.document().get_entity(linear),
+                Some(&expected_linear),
+                "{patch}"
+            );
+            assert_eq!(
+                host.document().get_entity(handles["Radius"]),
+                Some(&expected_radius),
+                "{patch}"
+            );
+            assert!(
+                last_output(&host).contains(message),
+                "{patch}: {}",
+                last_output(&host)
+            );
         }
-        dispatch(&mut host, &format!(concat!(
-            "PY_EVAL ocs.update_many('Atomic', [{{'handle':{},'text':'changed'}},",
-            "{{'handle':{},'style_name':'Missing'}}])"
-        ), linear.value(), handles["Radius"].value()));
+        dispatch(
+            &mut host,
+            &format!(
+                concat!(
+                    "PY_EVAL ocs.update_many('Atomic', [{{'handle':{},'text':'changed'}},",
+                    "{{'handle':{},'style_name':'Missing'}}])"
+                ),
+                linear.value(),
+                handles["Radius"].value()
+            ),
+        );
         assert_eq!(host.document().get_entity(linear), Some(&expected_linear));
         for (patch, message) in [
             ("ocs.active_document.create_entity('Dimension', definition_point=P(0,0))", "requires subtype"),
@@ -4862,18 +5742,34 @@ mod tests {
 
         // DWG and DXF: every subtype is recorded separately.
         let mut failures = Vec::new();
-        let dwg = crate::io::load_bytes("dimension.dwg", codec::DwgWriter::write_to_vec(host.document()).unwrap()).unwrap();
-        let dxf = crate::io::load_bytes("dimension.dxf", codec::DxfWriter::new(host.document()).write_to_vec().unwrap()).unwrap();
+        let dwg = crate::io::load_bytes(
+            "dimension.dwg",
+            codec::DwgWriter::write_to_vec(host.document()).unwrap(),
+        )
+        .unwrap();
+        let dxf = crate::io::load_bytes(
+            "dimension.dxf",
+            codec::DxfWriter::new(host.document())
+                .write_to_vec()
+                .unwrap(),
+        )
+        .unwrap();
         for (format, document) in [("DWG", &dwg), ("DXF", &dxf)] {
             let reopened = handles_by_subtype(document);
             for (subtype, _, expected) in &fixtures {
-                let expected = match *subtype { "Linear" => 20.0, "Radius" => 8.0, _ => *expected };
+                let expected = match *subtype {
+                    "Linear" => 20.0,
+                    "Radius" => 8.0,
+                    _ => *expected,
+                };
                 match reopened.get(subtype) {
                     None => failures.push(format!("{format} {subtype}: missing")),
                     Some(handle) => {
                         let value = measured(document, *handle);
                         if (value - expected).abs() > 1e-6 {
-                            failures.push(format!("{format} {subtype}: measurement {value} != {expected}"));
+                            failures.push(format!(
+                                "{format} {subtype}: measurement {value} != {expected}"
+                            ));
                         }
                     }
                 }
@@ -4882,17 +5778,26 @@ mod tests {
                 failures.push(format!("{format} Linear handle lost"));
                 continue;
             };
-            if dimension.base().text != "<> mm" { failures.push(format!("{format} Linear text {:?}", dimension.base().text)); }
+            if dimension.base().text != "<> mm" {
+                failures.push(format!("{format} Linear text {:?}", dimension.base().text));
+            }
         }
         assert!(failures.is_empty(), "persistence gaps: {failures:#?}");
         for (name, mut document) in [("dimension-reedit.dwg", dwg), ("dimension-reedit.dxf", dxf)] {
             let before = document.get_entity(linear).unwrap().clone();
             let mut after = before.clone();
-            let EntityType::Dimension(dimension) = &mut after else { unreachable!() };
-            if let codec::entities::Dimension::Linear(value) = dimension { value.second_point.x = 30.0; }
+            let EntityType::Dimension(dimension) = &mut after else {
+                unreachable!()
+            };
+            if let codec::entities::Dimension::Linear(value) = dimension {
+                value.second_point.x = 30.0;
+            }
             ocs_plugin_api::entity_coverage::validate_entity_mutation(&before, &after).unwrap();
-            ocs_plugin_api::entity_coverage::validate_canvas_entity_references(&document, &after).unwrap();
-            let EntityType::Dimension(dimension) = &mut after else { unreachable!() };
+            ocs_plugin_api::entity_coverage::validate_canvas_entity_references(&document, &after)
+                .unwrap();
+            let EntityType::Dimension(dimension) = &mut after else {
+                unreachable!()
+            };
             crate::entities::dimension::normalize_scripted_dimension(dimension);
             *document.get_entity_mut(linear).unwrap() = after;
             let bytes = if name.ends_with("dwg") {
@@ -4904,16 +5809,28 @@ mod tests {
             assert!((measured(&reopened, linear) - 30.0).abs() < 1e-6, "{name}");
         }
 
-        dispatch(&mut host, &format!("PY_EVAL ocs.active_document.delete_entity({})", linear.value()));
+        dispatch(
+            &mut host,
+            &format!(
+                "PY_EVAL ocs.active_document.delete_entity({})",
+                linear.value()
+            ),
+        );
         assert!(host.document().get_entity(linear).is_none());
         drop(process);
         drop(host);
         app.finish_pending_history(0);
         assert_eq!(app.tabs[0].history.undo_stack.len(), 3);
         app.undo_steps(1);
-        assert_eq!(app.tabs[0].scene.document.get_entity(linear), Some(&expected_linear));
+        assert_eq!(
+            app.tabs[0].scene.document.get_entity(linear),
+            Some(&expected_linear)
+        );
         app.undo_steps(1);
-        assert_eq!(app.tabs[0].scene.document.get_entity(linear), Some(&created_linear));
+        assert_eq!(
+            app.tabs[0].scene.document.get_entity(linear),
+            Some(&created_linear)
+        );
         app.undo_steps(1);
         assert!(app.tabs[0].scene.document.get_entity(linear).is_none());
         app.redo_steps(3);
@@ -4938,11 +5855,15 @@ mod tests {
         )
         .unwrap();
         let dispatch = |host: &mut HostSession<'_>, command: &str| {
-            assert!(process.dispatch(host, command, &mut |_| {}).expect("Python dispatch"));
+            assert!(process
+                .dispatch(host, command, &mut |_| {})
+                .expect("Python dispatch"));
         };
-        let last_output = |host: &HostSession<'_>| host.app.command_line.history.last().unwrap().text.clone();
+        let last_output =
+            |host: &HostSession<'_>| host.app.command_line.history.last().unwrap().text.clone();
 
-        let script = std::env::temp_dir().join(format!("ocs_mleader_create_{}.py", std::process::id()));
+        let script =
+            std::env::temp_dir().join(format!("ocs_mleader_create_{}.py", std::process::id()));
         std::fs::write(&script, concat!(
             "def P(x, y): return {'x': x, 'y': y, 'z': 0.0}\n",
             "doc = ocs.active_document\n",
@@ -4954,17 +5875,27 @@ mod tests {
         )).unwrap();
         dispatch(&mut host, &format!("PY_RUN {}", script.display()));
         let _ = std::fs::remove_file(&script);
-        let handle = host.document().entities().find_map(|entity| match entity {
-            EntityType::MultiLeader(value) => Some(value.common.handle),
-            _ => None,
-        }).unwrap_or_else(|| panic!("Python did not create MultiLeader: {}", last_output(&host)));
+        let handle = host
+            .document()
+            .entities()
+            .find_map(|entity| match entity {
+                EntityType::MultiLeader(value) => Some(value.common.handle),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("Python did not create MultiLeader: {}", last_output(&host)));
         let created = host.document().get_entity(handle).unwrap().clone();
-        let EntityType::MultiLeader(created_ml) = &created else { unreachable!() };
+        let EntityType::MultiLeader(created_ml) = &created else {
+            unreachable!()
+        };
         assert_eq!(created_ml.context.text_string, "NOTE");
         assert_eq!(created_ml.context.leader_roots[0].lines[0].points.len(), 3);
-        assert!(!host.app.tabs[0].scene.wire_models_for(&[handle]).is_empty(), "no canvas geometry");
+        assert!(
+            !host.app.tabs[0].scene.wire_models_for(&[handle]).is_empty(),
+            "no canvas geometry"
+        );
 
-        let script = std::env::temp_dir().join(format!("ocs_mleader_edit_{}.py", std::process::id()));
+        let script =
+            std::env::temp_dir().join(format!("ocs_mleader_edit_{}.py", std::process::id()));
         std::fs::write(&script, format!(concat!(
             "def P(x, y): return {{'x': x, 'y': y, 'z': 0.0}}\n",
             "doc = ocs.active_document\n",
@@ -4980,18 +5911,35 @@ mod tests {
         dispatch(&mut host, &format!("PY_RUN {}", script.display()));
         let _ = std::fs::remove_file(&script);
         let expected = host.document().get_entity(handle).unwrap().clone();
-        let EntityType::MultiLeader(edited) = &expected else { unreachable!() };
-        assert_eq!(edited.context.text_string, "EDITED", "edit failed: {}", last_output(&host));
+        let EntityType::MultiLeader(edited) = &expected else {
+            unreachable!()
+        };
+        assert_eq!(
+            edited.context.text_string,
+            "EDITED",
+            "edit failed: {}",
+            last_output(&host)
+        );
         assert_eq!(edited.context.leader_roots[0].lines[0].points.len(), 4);
         assert_eq!(edited.dogleg_length, 3.0);
         assert_eq!(edited.context.text_height, 3.0);
         assert_eq!(edited.text_height, created_ml.text_height);
-        assert_eq!(edited.line_color, codec::types::Color::Rgb { r: 0, g: 128, b: 255 });
+        assert_eq!(
+            edited.line_color,
+            codec::types::Color::Rgb {
+                r: 0,
+                g: 128,
+                b: 255
+            }
+        );
         // Untouched context fields and the entity identity survive a partial patch.
         assert_eq!(edited.common, created_ml.common);
         assert_eq!(edited.context.scale_factor, created_ml.context.scale_factor);
         assert_eq!(edited.content_type, created_ml.content_type);
-        assert_eq!(edited.context.leader_roots[0].connection_point, created_ml.context.leader_roots[0].connection_point);
+        assert_eq!(
+            edited.context.leader_roots[0].connection_point,
+            created_ml.context.leader_roots[0].connection_point
+        );
         assert_eq!(host.selection(), vec![handle]);
         assert!(!host.app.tabs[0].scene.wire_models_for(&[handle]).is_empty());
 
@@ -5003,71 +5951,154 @@ mod tests {
             ("'text_style_handle':999999", "does not exist"),
             ("'content_type':'None'", "cannot carry"),
             ("'context':{'nonsense':1}", "outside the editable schema"),
-            ("'context':{'leader_roots':[{'lines':[{'points':[]}]}]}", "has no points"),
-            ("'context':{'text_location':{'x':float('nan'),'y':0.0,'z':0.0}}", "finite"),
+            (
+                "'context':{'leader_roots':[{'lines':[{'points':[]}]}]}",
+                "has no points",
+            ),
+            (
+                "'context':{'text_location':{'x':float('nan'),'y':0.0,'z':0.0}}",
+                "finite",
+            ),
             ("'dwg_version':5", "read-only"),
             ("'line_color':{'kind':'Index','value':300}", "Color"),
         ] {
-            dispatch(&mut host, &format!(
-                "PY_EVAL ocs.update_many('Reject multileader', [{{'handle':{}, {patch}}}])", handle.value()));
-            assert_eq!(host.document().get_entity(handle), Some(&expected), "{patch}");
-            assert!(last_output(&host).contains(message), "{patch}: {}", last_output(&host));
+            dispatch(
+                &mut host,
+                &format!(
+                    "PY_EVAL ocs.update_many('Reject multileader', [{{'handle':{}, {patch}}}])",
+                    handle.value()
+                ),
+            );
+            assert_eq!(
+                host.document().get_entity(handle),
+                Some(&expected),
+                "{patch}"
+            );
+            assert!(
+                last_output(&host).contains(message),
+                "{patch}: {}",
+                last_output(&host)
+            );
         }
-        dispatch(&mut host, &format!(concat!(
-            "PY_EVAL ocs.update_many('Atomic', [{{'handle':{},'dogleg_length':9.0}},",
-            "{{'handle':{},'scale_factor':-1.0}}])"
-        ), handle.value(), handle.value()));
+        dispatch(
+            &mut host,
+            &format!(
+                concat!(
+                    "PY_EVAL ocs.update_many('Atomic', [{{'handle':{},'dogleg_length':9.0}},",
+                    "{{'handle':{},'scale_factor':-1.0}}])"
+                ),
+                handle.value(),
+                handle.value()
+            ),
+        );
         assert_eq!(host.document().get_entity(handle), Some(&expected));
 
         let mut gaps = Vec::new();
-        let dwg = crate::io::load_bytes("mleader.dwg", codec::DwgWriter::write_to_vec(host.document()).unwrap()).unwrap();
-        let dxf = crate::io::load_bytes("mleader.dxf", codec::DxfWriter::new(host.document()).write_to_vec().unwrap()).unwrap();
+        let dwg = crate::io::load_bytes(
+            "mleader.dwg",
+            codec::DwgWriter::write_to_vec(host.document()).unwrap(),
+        )
+        .unwrap();
+        let dxf = crate::io::load_bytes(
+            "mleader.dxf",
+            codec::DxfWriter::new(host.document())
+                .write_to_vec()
+                .unwrap(),
+        )
+        .unwrap();
         for (format, document) in [("DWG", &dwg), ("DXF", &dxf)] {
             let Some(EntityType::MultiLeader(value)) = document.get_entity(handle) else {
                 gaps.push(format!("{format}: MultiLeader missing"));
                 continue;
             };
-            if value.context.text_string != "EDITED" { gaps.push(format!("{format}: text {:?}", value.context.text_string)); }
-            let points = value.context.leader_roots.first().and_then(|r| r.lines.first()).map_or(0, |l| l.points.len());
-            if points != 4 { gaps.push(format!("{format}: leader points {points}")); }
-            if value.dogleg_length != 3.0 { gaps.push(format!("{format}: dogleg {}", value.dogleg_length)); }
-            if value.context.text_height != edited.context.text_height { gaps.push(format!("{format}: context.text_height {}", value.context.text_height)); }
-            if value.line_color != edited.line_color { gaps.push(format!("{format}: line_color {:?}", value.line_color)); }
+            if value.context.text_string != "EDITED" {
+                gaps.push(format!("{format}: text {:?}", value.context.text_string));
+            }
+            let points = value
+                .context
+                .leader_roots
+                .first()
+                .and_then(|r| r.lines.first())
+                .map_or(0, |l| l.points.len());
+            if points != 4 {
+                gaps.push(format!("{format}: leader points {points}"));
+            }
+            if value.dogleg_length != 3.0 {
+                gaps.push(format!("{format}: dogleg {}", value.dogleg_length));
+            }
+            if value.context.text_height != edited.context.text_height {
+                gaps.push(format!(
+                    "{format}: context.text_height {}",
+                    value.context.text_height
+                ));
+            }
+            if value.line_color != edited.line_color {
+                gaps.push(format!("{format}: line_color {:?}", value.line_color));
+            }
         }
         assert!(gaps.is_empty(), "persistence gaps: {gaps:#?}");
         for (name, mut document) in [("mleader-reedit.dwg", dwg), ("mleader-reedit.dxf", dxf)] {
             let before = document.get_entity(handle).unwrap().clone();
             let mut after = before.clone();
-            let EntityType::MultiLeader(value) = &mut after else { unreachable!() };
+            let EntityType::MultiLeader(value) = &mut after else {
+                unreachable!()
+            };
             value.dogleg_length = 4.5;
             ocs_plugin_api::entity_coverage::validate_entity_mutation(&before, &after).unwrap();
-            ocs_plugin_api::entity_coverage::validate_canvas_entity_references(&document, &after).unwrap();
+            ocs_plugin_api::entity_coverage::validate_canvas_entity_references(&document, &after)
+                .unwrap();
             *document.get_entity_mut(handle).unwrap() = after;
             let bytes = if name.ends_with("dwg") {
                 codec::DwgWriter::write_to_vec(&document).unwrap()
             } else {
                 codec::DxfWriter::new(&document).write_to_vec().unwrap()
             };
-            assert!(matches!(crate::io::load_bytes(name, bytes).unwrap().get_entity(handle),
-                Some(EntityType::MultiLeader(value)) if value.dogleg_length == 4.5), "{name}");
+            assert!(
+                matches!(crate::io::load_bytes(name, bytes).unwrap().get_entity(handle),
+                Some(EntityType::MultiLeader(value)) if value.dogleg_length == 4.5),
+                "{name}"
+            );
         }
 
-        dispatch(&mut host, &format!("PY_EVAL ocs.active_document.delete_entity({})", handle.value()));
+        dispatch(
+            &mut host,
+            &format!(
+                "PY_EVAL ocs.active_document.delete_entity({})",
+                handle.value()
+            ),
+        );
         assert!(host.document().get_entity(handle).is_none());
         for (name, bytes) in [
-            ("mleader-deleted.dwg", codec::DwgWriter::write_to_vec(host.document()).unwrap()),
-            ("mleader-deleted.dxf", codec::DxfWriter::new(host.document()).write_to_vec().unwrap()),
+            (
+                "mleader-deleted.dwg",
+                codec::DwgWriter::write_to_vec(host.document()).unwrap(),
+            ),
+            (
+                "mleader-deleted.dxf",
+                codec::DxfWriter::new(host.document())
+                    .write_to_vec()
+                    .unwrap(),
+            ),
         ] {
-            assert!(crate::io::load_bytes(name, bytes).unwrap().get_entity(handle).is_none());
+            assert!(crate::io::load_bytes(name, bytes)
+                .unwrap()
+                .get_entity(handle)
+                .is_none());
         }
         drop(process);
         drop(host);
         app.finish_pending_history(0);
         assert_eq!(app.tabs[0].history.undo_stack.len(), 3);
         app.undo_steps(1);
-        assert_eq!(app.tabs[0].scene.document.get_entity(handle), Some(&expected));
+        assert_eq!(
+            app.tabs[0].scene.document.get_entity(handle),
+            Some(&expected)
+        );
         app.undo_steps(1);
-        assert_eq!(app.tabs[0].scene.document.get_entity(handle), Some(&created));
+        assert_eq!(
+            app.tabs[0].scene.document.get_entity(handle),
+            Some(&created)
+        );
         app.undo_steps(1);
         assert!(app.tabs[0].scene.document.get_entity(handle).is_none());
         app.redo_steps(3);
@@ -5092,20 +6123,38 @@ mod tests {
         )
         .unwrap();
         let dispatch = |host: &mut HostSession<'_>, command: &str| {
-            assert!(process.dispatch(host, command, &mut |_| {}).expect("Python dispatch"));
+            assert!(process
+                .dispatch(host, command, &mut |_| {})
+                .expect("Python dispatch"));
         };
-        let last_output = |host: &HostSession<'_>| host.app.command_line.history.last().unwrap().text.clone();
+        let last_output =
+            |host: &HostSession<'_>| host.app.command_line.history.last().unwrap().text.clone();
 
         dispatch(&mut host, "PY_EVAL ocs.active_document.create_entity('Table', insertion_point={'x':5.0,'y':5.0,'z':0.0}).handle");
-        let handle = host.document().entities().find_map(|entity| match entity {
-            EntityType::Table(value) => Some(value.common.handle),
-            _ => None,
-        }).unwrap_or_else(|| panic!("Python did not create Table: {}", last_output(&host)));
+        let handle = host
+            .document()
+            .entities()
+            .find_map(|entity| match entity {
+                EntityType::Table(value) => Some(value.common.handle),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("Python did not create Table: {}", last_output(&host)));
         let created = host.document().get_entity(handle).unwrap().clone();
-        let EntityType::Table(created_table) = &created else { unreachable!() };
-        assert_eq!((created_table.rows.len(), created_table.columns.len()), (3, 3));
-        assert_eq!(created_table.insertion_point, codec::types::Vector3::new(5.0, 5.0, 0.0));
-        assert!(!host.app.tabs[0].scene.wire_models_for(&[handle]).is_empty(), "no canvas geometry");
+        let EntityType::Table(created_table) = &created else {
+            unreachable!()
+        };
+        assert_eq!(
+            (created_table.rows.len(), created_table.columns.len()),
+            (3, 3)
+        );
+        assert_eq!(
+            created_table.insertion_point,
+            codec::types::Vector3::new(5.0, 5.0, 0.0)
+        );
+        assert!(
+            !host.app.tabs[0].scene.wire_models_for(&[handle]).is_empty(),
+            "no canvas geometry"
+        );
 
         let script = std::env::temp_dir().join(format!("ocs_table_edit_{}.py", std::process::id()));
         std::fs::write(&script, format!(concat!(
@@ -5127,7 +6176,9 @@ mod tests {
         dispatch(&mut host, &format!("PY_RUN {}", script.display()));
         let _ = std::fs::remove_file(&script);
         let expected = host.document().get_entity(handle).unwrap().clone();
-        let EntityType::Table(edited) = &expected else { unreachable!() };
+        let EntityType::Table(edited) = &expected else {
+            unreachable!()
+        };
         assert_eq!(edited.rows.len(), 4, "edit failed: {}", last_output(&host));
         assert_eq!(edited.columns[0].width, 30.0);
         assert_eq!(edited.rows[1].cells[1].contents[0].value.text, "Hello");
@@ -5159,70 +6210,138 @@ mod tests {
             assert_eq!(host.document().get_entity(handle), Some(&expected), "{patch}");
             assert!(last_output(&host).contains(message), "{patch}: {}", last_output(&host));
         }
-        dispatch(&mut host, &format!(concat!(
-            "PY_EVAL ocs.update_many('Atomic', [{{'handle':{},'break_spacing':7.0}},",
-            "{{'handle':{},'break_spacing':-1.0}}])"
-        ), handle.value(), handle.value()));
+        dispatch(
+            &mut host,
+            &format!(
+                concat!(
+                    "PY_EVAL ocs.update_many('Atomic', [{{'handle':{},'break_spacing':7.0}},",
+                    "{{'handle':{},'break_spacing':-1.0}}])"
+                ),
+                handle.value(),
+                handle.value()
+            ),
+        );
         assert_eq!(host.document().get_entity(handle), Some(&expected));
 
         let mut gaps = Vec::new();
-        let dwg = crate::io::load_bytes("table.dwg", codec::DwgWriter::write_to_vec(host.document()).unwrap()).unwrap();
-        let dxf = crate::io::load_bytes("table.dxf", codec::DxfWriter::new(host.document()).write_to_vec().unwrap()).unwrap();
+        let dwg = crate::io::load_bytes(
+            "table.dwg",
+            codec::DwgWriter::write_to_vec(host.document()).unwrap(),
+        )
+        .unwrap();
+        let dxf = crate::io::load_bytes(
+            "table.dxf",
+            codec::DxfWriter::new(host.document())
+                .write_to_vec()
+                .unwrap(),
+        )
+        .unwrap();
         for (format, document) in [("DWG", &dwg), ("DXF", &dxf)] {
             let Some(EntityType::Table(value)) = document.get_entity(handle) else {
                 gaps.push(format!("{format}: Table missing"));
                 continue;
             };
-            if value.rows.len() != 4 { gaps.push(format!("{format}: rows {}", value.rows.len())); }
-            if value.columns.first().map(|c| c.width) != Some(30.0) { gaps.push(format!("{format}: column width {:?}", value.columns.first().map(|c| c.width))); }
-            let text = value.rows.get(1).and_then(|r| r.cells.get(1)).and_then(|c| c.contents.first()).map(|c| c.value.text.clone());
-            if text.as_deref() != Some("Hello") { gaps.push(format!("{format}: cell text {text:?}")); }
+            if value.rows.len() != 4 {
+                gaps.push(format!("{format}: rows {}", value.rows.len()));
+            }
+            if value.columns.first().map(|c| c.width) != Some(30.0) {
+                gaps.push(format!(
+                    "{format}: column width {:?}",
+                    value.columns.first().map(|c| c.width)
+                ));
+            }
+            let text = value
+                .rows
+                .get(1)
+                .and_then(|r| r.cells.get(1))
+                .and_then(|c| c.contents.first())
+                .map(|c| c.value.text.clone());
+            if text.as_deref() != Some("Hello") {
+                gaps.push(format!("{format}: cell text {text:?}"));
+            }
             // DWG stores the ranges and DXF the origin cell's merge dimensions;
             // the DXF reader rebuilds the ranges from those, so both formats
             // come back with the merge in both forms.
             let origin = &value.rows[0].cells[0];
             if format == "DXF" && (origin.merge_width, origin.merge_height) != (3, 1) {
-                gaps.push(format!("DXF: merge dims {}x{}", origin.merge_width, origin.merge_height));
+                gaps.push(format!(
+                    "DXF: merge dims {}x{}",
+                    origin.merge_width, origin.merge_height
+                ));
             }
             if value.merged_ranges.len() != 1 {
-                gaps.push(format!("{format}: merged_ranges {}", value.merged_ranges.len()));
+                gaps.push(format!(
+                    "{format}: merged_ranges {}",
+                    value.merged_ranges.len()
+                ));
             }
-            if value.insertion_point != edited.insertion_point { gaps.push(format!("{format}: insertion {:?}", value.insertion_point)); }
+            if value.insertion_point != edited.insertion_point {
+                gaps.push(format!("{format}: insertion {:?}", value.insertion_point));
+            }
         }
         assert!(gaps.is_empty(), "persistence gaps: {gaps:#?}");
         for (name, mut document) in [("table-reedit.dwg", dwg), ("table-reedit.dxf", dxf)] {
             let before = document.get_entity(handle).unwrap().clone();
             let mut after = before.clone();
-            let EntityType::Table(value) = &mut after else { unreachable!() };
+            let EntityType::Table(value) = &mut after else {
+                unreachable!()
+            };
             value.columns[1].width = 12.0;
             ocs_plugin_api::entity_coverage::validate_entity_mutation(&before, &after).unwrap();
-            ocs_plugin_api::entity_coverage::validate_canvas_entity_references(&document, &after).unwrap();
+            ocs_plugin_api::entity_coverage::validate_canvas_entity_references(&document, &after)
+                .unwrap();
             *document.get_entity_mut(handle).unwrap() = after;
             let bytes = if name.ends_with("dwg") {
                 codec::DwgWriter::write_to_vec(&document).unwrap()
             } else {
                 codec::DxfWriter::new(&document).write_to_vec().unwrap()
             };
-            assert!(matches!(crate::io::load_bytes(name, bytes).unwrap().get_entity(handle),
-                Some(EntityType::Table(value)) if value.columns[1].width == 12.0), "{name}");
+            assert!(
+                matches!(crate::io::load_bytes(name, bytes).unwrap().get_entity(handle),
+                Some(EntityType::Table(value)) if value.columns[1].width == 12.0),
+                "{name}"
+            );
         }
 
-        dispatch(&mut host, &format!("PY_EVAL ocs.active_document.delete_entity({})", handle.value()));
+        dispatch(
+            &mut host,
+            &format!(
+                "PY_EVAL ocs.active_document.delete_entity({})",
+                handle.value()
+            ),
+        );
         assert!(host.document().get_entity(handle).is_none());
         for (name, bytes) in [
-            ("table-deleted.dwg", codec::DwgWriter::write_to_vec(host.document()).unwrap()),
-            ("table-deleted.dxf", codec::DxfWriter::new(host.document()).write_to_vec().unwrap()),
+            (
+                "table-deleted.dwg",
+                codec::DwgWriter::write_to_vec(host.document()).unwrap(),
+            ),
+            (
+                "table-deleted.dxf",
+                codec::DxfWriter::new(host.document())
+                    .write_to_vec()
+                    .unwrap(),
+            ),
         ] {
-            assert!(crate::io::load_bytes(name, bytes).unwrap().get_entity(handle).is_none());
+            assert!(crate::io::load_bytes(name, bytes)
+                .unwrap()
+                .get_entity(handle)
+                .is_none());
         }
         drop(process);
         drop(host);
         app.finish_pending_history(0);
         assert_eq!(app.tabs[0].history.undo_stack.len(), 3);
         app.undo_steps(1);
-        assert_eq!(app.tabs[0].scene.document.get_entity(handle), Some(&expected));
+        assert_eq!(
+            app.tabs[0].scene.document.get_entity(handle),
+            Some(&expected)
+        );
         app.undo_steps(1);
-        assert_eq!(app.tabs[0].scene.document.get_entity(handle), Some(&created));
+        assert_eq!(
+            app.tabs[0].scene.document.get_entity(handle),
+            Some(&created)
+        );
         app.undo_steps(1);
         assert!(app.tabs[0].scene.document.get_entity(handle).is_none());
         app.redo_steps(3);
@@ -5267,11 +6386,15 @@ mod tests {
         )
         .unwrap();
         let dispatch = |host: &mut HostSession<'_>, command: &str| {
-            assert!(process.dispatch(host, command, &mut |_| {}).expect("Python dispatch"));
+            assert!(process
+                .dispatch(host, command, &mut |_| {})
+                .expect("Python dispatch"));
         };
-        let last_output = |host: &HostSession<'_>| host.app.command_line.history.last().unwrap().text.clone();
+        let last_output =
+            |host: &HostSession<'_>| host.app.command_line.history.last().unwrap().text.clone();
         let run_script = |host: &mut HostSession<'_>, tag: &str, body: &str| {
-            let path = std::env::temp_dir().join(format!("ocs_mesh_{tag}_{}.py", std::process::id()));
+            let path =
+                std::env::temp_dir().join(format!("ocs_mesh_{tag}_{}.py", std::process::id()));
             std::fs::write(&path, format!("def P(x, y, z): return {{'x': x, 'y': y, 'z': z}}\ndoc = ocs.active_document\n{body}")).unwrap();
             dispatch(host, &format!("PY_RUN {}", path.display()));
             let _ = std::fs::remove_file(&path);
@@ -5289,7 +6412,9 @@ mod tests {
             // The legacy Polyline is update-only: the host makes one to edit.
             let points = [(0.0, 0.0, 0.0), (10.0, 0.0, 2.0), (10.0, 5.0, 4.0)]
                 .map(|(x, y, z)| codec::types::Vector3::new(x, y, z));
-            host.add_entity(EntityType::Polyline(codec::entities::Polyline::from_points(points.to_vec())));
+            host.add_entity(EntityType::Polyline(
+                codec::entities::Polyline::from_points(points.to_vec()),
+            ));
         }
         let make_ole = create_script.contains("MAKEOLE");
         if make_ole {
@@ -5315,7 +6440,11 @@ mod tests {
         let update_only = create_script.contains("MAKEINSERT") || make_polyline || make_ole;
         if update_only || create_script.contains("MAKEBLOCK") {
             let next = host.document().next_handle();
-            let (record_handle, block_handle, end_handle) = (Handle::new(next), Handle::new(next + 1), Handle::new(next + 2));
+            let (record_handle, block_handle, end_handle) = (
+                Handle::new(next),
+                Handle::new(next + 1),
+                Handle::new(next + 2),
+            );
             let mut record = codec::tables::BlockRecord::new("AUDITBLK");
             record.handle = record_handle;
             record.block_entity_handle = block_handle;
@@ -5324,29 +6453,55 @@ mod tests {
             let mut block = codec::entities::Block::new("AUDITBLK", codec::types::Vector3::ZERO);
             block.common.handle = block_handle;
             block.common.owner_handle = record_handle;
-            host.document_mut().add_entity(EntityType::Block(block)).unwrap();
+            host.document_mut()
+                .add_entity(EntityType::Block(block))
+                .unwrap();
             let mut end = codec::entities::BlockEnd::new();
             end.common.handle = end_handle;
             end.common.owner_handle = record_handle;
-            host.document_mut().add_entity(EntityType::BlockEnd(end)).unwrap();
+            host.document_mut()
+                .add_entity(EntityType::BlockEnd(end))
+                .unwrap();
             if update_only {
-                let insert = codec::entities::Insert::new("AUDITBLK", codec::types::Vector3::new(1.0, 2.0, 0.0));
+                let insert = codec::entities::Insert::new(
+                    "AUDITBLK",
+                    codec::types::Vector3::new(1.0, 2.0, 0.0),
+                );
                 host.add_entity(EntityType::Insert(insert));
             }
-            create_script = create_script.replace("BLOCKRECORD", &record_handle.value().to_string());
+            create_script =
+                create_script.replace("BLOCKRECORD", &record_handle.value().to_string());
         }
-        let paper = host.document().block_records.iter().find(|r| r.is_paper_space()).map(|r| r.handle.value());
-        let layer0 = host.document().layers.iter().find(|l| l.name == "0").map(|l| l.handle.value());
+        let paper = host
+            .document()
+            .block_records
+            .iter()
+            .find(|r| r.is_paper_space())
+            .map(|r| r.handle.value());
+        let layer0 = host
+            .document()
+            .layers
+            .iter()
+            .find(|l| l.name == "0")
+            .map(|l| l.handle.value());
         if create_script.contains("VIEWPORTHANDLE") || create_script.contains("SCALEHANDLE") {
             // A view border ties to an existing viewport and scale.
-            let owner = host.document().block_records.iter().find(|r| r.is_paper_space()).map(|r| r.handle).unwrap();
+            let owner = host
+                .document()
+                .block_records
+                .iter()
+                .find(|r| r.is_paper_space())
+                .map(|r| r.handle)
+                .unwrap();
             let mut viewport = codec::entities::Viewport::new();
             viewport.common.owner_handle = owner;
             let viewport_handle = host.add_entity(EntityType::Viewport(viewport));
             let scale_handle = host.document_mut().allocate_handle();
             let mut scale = codec::objects::Scale::new("1:1", 1.0, 1.0);
             scale.handle = scale_handle;
-            host.document_mut().objects.insert(scale_handle, codec::objects::ObjectType::Scale(scale));
+            host.document_mut()
+                .objects
+                .insert(scale_handle, codec::objects::ObjectType::Scale(scale));
             create_script = create_script
                 .replace("VIEWPORTHANDLE", &viewport_handle.value().to_string())
                 .replace("SCALEHANDLE", &scale_handle.value().to_string());
@@ -5359,11 +6514,17 @@ mod tests {
             let handle = host.document_mut().allocate_handle();
             let mut definition = codec::objects::UnderlayDefinition::pdf("plan.pdf", "1");
             definition.handle = handle;
-            host.document_mut().objects.insert(handle, codec::objects::ObjectType::UnderlayDefinition(definition));
+            host.document_mut().objects.insert(
+                handle,
+                codec::objects::ObjectType::UnderlayDefinition(definition),
+            );
             create_script = create_script.replace("DEFHANDLE", &handle.value().to_string());
         }
         run_script(&mut host, "create", &create_script);
-        let handle = host.document().entities().find(|entity| (case.is_kind)(entity))
+        let handle = host
+            .document()
+            .entities()
+            .find(|entity| (case.is_kind)(entity))
             .map(|entity| entity.common().handle)
             .unwrap_or_else(|| panic!("Python did not create the mesh: {}", last_output(&host)));
         let created = host.document().get_entity(handle).unwrap().clone();
@@ -5372,18 +6533,41 @@ mod tests {
         // oracle first activates the layout that owns it.
         if matches!(created, EntityType::Viewport(_)) {
             let owner = created.common().owner_handle;
-            let layout = host.document().objects.values().find_map(|object| match object {
-                codec::objects::ObjectType::Layout(l) if l.block_record == owner => Some(l.name.clone()),
-                _ => None,
-            }).expect("the viewport's owner is a layout block");
+            let layout = host
+                .document()
+                .objects
+                .values()
+                .find_map(|object| match object {
+                    codec::objects::ObjectType::Layout(l) if l.block_record == owner => {
+                        Some(l.name.clone())
+                    }
+                    _ => None,
+                })
+                .expect("the viewport's owner is a layout block");
             host.app.tabs[0].scene.set_current_layout(layout);
         }
         let has_wires = true;
-        assert!(!host.app.tabs[0].scene.wire_models_for(&[handle]).is_empty(), "no canvas geometry");
+        assert!(
+            !host.app.tabs[0].scene.wire_models_for(&[handle]).is_empty(),
+            "no canvas geometry"
+        );
 
-        run_script(&mut host, "edit", &case.edit.replace("HANDLE", &handle.value().to_string()).replace("TMPDIR", &tmp).replace("LAYER0", &layer0.unwrap_or_default().to_string()));
+        run_script(
+            &mut host,
+            "edit",
+            &case
+                .edit
+                .replace("HANDLE", &handle.value().to_string())
+                .replace("TMPDIR", &tmp)
+                .replace("LAYER0", &layer0.unwrap_or_default().to_string()),
+        );
         let expected = host.document().get_entity(handle).unwrap().clone();
-        assert_eq!((case.digest)(&expected), case.expect_edited, "edit failed: {}", last_output(&host));
+        assert_eq!(
+            (case.digest)(&expected),
+            case.expect_edited,
+            "edit failed: {}",
+            last_output(&host)
+        );
         assert_eq!(expected.common(), created.common());
         assert_eq!(host.selection(), vec![handle]);
         if has_wires {
@@ -5391,10 +6575,23 @@ mod tests {
         }
 
         for (patch, message) in case.rejects {
-            dispatch(&mut host, &format!(
-                "PY_EVAL ocs.update_many('Reject mesh', [{{'handle':{}, {patch}}}])", handle.value()));
-            assert_eq!(host.document().get_entity(handle), Some(&expected), "{patch}");
-            assert!(last_output(&host).contains(message), "{patch}: {}", last_output(&host));
+            dispatch(
+                &mut host,
+                &format!(
+                    "PY_EVAL ocs.update_many('Reject mesh', [{{'handle':{}, {patch}}}])",
+                    handle.value()
+                ),
+            );
+            assert_eq!(
+                host.document().get_entity(handle),
+                Some(&expected),
+                "{patch}"
+            );
+            assert!(
+                last_output(&host).contains(message),
+                "{patch}: {}",
+                last_output(&host)
+            );
         }
         let (first_patch, _) = case.rejects[0];
         dispatch(&mut host, &format!(
@@ -5402,8 +6599,18 @@ mod tests {
             h = handle.value()));
         assert_eq!(host.document().get_entity(handle), Some(&expected));
 
-        let dwg = crate::io::load_bytes("mesh.dwg", codec::DwgWriter::write_to_vec(host.document()).unwrap()).unwrap();
-        let dxf = crate::io::load_bytes("mesh.dxf", codec::DxfWriter::new(host.document()).write_to_vec().unwrap()).unwrap();
+        let dwg = crate::io::load_bytes(
+            "mesh.dwg",
+            codec::DwgWriter::write_to_vec(host.document()).unwrap(),
+        )
+        .unwrap();
+        let dxf = crate::io::load_bytes(
+            "mesh.dxf",
+            codec::DxfWriter::new(host.document())
+                .write_to_vec()
+                .unwrap(),
+        )
+        .unwrap();
         let mut gaps = Vec::new();
         for (format, document) in [("DWG", &dwg), ("DXF", &dxf)] {
             let expected_digest = if format == "DXF" && !case.expect_edited_dxf.is_empty() {
@@ -5419,13 +6626,19 @@ mod tests {
                 None => gaps.push(format!("{format}: entity missing")),
             }
         }
-        assert!(gaps.is_empty(), "persistence gaps (expected {} / DXF {:?}): {gaps:#?}", case.expect_edited, case.expect_edited_dxf);
+        assert!(
+            gaps.is_empty(),
+            "persistence gaps (expected {} / DXF {:?}): {gaps:#?}",
+            case.expect_edited,
+            case.expect_edited_dxf
+        );
         for (name, mut document) in [("mesh-reedit.dwg", dwg), ("mesh-reedit.dxf", dxf)] {
             let before = document.get_entity(handle).unwrap().clone();
             let mut after = before.clone();
             (case.reedit)(&mut after);
             ocs_plugin_api::entity_coverage::validate_entity_mutation(&before, &after).unwrap();
-            ocs_plugin_api::entity_coverage::validate_canvas_entity_references(&document, &after).unwrap();
+            ocs_plugin_api::entity_coverage::validate_canvas_entity_references(&document, &after)
+                .unwrap();
             *document.get_entity_mut(handle).unwrap() = after;
             let bytes = if name.ends_with("dwg") {
                 codec::DwgWriter::write_to_vec(&document).unwrap()
@@ -5440,25 +6653,55 @@ mod tests {
             } else {
                 case.expect_reedited
             };
-            assert_eq!((case.digest)(reopened.get_entity(handle).unwrap()), expected_digest, "{name}");
+            assert_eq!(
+                (case.digest)(reopened.get_entity(handle).unwrap()),
+                expected_digest,
+                "{name}"
+            );
         }
 
-        dispatch(&mut host, &format!("PY_EVAL ocs.active_document.delete_entity({})", handle.value()));
+        dispatch(
+            &mut host,
+            &format!(
+                "PY_EVAL ocs.active_document.delete_entity({})",
+                handle.value()
+            ),
+        );
         assert!(host.document().get_entity(handle).is_none());
         for (name, bytes) in [
-            ("mesh-deleted.dwg", codec::DwgWriter::write_to_vec(host.document()).unwrap()),
-            ("mesh-deleted.dxf", codec::DxfWriter::new(host.document()).write_to_vec().unwrap()),
+            (
+                "mesh-deleted.dwg",
+                codec::DwgWriter::write_to_vec(host.document()).unwrap(),
+            ),
+            (
+                "mesh-deleted.dxf",
+                codec::DxfWriter::new(host.document())
+                    .write_to_vec()
+                    .unwrap(),
+            ),
         ] {
-            assert!(crate::io::load_bytes(name, bytes).unwrap().get_entity(handle).is_none());
+            assert!(crate::io::load_bytes(name, bytes)
+                .unwrap()
+                .get_entity(handle)
+                .is_none());
         }
         drop(process);
         drop(host);
         app.finish_pending_history(0);
-        assert_eq!(app.tabs[0].history.undo_stack.len(), if update_only { 2 } else { 3 });
+        assert_eq!(
+            app.tabs[0].history.undo_stack.len(),
+            if update_only { 2 } else { 3 }
+        );
         app.undo_steps(1);
-        assert_eq!(app.tabs[0].scene.document.get_entity(handle), Some(&expected));
+        assert_eq!(
+            app.tabs[0].scene.document.get_entity(handle),
+            Some(&expected)
+        );
         app.undo_steps(1);
-        assert_eq!(app.tabs[0].scene.document.get_entity(handle), Some(&created));
+        assert_eq!(
+            app.tabs[0].scene.document.get_entity(handle),
+            Some(&created)
+        );
         if !update_only {
             app.undo_steps(1);
             assert!(app.tabs[0].scene.document.get_entity(handle).is_none());
@@ -5734,7 +6977,8 @@ mod tests {
         run_mesh_lifecycle(&MeshCase {
             create: concat!(
                 "doc.create_entity('Underlay', underlay_type='Pdf', definition_handle=DEFHANDLE,\n",
-                "    insertion_point=P(5.0, 5.0, 0.0), x_scale=2.0, y_scale=2.0)\n"),
+                "    insertion_point=P(5.0, 5.0, 0.0), x_scale=2.0, y_scale=2.0)\n"
+            ),
             edit: concat!(
                 "u = doc.entities[HANDLE]\n",
                 "with doc.transaction('Edit underlay'):\n",
@@ -5745,7 +6989,8 @@ mod tests {
                 "    u.contrast = 70\n",
                 "    u.fade = 20\n",
                 "    u.clip_boundary_vertices = [{'x': 0.0, 'y': 0.0}, {'x': 4.0, 'y': 3.0}]\n",
-                "doc.selection = [u]\n"),
+                "doc.selection = [u]\n"
+            ),
             rejects: &[
                 ("'definition_handle':999999", "does not exist"),
                 ("'underlay_type':'Dwf'", "does not match its definition"),
@@ -5758,12 +7003,24 @@ mod tests {
             ],
             is_kind: |entity| matches!(entity, EntityType::Underlay(_)),
             digest: |entity| match entity {
-                EntityType::Underlay(u) => format!("{:?} at{:.1},{:.1} s{:.1} r{:.1} c{} f{} clip{}", u.underlay_type,
-                    u.insertion_point.x, u.insertion_point.y, u.x_scale, u.rotation, u.contrast, u.fade,
-                    u.clip_boundary_vertices.len()),
+                EntityType::Underlay(u) => format!(
+                    "{:?} at{:.1},{:.1} s{:.1} r{:.1} c{} f{} clip{}",
+                    u.underlay_type,
+                    u.insertion_point.x,
+                    u.insertion_point.y,
+                    u.x_scale,
+                    u.rotation,
+                    u.contrast,
+                    u.fade,
+                    u.clip_boundary_vertices.len()
+                ),
                 _ => "wrong kind".into(),
             },
-            reedit: |entity| if let EntityType::Underlay(u) = entity { u.x_scale = 4.0; },
+            reedit: |entity| {
+                if let EntityType::Underlay(u) = entity {
+                    u.x_scale = 4.0;
+                }
+            },
             expect_created: "Pdf at5.0,5.0 s2.0 r0.0 c100 f0 clip0",
             expect_edited: "Pdf at8.0,9.0 s3.0 r0.5 c70 f20 clip2",
             expect_reedited: "Pdf at8.0,9.0 s4.0 r0.5 c70 f20 clip2",
@@ -5901,7 +7158,13 @@ mod tests {
     fn audit_python_point_lifecycle_over_real_ipc() {
         run_mesh_lifecycle(&MeshCase {
             create: "doc.create_entity('Point', location=P(1.0, 2.0, 3.0))",
-            edit: concat!("e = doc.entities[HANDLE]\n", "with doc.transaction('Edit'):\n", "    e.location = (4.0, 5.0, 6.0)\n", "    e.thickness = 2.0\n", "doc.selection = [e]\n"),
+            edit: concat!(
+                "e = doc.entities[HANDLE]\n",
+                "with doc.transaction('Edit'):\n",
+                "    e.location = (4.0, 5.0, 6.0)\n",
+                "    e.thickness = 2.0\n",
+                "doc.selection = [e]\n"
+            ),
             rejects: &[
                 ("'location':{'x':float('nan'),'y':0.0,'z':0.0}", "finite"),
                 ("'thickness':float('inf')", "finite"),
@@ -5909,10 +7172,17 @@ mod tests {
             ],
             is_kind: |entity| matches!(entity, EntityType::Point(_)),
             digest: |entity| match entity {
-                EntityType::Point(v) => format!("{:.1},{:.1},{:.1} th{:.1}", v.location.x, v.location.y, v.location.z, v.thickness),
+                EntityType::Point(v) => format!(
+                    "{:.1},{:.1},{:.1} th{:.1}",
+                    v.location.x, v.location.y, v.location.z, v.thickness
+                ),
                 _ => "wrong kind".into(),
             },
-            reedit: |entity| if let EntityType::Point(v) = entity { v.location.z = 9.0; },
+            reedit: |entity| {
+                if let EntityType::Point(v) = entity {
+                    v.location.z = 9.0;
+                }
+            },
             expect_created: "1.0,2.0,3.0 th0.0",
             expect_edited: "4.0,5.0,6.0 th2.0",
             expect_reedited: "4.0,5.0,9.0 th2.0",
@@ -5927,7 +7197,13 @@ mod tests {
     fn audit_python_line_lifecycle_over_real_ipc() {
         run_mesh_lifecycle(&MeshCase {
             create: "doc.create_entity('Line', start=P(0.0, 0.0, 0.0), end=P(10.0, 0.0, 0.0))",
-            edit: concat!("e = doc.entities[HANDLE]\n", "with doc.transaction('Edit'):\n", "    e.end = (10.0, 5.0, 0.0)\n", "    e.thickness = 1.5\n", "doc.selection = [e]\n"),
+            edit: concat!(
+                "e = doc.entities[HANDLE]\n",
+                "with doc.transaction('Edit'):\n",
+                "    e.end = (10.0, 5.0, 0.0)\n",
+                "    e.thickness = 1.5\n",
+                "doc.selection = [e]\n"
+            ),
             rejects: &[
                 ("'start':{'x':float('nan'),'y':0.0,'z':0.0}", "finite"),
                 ("'thickness':float('inf')", "finite"),
@@ -5935,10 +7211,16 @@ mod tests {
             ],
             is_kind: |entity| matches!(entity, EntityType::Line(_)),
             digest: |entity| match entity {
-                EntityType::Line(v) => format!("{:.1},{:.1} th{:.1}", v.end.x, v.end.y, v.thickness),
+                EntityType::Line(v) => {
+                    format!("{:.1},{:.1} th{:.1}", v.end.x, v.end.y, v.thickness)
+                }
                 _ => "wrong kind".into(),
             },
-            reedit: |entity| if let EntityType::Line(v) = entity { v.start.x = 1.0; },
+            reedit: |entity| {
+                if let EntityType::Line(v) = entity {
+                    v.start.x = 1.0;
+                }
+            },
             expect_created: "10.0,0.0 th0.0",
             expect_edited: "10.0,5.0 th1.5",
             expect_reedited: "10.0,5.0 th1.5",
@@ -5953,7 +7235,13 @@ mod tests {
     fn audit_python_circle_lifecycle_over_real_ipc() {
         run_mesh_lifecycle(&MeshCase {
             create: "doc.create_entity('Circle', center=P(0.0, 0.0, 0.0), radius=5.0)",
-            edit: concat!("e = doc.entities[HANDLE]\n", "with doc.transaction('Edit'):\n", "    e.radius = 7.0\n", "    e.center = (1.0, 1.0, 0.0)\n", "doc.selection = [e]\n"),
+            edit: concat!(
+                "e = doc.entities[HANDLE]\n",
+                "with doc.transaction('Edit'):\n",
+                "    e.radius = 7.0\n",
+                "    e.center = (1.0, 1.0, 0.0)\n",
+                "doc.selection = [e]\n"
+            ),
             rejects: &[
                 ("'radius':0.0", "radius"),
                 ("'radius':-3.0", "radius"),
@@ -5961,10 +7249,16 @@ mod tests {
             ],
             is_kind: |entity| matches!(entity, EntityType::Circle(_)),
             digest: |entity| match entity {
-                EntityType::Circle(v) => format!("{:.1},{:.1} r{:.1}", v.center.x, v.center.y, v.radius),
+                EntityType::Circle(v) => {
+                    format!("{:.1},{:.1} r{:.1}", v.center.x, v.center.y, v.radius)
+                }
                 _ => "wrong kind".into(),
             },
-            reedit: |entity| if let EntityType::Circle(v) = entity { v.radius = 8.0; },
+            reedit: |entity| {
+                if let EntityType::Circle(v) = entity {
+                    v.radius = 8.0;
+                }
+            },
             expect_created: "0.0,0.0 r5.0",
             expect_edited: "1.0,1.0 r7.0",
             expect_reedited: "1.0,1.0 r8.0",
@@ -6030,18 +7324,32 @@ mod tests {
     #[test]
     fn audit_python_ray_lifecycle_over_real_ipc() {
         run_mesh_lifecycle(&MeshCase {
-            create: "doc.create_entity('Ray', base_point=P(0.0, 0.0, 0.0), direction=P(1.0, 0.0, 0.0))",
-            edit: concat!("e = doc.entities[HANDLE]\n", "with doc.transaction('Edit'):\n", "    e.base_point = (2.0, 2.0, 0.0)\n", "    e.direction = (0.0, 1.0, 0.0)\n", "doc.selection = [e]\n"),
+            create:
+                "doc.create_entity('Ray', base_point=P(0.0, 0.0, 0.0), direction=P(1.0, 0.0, 0.0))",
+            edit: concat!(
+                "e = doc.entities[HANDLE]\n",
+                "with doc.transaction('Edit'):\n",
+                "    e.base_point = (2.0, 2.0, 0.0)\n",
+                "    e.direction = (0.0, 1.0, 0.0)\n",
+                "doc.selection = [e]\n"
+            ),
             rejects: &[
                 ("'direction':{'x':2.0,'y':0.0,'z':0.0}", "unit"),
                 ("'base_point':{'x':float('nan'),'y':0.0,'z':0.0}", "finite"),
             ],
             is_kind: |entity| matches!(entity, EntityType::Ray(_)),
             digest: |entity| match entity {
-                EntityType::Ray(v) => format!("{:.1},{:.1} d{:.1},{:.1}", v.base_point.x, v.base_point.y, v.direction.x, v.direction.y),
+                EntityType::Ray(v) => format!(
+                    "{:.1},{:.1} d{:.1},{:.1}",
+                    v.base_point.x, v.base_point.y, v.direction.x, v.direction.y
+                ),
                 _ => "wrong kind".into(),
             },
-            reedit: |entity| if let EntityType::Ray(v) = entity { v.base_point.x = 3.0; },
+            reedit: |entity| {
+                if let EntityType::Ray(v) = entity {
+                    v.base_point.x = 3.0;
+                }
+            },
             expect_created: "0.0,0.0 d1.0,0.0",
             expect_edited: "2.0,2.0 d0.0,1.0",
             expect_reedited: "3.0,2.0 d0.0,1.0",
@@ -6131,8 +7439,16 @@ mod tests {
     #[test]
     fn audit_python_text_lifecycle_over_real_ipc() {
         run_mesh_lifecycle(&MeshCase {
-            create: "doc.create_entity('Text', text='Hello', insertion=P(1.0, 2.0, 0.0), height=2.5)",
-            edit: concat!("e = doc.entities[HANDLE]\n", "with doc.transaction('Edit'):\n", "    e.text = 'World'\n", "    e.rotation = 0.5\n", "    e.height = 3.0\n", "doc.selection = [e]\n"),
+            create:
+                "doc.create_entity('Text', text='Hello', insertion=P(1.0, 2.0, 0.0), height=2.5)",
+            edit: concat!(
+                "e = doc.entities[HANDLE]\n",
+                "with doc.transaction('Edit'):\n",
+                "    e.text = 'World'\n",
+                "    e.rotation = 0.5\n",
+                "    e.height = 3.0\n",
+                "doc.selection = [e]\n"
+            ),
             rejects: &[
                 ("'height':0.0", "height"),
                 ("'height':-1.0", "height"),
@@ -6143,7 +7459,11 @@ mod tests {
                 EntityType::Text(v) => format!("{} h{:.1} r{:.1}", v.value, v.height, v.rotation),
                 _ => "wrong kind".into(),
             },
-            reedit: |entity| if let EntityType::Text(v) = entity { v.height = 4.0; },
+            reedit: |entity| {
+                if let EntityType::Text(v) = entity {
+                    v.height = 4.0;
+                }
+            },
             expect_created: "Hello h2.5 r0.0",
             expect_edited: "World h3.0 r0.5",
             expect_reedited: "World h4.0 r0.5",
@@ -6427,7 +7747,11 @@ mod tests {
         let mut records = std::collections::BTreeMap::new();
         for name in ["OUTER", "INNER"] {
             let next = host.document().next_handle();
-            let (record_handle, block_handle, end_handle) = (Handle::new(next), Handle::new(next + 1), Handle::new(next + 2));
+            let (record_handle, block_handle, end_handle) = (
+                Handle::new(next),
+                Handle::new(next + 1),
+                Handle::new(next + 2),
+            );
             let mut record = codec::tables::BlockRecord::new(name);
             record.handle = record_handle;
             record.block_entity_handle = block_handle;
@@ -6436,23 +7760,40 @@ mod tests {
             let mut block = codec::entities::Block::new(name, codec::types::Vector3::ZERO);
             block.common.handle = block_handle;
             block.common.owner_handle = record_handle;
-            host.document_mut().add_entity(EntityType::Block(block)).unwrap();
+            host.document_mut()
+                .add_entity(EntityType::Block(block))
+                .unwrap();
             let mut end = codec::entities::BlockEnd::new();
             end.common.handle = end_handle;
             end.common.owner_handle = record_handle;
-            host.document_mut().add_entity(EntityType::BlockEnd(end)).unwrap();
+            host.document_mut()
+                .add_entity(EntityType::BlockEnd(end))
+                .unwrap();
             records.insert(name, record_handle);
         }
         let process = ocs_plugin_api::process::PluginProcess::spawn(
-            std::path::Path::new(&plugin_path), &mut host, crate::plugin::v4_support::notification_handler(),
-        ).unwrap();
+            std::path::Path::new(&plugin_path),
+            &mut host,
+            crate::plugin::v4_support::notification_handler(),
+        )
+        .unwrap();
         let dispatch = |host: &mut HostSession<'_>, command: &str| {
-            assert!(process.dispatch(host, command, &mut |_| {}).expect("Python dispatch"));
+            assert!(process
+                .dispatch(host, command, &mut |_| {})
+                .expect("Python dispatch"));
         };
-        let last = |host: &HostSession<'_>| host.app.command_line.history.last().unwrap().text.clone();
-        let count = |host: &HostSession<'_>| host.document().entities().filter(|e| matches!(e, EntityType::Insert(_))).count();
-        let create = |name: &str, extra: &str| format!(
-            "PY_EVAL ocs.active_document.create_entity('Insert', block_name='{name}', insert_point={{'x':0.0,'y':0.0,'z':0.0}}{extra})");
+        let last =
+            |host: &HostSession<'_>| host.app.command_line.history.last().unwrap().text.clone();
+        let count = |host: &HostSession<'_>| {
+            host.document()
+                .entities()
+                .filter(|e| matches!(e, EntityType::Insert(_)))
+                .count()
+        };
+        let create = |name: &str, extra: &str| {
+            format!(
+            "PY_EVAL ocs.active_document.create_entity('Insert', block_name='{name}', insert_point={{'x':0.0,'y':0.0,'z':0.0}}{extra})")
+        };
 
         // A valid insert of INNER into the drawing works.
         dispatch(&mut host, &create("INNER", ""));
@@ -6480,8 +7821,15 @@ mod tests {
         assert_eq!(count(&host), 2);
         assert!(last(&host).contains("contain itself"), "{}", last(&host));
         // The legacy Polyline cannot be created and says what to use instead.
-        dispatch(&mut host, "PY_EVAL ocs.active_document.create_entity('Polyline', vertices=[])");
-        assert!(last(&host).contains("Polyline2D or Polyline3D"), "{}", last(&host));
+        dispatch(
+            &mut host,
+            "PY_EVAL ocs.active_document.create_entity('Polyline', vertices=[])",
+        );
+        assert!(
+            last(&host).contains("Polyline2D or Polyline3D"),
+            "{}",
+            last(&host)
+        );
     }
 
     #[test]
@@ -6497,27 +7845,46 @@ mod tests {
                 "    e.upper_left_corner = (12.0, 40.0, 0.0)\n",
                 "    e.lower_right_corner = (42.0, 10.0, 0.0)\n",
                 "    e.lock_aspect = 1\n",
-                "doc.selection = [e]\n"),
+                "doc.selection = [e]\n"
+            ),
             rejects: &[
-                ("'upper_left_corner':{'x':42.0,'y':40.0,'z':0.0}", "nonzero width and height"),
+                (
+                    "'upper_left_corner':{'x':42.0,'y':40.0,'z':0.0}",
+                    "nonzero width and height",
+                ),
                 ("'lock_aspect':2", "0 or 1"),
-                ("'lower_right_corner':{'x':float('nan'),'y':0.0,'z':0.0}", "finite"),
+                (
+                    "'lower_right_corner':{'x':float('nan'),'y':0.0,'z':0.0}",
+                    "finite",
+                ),
                 ("'version':3", "read-only"),
                 ("'storage':{}", "outside the editable schema"),
             ],
             is_kind: |entity| matches!(entity, EntityType::Ole2Frame(_)),
             digest: |entity| match entity {
                 EntityType::Ole2Frame(v) => {
-                    let picture = match codec::entities::extract_presentation(&v.encoded_payload()) {
+                    let picture = match codec::entities::extract_presentation(&v.encoded_payload())
+                    {
                         Some(codec::entities::OlePresentation::Raster(bytes)) => bytes.len(),
                         _ => 0,
                     };
-                    format!("ul{:.1},{:.1} lr{:.1},{:.1} lock{} picture{}", v.upper_left_corner.x, v.upper_left_corner.y,
-                        v.lower_right_corner.x, v.lower_right_corner.y, v.lock_aspect, picture)
+                    format!(
+                        "ul{:.1},{:.1} lr{:.1},{:.1} lock{} picture{}",
+                        v.upper_left_corner.x,
+                        v.upper_left_corner.y,
+                        v.lower_right_corner.x,
+                        v.lower_right_corner.y,
+                        v.lock_aspect,
+                        picture
+                    )
                 }
                 _ => "wrong kind".into(),
             },
-            reedit: |entity| if let EntityType::Ole2Frame(v) = entity { v.lower_right_corner.x = 50.0; },
+            reedit: |entity| {
+                if let EntityType::Ole2Frame(v) = entity {
+                    v.lower_right_corner.x = 50.0;
+                }
+            },
             expect_created: "ul10.0,25.0 lr30.0,10.0 lock0 picture119",
             expect_edited: "ul12.0,40.0 lr42.0,10.0 lock1 picture119",
             expect_reedited: "ul12.0,40.0 lr50.0,10.0 lock1 picture119",
@@ -6534,8 +7901,8 @@ mod tests {
     #[test]
     #[ignore = "kernel spike; slow in debug builds"]
     fn spike_kernel_body_round_trip() {
-        use crate::scene::model::solid_model as sm;
         use crate::scene::convert::solid3d_tess::{kernel_acis_body, kernel_body};
+        use crate::scene::model::solid_model as sm;
         let make = |body: &kernel::brep::Body| -> codec::entities::Solid3D {
             let sat = crate::scene::convert::acis_export::solid_to_sat(body).expect("solid_to_sat");
             let mut solid = codec::entities::Solid3D::new();
@@ -6545,9 +7912,14 @@ mod tests {
         };
         let report = |label: &str, solid: &codec::entities::Solid3D| {
             let body = kernel_body(solid);
-            eprintln!("SPIKE {label}: lift={} volume={:?} wires={} sat_bytes={} binary={}",
-                body.is_some(), body.as_ref().map(sm::volume), solid.wires.len(),
-                solid.acis_data.sat_data.len(), solid.acis_data.is_binary);
+            eprintln!(
+                "SPIKE {label}: lift={} volume={:?} wires={} sat_bytes={} binary={}",
+                body.is_some(),
+                body.as_ref().map(sm::volume),
+                solid.wires.len(),
+                solid.acis_data.sat_data.len(),
+                solid.acis_data.is_binary
+            );
             body
         };
         let boxed = sm::box_solid([0.0, 0.0, 0.0], 10.0, 6.0, 4.0).unwrap();
@@ -6557,55 +7929,114 @@ mod tests {
         let handle = doc.add_entity(EntityType::Solid3D(solid.clone())).unwrap();
 
         // Round trip both formats and compare payloads.
-        let dwg = crate::io::load_bytes("s.dwg", codec::DwgWriter::write_to_vec(&doc).unwrap()).unwrap();
-        let dxf = crate::io::load_bytes("s.dxf", codec::DxfWriter::new(&doc).write_to_vec().unwrap()).unwrap();
+        let dwg =
+            crate::io::load_bytes("s.dwg", codec::DwgWriter::write_to_vec(&doc).unwrap()).unwrap();
+        let dxf =
+            crate::io::load_bytes("s.dxf", codec::DxfWriter::new(&doc).write_to_vec().unwrap())
+                .unwrap();
         for (label, reopened) in [("DWG", &dwg), ("DXF", &dxf)] {
-            let Some(EntityType::Solid3D(back)) = reopened.get_entity(handle) else { panic!("{label} lost the solid") };
+            let Some(EntityType::Solid3D(back)) = reopened.get_entity(handle) else {
+                panic!("{label} lost the solid")
+            };
             report(&format!("{label} reopen"), back);
-            eprintln!("SPIKE {label}: acis_data equal={} wires equal={} silhouettes {}", back.acis_data == solid.acis_data,
-                back.wires.len() == solid.wires.len(), back.silhouettes.len());
+            eprintln!(
+                "SPIKE {label}: acis_data equal={} wires equal={} silhouettes {}",
+                back.acis_data == solid.acis_data,
+                back.wires.len() == solid.wires.len(),
+                back.silhouettes.len()
+            );
         }
 
         // Transforms: translate, rotate, mirror, matrix.
-        let moved = sm::by_matrix(&boxed, [1.,0.,0.,0., 0.,1.,0.,0., 0.,0.,1.,0., 5.,5.,5.,1.]).unwrap();
+        let moved = sm::by_matrix(
+            &boxed,
+            [
+                1., 0., 0., 0., 0., 1., 0., 0., 0., 0., 1., 0., 5., 5., 5., 1.,
+            ],
+        )
+        .unwrap();
         let turned = sm::turned(&boxed, 2, std::f64::consts::FRAC_PI_4, [0.0, 0.0, 0.0]).unwrap();
         let mirrored = sm::mirrored(&boxed, 0, [0.0, 0.0, 0.0]).unwrap();
-        for (label, body) in [("moved", &moved), ("turned", &turned), ("mirrored", &mirrored)] {
+        for (label, body) in [
+            ("moved", &moved),
+            ("turned", &turned),
+            ("mirrored", &mirrored),
+        ] {
             let solid = make(body);
             let extent = sm::extent(body);
-            eprintln!("SPIKE {label}: volume={:.3} extent={:?} lifts_back={}", sm::volume(body), extent, kernel_body(&solid).is_some());
+            eprintln!(
+                "SPIKE {label}: volume={:.3} extent={:?} lifts_back={}",
+                sm::volume(body),
+                extent,
+                kernel_body(&solid).is_some()
+            );
         }
 
         // Booleans and primitives.
         let cyl = sm::cylinder_solid([0.0, 0.0, -3.0], 2.0, 10.0).unwrap();
-        for (label, op) in [("union", sm::Bool::Union), ("subtract", sm::Bool::Subtract), ("intersect", sm::Bool::Intersect)] {
+        for (label, op) in [
+            ("union", sm::Bool::Union),
+            ("subtract", sm::Bool::Subtract),
+            ("intersect", sm::Bool::Intersect),
+        ] {
             match sm::boolean_result(op, &boxed, &cyl) {
-                Ok(result) => { let solid = make(&result); eprintln!("SPIKE box {label} cylinder: volume={:.3} faces_wires={} lifts_back={}", sm::volume(&result), solid.wires.len(), kernel_body(&solid).is_some()); }
+                Ok(result) => {
+                    let solid = make(&result);
+                    eprintln!(
+                        "SPIKE box {label} cylinder: volume={:.3} faces_wires={} lifts_back={}",
+                        sm::volume(&result),
+                        solid.wires.len(),
+                        kernel_body(&solid).is_some()
+                    );
+                }
                 Err(snag) => eprintln!("SPIKE box {label} cylinder: refused {snag:?}"),
             }
         }
         for (label, body) in [
-            ("sphere", sm::sphere_solid([0.0; 3], 3.0)), ("torus", sm::torus_solid([0.0; 3], 5.0, 1.0)),
-            ("wedge", sm::wedge_solid([0.0; 3], 4.0, 3.0, 2.0)), ("pyramid", sm::pyramid_solid([0.0; 3], 3.0, 4.0, 5)),
+            ("sphere", sm::sphere_solid([0.0; 3], 3.0)),
+            ("torus", sm::torus_solid([0.0; 3], 5.0, 1.0)),
+            ("wedge", sm::wedge_solid([0.0; 3], 4.0, 3.0, 2.0)),
+            ("pyramid", sm::pyramid_solid([0.0; 3], 3.0, 4.0, 5)),
         ] {
             match body {
-                Some(body) => { let solid = make(&body); eprintln!("SPIKE {label}: volume={:.3} lifts_back={}", sm::volume(&body), kernel_body(&solid).is_some()); }
+                Some(body) => {
+                    let solid = make(&body);
+                    eprintln!(
+                        "SPIKE {label}: volume={:.3} lifts_back={}",
+                        sm::volume(&body),
+                        kernel_body(&solid).is_some()
+                    );
+                }
                 None => eprintln!("SPIKE {label}: kernel returned None"),
             }
         }
 
         // The same payload inside a Body entity and a Region-like container.
         let mut body_entity = codec::entities::Body::new();
-        body_entity.set_sat_document(&crate::scene::convert::acis_export::solid_to_sat(&boxed).unwrap());
+        body_entity
+            .set_sat_document(&crate::scene::convert::acis_export::solid_to_sat(&boxed).unwrap());
         let lifted = kernel_acis_body(&body_entity.acis_data);
-        eprintln!("SPIKE Body entity: lift={} volume={:?}", lifted.is_some(), lifted.as_ref().map(sm::volume));
+        eprintln!(
+            "SPIKE Body entity: lift={} volume={:?}",
+            lifted.is_some(),
+            lifted.as_ref().map(sm::volume)
+        );
         let bh = doc.add_entity(EntityType::Body(body_entity)).unwrap();
-        let dwg = crate::io::load_bytes("b.dwg", codec::DwgWriter::write_to_vec(&doc).unwrap()).unwrap();
-        let dxf = crate::io::load_bytes("b.dxf", codec::DxfWriter::new(&doc).write_to_vec().unwrap()).unwrap();
+        let dwg =
+            crate::io::load_bytes("b.dwg", codec::DwgWriter::write_to_vec(&doc).unwrap()).unwrap();
+        let dxf =
+            crate::io::load_bytes("b.dxf", codec::DxfWriter::new(&doc).write_to_vec().unwrap())
+                .unwrap();
         for (label, reopened) in [("DWG", &dwg), ("DXF", &dxf)] {
             match reopened.get_entity(bh) {
-                Some(EntityType::Body(back)) => eprintln!("SPIKE Body {label}: lift={}", kernel_acis_body(&back.acis_data).is_some()),
-                other => eprintln!("SPIKE Body {label}: came back as {:?}", other.map(|e| format!("{e:?}").chars().take(30).collect::<String>())),
+                Some(EntityType::Body(back)) => eprintln!(
+                    "SPIKE Body {label}: lift={}",
+                    kernel_acis_body(&back.acis_data).is_some()
+                ),
+                other => eprintln!(
+                    "SPIKE Body {label}: came back as {:?}",
+                    other.map(|e| format!("{e:?}").chars().take(30).collect::<String>())
+                ),
             }
         }
     }
@@ -6619,22 +8050,69 @@ mod tests {
         let time = |label: &str, f: &mut dyn FnMut() -> String| {
             let start = Instant::now();
             let note = f();
-            eprintln!("TIMING {label}: {:.2}s {note}", start.elapsed().as_secs_f64());
+            eprintln!(
+                "TIMING {label}: {:.2}s {note}",
+                start.elapsed().as_secs_f64()
+            );
         };
         let boxed = sm::box_solid([0.0; 3], 10.0, 6.0, 4.0).unwrap();
         let cyl = sm::cylinder_solid([0.0, 0.0, -3.0], 2.0, 10.0).unwrap();
-        time("box primitive", &mut || format!("{}", sm::box_solid([0.0; 3], 10.0, 6.0, 4.0).is_some()));
-        time("sphere primitive", &mut || format!("{}", sm::sphere_solid([0.0; 3], 3.0).is_some()));
-        time("solid_to_sat(box)", &mut || format!("{}", crate::scene::convert::acis_export::solid_to_sat(&boxed).is_some()));
-        time("edge_wires(box)", &mut || format!("{}", sm::edge_wires(&boxed).len()));
-        time("transform (matrix)", &mut || format!("{}", sm::by_matrix(&boxed, [1.,0.,0.,0., 0.,1.,0.,0., 0.,0.,1.,0., 5.,5.,5.,1.]).is_some()));
-        time("union", &mut || format!("{}", sm::boolean_result(sm::Bool::Union, &boxed, &cyl).is_ok()));
-        time("subtract", &mut || format!("{}", sm::boolean_result(sm::Bool::Subtract, &boxed, &cyl).is_ok()));
-        time("intersect", &mut || format!("{}", sm::boolean_result(sm::Bool::Intersect, &boxed, &cyl).is_ok()));
+        time("box primitive", &mut || {
+            format!("{}", sm::box_solid([0.0; 3], 10.0, 6.0, 4.0).is_some())
+        });
+        time("sphere primitive", &mut || {
+            format!("{}", sm::sphere_solid([0.0; 3], 3.0).is_some())
+        });
+        time("solid_to_sat(box)", &mut || {
+            format!(
+                "{}",
+                crate::scene::convert::acis_export::solid_to_sat(&boxed).is_some()
+            )
+        });
+        time("edge_wires(box)", &mut || {
+            format!("{}", sm::edge_wires(&boxed).len())
+        });
+        time("transform (matrix)", &mut || {
+            format!(
+                "{}",
+                sm::by_matrix(
+                    &boxed,
+                    [1., 0., 0., 0., 0., 1., 0., 0., 0., 0., 1., 0., 5., 5., 5., 1.]
+                )
+                .is_some()
+            )
+        });
+        time("union", &mut || {
+            format!(
+                "{}",
+                sm::boolean_result(sm::Bool::Union, &boxed, &cyl).is_ok()
+            )
+        });
+        time("subtract", &mut || {
+            format!(
+                "{}",
+                sm::boolean_result(sm::Bool::Subtract, &boxed, &cyl).is_ok()
+            )
+        });
+        time("intersect", &mut || {
+            format!(
+                "{}",
+                sm::boolean_result(sm::Bool::Intersect, &boxed, &cyl).is_ok()
+            )
+        });
         let result = sm::boolean_result(sm::Bool::Union, &boxed, &cyl).unwrap();
-        time("solid_to_sat(union)", &mut || format!("{}", crate::scene::convert::acis_export::solid_to_sat(&result).is_some()));
-        time("edge_wires(union)", &mut || format!("{}", sm::edge_wires(&result).len()));
-        time("volume(union)", &mut || format!("{:.1}", sm::volume(&result)));
+        time("solid_to_sat(union)", &mut || {
+            format!(
+                "{}",
+                crate::scene::convert::acis_export::solid_to_sat(&result).is_some()
+            )
+        });
+        time("edge_wires(union)", &mut || {
+            format!("{}", sm::edge_wires(&result).len())
+        });
+        time("volume(union)", &mut || {
+            format!("{:.1}", sm::volume(&result))
+        });
     }
 
     #[test]
@@ -6648,38 +8126,58 @@ mod tests {
         app.tabs[0].is_start = false;
         let mut host = HostSession::new(&mut app, 0);
         let process = ocs_plugin_api::process::PluginProcess::spawn(
-            std::path::Path::new(&plugin_path), &mut host, crate::plugin::v4_support::notification_handler(),
-        ).unwrap();
+            std::path::Path::new(&plugin_path),
+            &mut host,
+            crate::plugin::v4_support::notification_handler(),
+        )
+        .unwrap();
         let dispatch = |host: &mut HostSession<'_>, command: &str| {
-            assert!(process.dispatch(host, command, &mut |_| {}).expect("Python dispatch"));
+            assert!(process
+                .dispatch(host, command, &mut |_| {})
+                .expect("Python dispatch"));
         };
-        let last = |host: &HostSession<'_>| host.app.command_line.history.last().unwrap().text.clone();
+        let last =
+            |host: &HostSession<'_>| host.app.command_line.history.last().unwrap().text.clone();
         let solids = |host: &HostSession<'_>| -> Vec<Handle> {
-            let mut list: Vec<_> = host.document().entities().filter_map(|e| match e {
-                EntityType::Solid3D(s) => Some(s.common.handle), _ => None }).collect();
+            let mut list: Vec<_> = host
+                .document()
+                .entities()
+                .filter_map(|e| match e {
+                    EntityType::Solid3D(s) => Some(s.common.handle),
+                    _ => None,
+                })
+                .collect();
             list.sort_by_key(|h| h.value());
             list
         };
         let body_of = |host: &HostSession<'_>, handle: Handle| {
-            let Some(EntityType::Solid3D(solid)) = host.document().get_entity(handle) else { panic!("no solid {handle:?}") };
+            let Some(EntityType::Solid3D(solid)) = host.document().get_entity(handle) else {
+                panic!("no solid {handle:?}")
+            };
             kernel_body(solid).expect("payload lifts losslessly")
         };
         let volume = |host: &HostSession<'_>, handle: Handle| sm::volume(&body_of(host, handle));
-        let extent = |host: &HostSession<'_>, handle: Handle| sm::extent(&body_of(host, handle)).unwrap();
+        let extent =
+            |host: &HostSession<'_>, handle: Handle| sm::extent(&body_of(host, handle)).unwrap();
         let close = |a: f64, b: f64, tolerance: f64| (a - b).abs() <= tolerance * b.abs().max(1.0);
 
         // C: every primitive, checked against its analytic volume.
-        let script = std::env::temp_dir().join(format!("ocs_solid_create_{}.py", std::process::id()));
-        std::fs::write(&script, concat!(
-            "s = ocs.active_document.solids\n",
-            "s.box(center=(0, 0, 0), size=(10, 6, 4))\n",
-            "s.cylinder(center=(20, 0, 0), radius=2, height=5)\n",
-            "s.sphere(center=(40, 0, 0), radius=3)\n",
-            "s.torus(center=(60, 0, 0), major=5, minor=1)\n",
-            "s.wedge(origin=(80, 0, 0), size=(4, 3, 2))\n",
-            "s.pyramid(center=(100, 0, 0), radius=3, height=4, sides=5)\n",
-            "s.box(center=(0, 20, 0), size=(2, 2, 2), layer='SOLIDS')\n",
-        )).unwrap();
+        let script =
+            std::env::temp_dir().join(format!("ocs_solid_create_{}.py", std::process::id()));
+        std::fs::write(
+            &script,
+            concat!(
+                "s = ocs.active_document.solids\n",
+                "s.box(center=(0, 0, 0), size=(10, 6, 4))\n",
+                "s.cylinder(center=(20, 0, 0), radius=2, height=5)\n",
+                "s.sphere(center=(40, 0, 0), radius=3)\n",
+                "s.torus(center=(60, 0, 0), major=5, minor=1)\n",
+                "s.wedge(origin=(80, 0, 0), size=(4, 3, 2))\n",
+                "s.pyramid(center=(100, 0, 0), radius=3, height=4, sides=5)\n",
+                "s.box(center=(0, 20, 0), size=(2, 2, 2), layer='SOLIDS')\n",
+            ),
+        )
+        .unwrap();
         dispatch(&mut host, &format!("PY_RUN {}", script.display()));
         let _ = std::fs::remove_file(&script);
         let list = solids(&host);
@@ -6687,38 +8185,90 @@ mod tests {
         let pi = std::f64::consts::PI;
         let five_gon = 0.5 * 5.0 * 3.0f64.powi(2) * (2.0 * pi / 5.0).sin();
         for (index, expected, tolerance) in [
-            (0, 240.0, 1e-9), (1, pi * 4.0 * 5.0, 0.02), (2, 4.0 / 3.0 * pi * 27.0, 0.02),
-            (3, 2.0 * pi * pi * 5.0 * 1.0, 0.02), (4, 12.0, 1e-9), (5, five_gon * 4.0 / 3.0, 0.02), (6, 8.0, 1e-9),
+            (0, 240.0, 1e-9),
+            (1, pi * 4.0 * 5.0, 0.02),
+            (2, 4.0 / 3.0 * pi * 27.0, 0.02),
+            (3, 2.0 * pi * pi * 5.0 * 1.0, 0.02),
+            (4, 12.0, 1e-9),
+            (5, five_gon * 4.0 / 3.0, 0.02),
+            (6, 8.0, 1e-9),
         ] {
             let actual = volume(&host, list[index]);
-            assert!(close(actual, expected, tolerance), "solid {index}: volume {actual}, expected {expected}");
+            assert!(
+                close(actual, expected, tolerance),
+                "solid {index}: volume {actual}, expected {expected}"
+            );
         }
-        let Some(EntityType::Solid3D(first)) = host.document().get_entity(list[0]) else { unreachable!() };
+        let Some(EntityType::Solid3D(first)) = host.document().get_entity(list[0]) else {
+            unreachable!()
+        };
         assert_eq!((first.wires.len(), first.common.layer.as_str()), (12, "0"));
-        assert!(matches!(host.document().get_entity(list[6]), Some(EntityType::Solid3D(s)) if s.common.layer == "SOLIDS"));
-        assert!(!host.app.tabs[0].scene.wire_models_for(&[list[0]]).is_empty(), "no canvas geometry");
+        assert!(
+            matches!(host.document().get_entity(list[6]), Some(EntityType::Solid3D(s)) if s.common.layer == "SOLIDS")
+        );
+        assert!(
+            !host.app.tabs[0]
+                .scene
+                .wire_models_for(&[list[0]])
+                .is_empty(),
+            "no canvas geometry"
+        );
         let read = |host: &mut HostSession<'_>, expression: &str| {
             dispatch(host, &format!("PY_EVAL {expression}"));
             last(host)
         };
-        assert!(read(&mut host, &format!("ocs.active_document.entities[{}].kind", list[0].value())).contains("Solid3D"));
+        assert!(read(
+            &mut host,
+            &format!("ocs.active_document.entities[{}].kind", list[0].value())
+        )
+        .contains("Solid3D"));
 
         // E: rigid moves keep the volume and move the extent exactly.
         let box_handle = list[0];
         let before = host.document().get_entity(box_handle).unwrap().clone();
         let undo_before = host.app.tabs[0].history.undo_stack.len();
         let (low, high) = extent(&host, box_handle);
-        assert!(close(low[0], -5.0, 1e-6) && close(high[2], 2.0, 1e-6), "{low:?} {high:?}");
-        dispatch(&mut host, &format!("PY_EVAL ocs.active_document.solids.translate({}, (5, 5, 5)).handle", box_handle.value()));
+        assert!(
+            close(low[0], -5.0, 1e-6) && close(high[2], 2.0, 1e-6),
+            "{low:?} {high:?}"
+        );
+        dispatch(
+            &mut host,
+            &format!(
+                "PY_EVAL ocs.active_document.solids.translate({}, (5, 5, 5)).handle",
+                box_handle.value()
+            ),
+        );
         let (low, high) = extent(&host, box_handle);
-        assert!(close(low[0], 0.0, 1e-6) && close(high[1], 8.0, 1e-6) && close(high[2], 7.0, 1e-6), "{low:?} {high:?}");
+        assert!(
+            close(low[0], 0.0, 1e-6) && close(high[1], 8.0, 1e-6) && close(high[2], 7.0, 1e-6),
+            "{low:?} {high:?}"
+        );
         dispatch(&mut host, &format!("PY_EVAL ocs.active_document.solids.rotate({}, 'z', 0.7853981633974483, (5, 5, 5)).handle", box_handle.value()));
-        dispatch(&mut host, &format!("PY_EVAL ocs.active_document.solids.mirror({}, 'x', (0, 0, 0)).handle", box_handle.value()));
-        assert!(close(volume(&host, box_handle), 240.0, 1e-9), "moves preserve volume");
-        let Some(EntityType::Solid3D(moved)) = host.document().get_entity(box_handle) else { unreachable!() };
-        assert_eq!((moved.wires.len(), moved.history_handle, moved.common.handle), (12, None, box_handle));
+        dispatch(
+            &mut host,
+            &format!(
+                "PY_EVAL ocs.active_document.solids.mirror({}, 'x', (0, 0, 0)).handle",
+                box_handle.value()
+            ),
+        );
+        assert!(
+            close(volume(&host, box_handle), 240.0, 1e-9),
+            "moves preserve volume"
+        );
+        let Some(EntityType::Solid3D(moved)) = host.document().get_entity(box_handle) else {
+            unreachable!()
+        };
+        assert_eq!(
+            (moved.wires.len(), moved.history_handle, moved.common.handle),
+            (12, None, box_handle)
+        );
         assert_eq!(moved.common.layer, "0");
-        assert_eq!(host.app.tabs[0].history.undo_stack.len() - undo_before, 3, "one undo step per move");
+        assert_eq!(
+            host.app.tabs[0].history.undo_stack.len() - undo_before,
+            3,
+            "one undo step per move"
+        );
 
         // V: refused operations change nothing and leave no undo step.
         let snapshot = host.document().get_entity(box_handle).unwrap().clone();
@@ -6746,48 +8296,114 @@ mod tests {
             assert!(last(&host).contains(message), "{command}: {}", last(&host));
         }
         assert_eq!(host.document().get_entity(box_handle), Some(&snapshot));
-        assert_eq!(host.document().get_entity(unliftable), Some(&unliftable_before));
-        assert_eq!(solids(&host).len(), count_before + 1, "only the fixture was added");
-        assert_eq!(host.app.tabs[0].history.undo_stack.len(), undo_now, "refusals record no undo step");
+        assert_eq!(
+            host.document().get_entity(unliftable),
+            Some(&unliftable_before)
+        );
+        assert_eq!(
+            solids(&host).len(),
+            count_before + 1,
+            "only the fixture was added"
+        );
+        assert_eq!(
+            host.app.tabs[0].history.undo_stack.len(),
+            undo_now,
+            "refusals record no undo step"
+        );
         // Transforming a non-solid is refused.
         let line = host.add_entity(EntityType::Line(codec::entities::Line::from_points(
-            codec::types::Vector3::ZERO, codec::types::Vector3::new(1.0, 0.0, 0.0))));
-        dispatch(&mut host, &format!("PY_EVAL ocs.active_document.solids.translate({}, (1, 0, 0))", line.value()));
-        assert!(last(&host).contains("outside the Python schema") || last(&host).contains("applies to Solid3D"), "{}", last(&host));
+            codec::types::Vector3::ZERO,
+            codec::types::Vector3::new(1.0, 0.0, 0.0),
+        )));
+        dispatch(
+            &mut host,
+            &format!(
+                "PY_EVAL ocs.active_document.solids.translate({}, (1, 0, 0))",
+                line.value()
+            ),
+        );
+        assert!(
+            last(&host).contains("outside the Python schema")
+                || last(&host).contains("applies to Solid3D"),
+            "{}",
+            last(&host)
+        );
 
         // W: both formats reopen the moved solid losslessly; the reopened
         // payload can be moved again.
         let moved_volume = volume(&host, box_handle);
         let moved_extent = extent(&host, box_handle);
-        let dwg = crate::io::load_bytes("solid.dwg", codec::DwgWriter::write_to_vec(host.document()).unwrap()).unwrap();
-        let dxf = crate::io::load_bytes("solid.dxf", codec::DxfWriter::new(host.document()).write_to_vec().unwrap()).unwrap();
+        let dwg = crate::io::load_bytes(
+            "solid.dwg",
+            codec::DwgWriter::write_to_vec(host.document()).unwrap(),
+        )
+        .unwrap();
+        let dxf = crate::io::load_bytes(
+            "solid.dxf",
+            codec::DxfWriter::new(host.document())
+                .write_to_vec()
+                .unwrap(),
+        )
+        .unwrap();
         for (format, document) in [("DWG", &dwg), ("DXF", &dxf)] {
-            let Some(EntityType::Solid3D(back)) = document.get_entity(box_handle) else { panic!("{format} lost the solid") };
-            let body = kernel_body(back).unwrap_or_else(|| panic!("{format} payload does not lift"));
+            let Some(EntityType::Solid3D(back)) = document.get_entity(box_handle) else {
+                panic!("{format} lost the solid")
+            };
+            let body =
+                kernel_body(back).unwrap_or_else(|| panic!("{format} payload does not lift"));
             assert!(close(sm::volume(&body), moved_volume, 1e-6), "{format}");
             let reopened_extent = sm::extent(&body).unwrap();
             for axis in 0..3 {
-                assert!(close(reopened_extent.0[axis], moved_extent.0[axis], 1e-6) && close(reopened_extent.1[axis], moved_extent.1[axis], 1e-6), "{format} extent");
+                assert!(
+                    close(reopened_extent.0[axis], moved_extent.0[axis], 1e-6)
+                        && close(reopened_extent.1[axis], moved_extent.1[axis], 1e-6),
+                    "{format} extent"
+                );
             }
             let again = host.add_entity(EntityType::Solid3D(back.clone()));
-            dispatch(&mut host, &format!("PY_EVAL ocs.active_document.solids.translate({}, (100, 0, 0)).handle", again.value()));
+            dispatch(
+                &mut host,
+                &format!(
+                    "PY_EVAL ocs.active_document.solids.translate({}, (100, 0, 0)).handle",
+                    again.value()
+                ),
+            );
             let (low, _) = extent(&host, again);
-            assert!(close(low[0], reopened_extent.0[0] + 100.0, 1e-6), "{format} re-edit");
+            assert!(
+                close(low[0], reopened_extent.0[0] + 100.0, 1e-6),
+                "{format} re-edit"
+            );
         }
 
         // D and U: delete, then undo and redo restore the moved state.
-        dispatch(&mut host, &format!("PY_EVAL ocs.active_document.delete_entity({})", box_handle.value()));
+        dispatch(
+            &mut host,
+            &format!(
+                "PY_EVAL ocs.active_document.delete_entity({})",
+                box_handle.value()
+            ),
+        );
         assert!(host.document().get_entity(box_handle).is_none());
         drop(process);
         drop(host);
         app.finish_pending_history(0);
         // Steps after creation: 3 moves, 2 re-edits of reopened copies, 1 delete.
         app.undo_steps(1);
-        assert!(app.tabs[0].scene.document.get_entity(box_handle).is_some(), "undo restores the deleted solid");
+        assert!(
+            app.tabs[0].scene.document.get_entity(box_handle).is_some(),
+            "undo restores the deleted solid"
+        );
         app.undo_steps(5);
-        assert_eq!(app.tabs[0].scene.document.get_entity(box_handle), Some(&before), "undoing every move restores the original solid exactly");
+        assert_eq!(
+            app.tabs[0].scene.document.get_entity(box_handle),
+            Some(&before),
+            "undoing every move restores the original solid exactly"
+        );
         app.redo_steps(6);
-        assert!(app.tabs[0].scene.document.get_entity(box_handle).is_none(), "redo replays the moves and the delete");
+        assert!(
+            app.tabs[0].scene.document.get_entity(box_handle).is_none(),
+            "redo replays the moves and the delete"
+        );
     }
 
     #[test]
@@ -6806,28 +8422,77 @@ mod tests {
         body.wires = sm::edge_wires(&boxed);
         let handle = host.add_entity(EntityType::Body(body));
         let process = ocs_plugin_api::process::PluginProcess::spawn(
-            std::path::Path::new(&plugin_path), &mut host, crate::plugin::v4_support::notification_handler(),
-        ).unwrap();
+            std::path::Path::new(&plugin_path),
+            &mut host,
+            crate::plugin::v4_support::notification_handler(),
+        )
+        .unwrap();
         let dispatch = |host: &mut HostSession<'_>, command: &str| {
-            assert!(process.dispatch(host, command, &mut |_| {}).expect("Python dispatch"));
+            assert!(process
+                .dispatch(host, command, &mut |_| {})
+                .expect("Python dispatch"));
         };
         let extent = |host: &HostSession<'_>| {
-            let Some(EntityType::Body(b)) = host.document().get_entity(handle) else { panic!("no body") };
-            sm::extent(&crate::scene::convert::solid3d_tess::kernel_acis_body(&b.acis_data).unwrap()).unwrap()
+            let Some(EntityType::Body(b)) = host.document().get_entity(handle) else {
+                panic!("no body")
+            };
+            sm::extent(
+                &crate::scene::convert::solid3d_tess::kernel_acis_body(&b.acis_data).unwrap(),
+            )
+            .unwrap()
         };
         assert!((extent(&host).0[0] + 2.0).abs() < 1e-6);
-        dispatch(&mut host, &format!("PY_EVAL ocs.active_document.entities[{}].kind", handle.value()));
-        assert!(host.app.command_line.history.last().unwrap().text.contains("Body"));
-        dispatch(&mut host, &format!("PY_EVAL ocs.active_document.solids.translate({}, (10, 0, 0)).handle", handle.value()));
-        assert!((extent(&host).0[0] - 8.0).abs() < 1e-6, "{:?}", extent(&host));
+        dispatch(
+            &mut host,
+            &format!(
+                "PY_EVAL ocs.active_document.entities[{}].kind",
+                handle.value()
+            ),
+        );
+        assert!(host
+            .app
+            .command_line
+            .history
+            .last()
+            .unwrap()
+            .text
+            .contains("Body"));
+        dispatch(
+            &mut host,
+            &format!(
+                "PY_EVAL ocs.active_document.solids.translate({}, (10, 0, 0)).handle",
+                handle.value()
+            ),
+        );
+        assert!(
+            (extent(&host).0[0] - 8.0).abs() < 1e-6,
+            "{:?}",
+            extent(&host)
+        );
         let bytes = codec::DwgWriter::write_to_vec(host.document()).unwrap();
         let reopened = crate::io::load_bytes("body.dwg", bytes).unwrap();
-        let Some(EntityType::Body(back)) = reopened.get_entity(handle) else { panic!("DWG lost the body") };
-        let lifted = crate::scene::convert::solid3d_tess::kernel_acis_body(&back.acis_data).expect("DWG body lifts");
+        let Some(EntityType::Body(back)) = reopened.get_entity(handle) else {
+            panic!("DWG lost the body")
+        };
+        let lifted = crate::scene::convert::solid3d_tess::kernel_acis_body(&back.acis_data)
+            .expect("DWG body lifts");
         assert!((sm::volume(&lifted) - 64.0).abs() < 1e-6);
         // Scripts cannot create a Body and get the explanatory message.
-        dispatch(&mut host, "PY_EVAL ocs.active_document.create_entity('Body')");
-        assert!(host.app.command_line.history.last().unwrap().text.contains("use doc.solids"), "{}", host.app.command_line.history.last().unwrap().text);
+        dispatch(
+            &mut host,
+            "PY_EVAL ocs.active_document.create_entity('Body')",
+        );
+        assert!(
+            host.app
+                .command_line
+                .history
+                .last()
+                .unwrap()
+                .text
+                .contains("use doc.solids"),
+            "{}",
+            host.app.command_line.history.last().unwrap().text
+        );
     }
 
     #[test]
@@ -6841,28 +8506,44 @@ mod tests {
         app.tabs[0].is_start = false;
         let mut host = HostSession::new(&mut app, 0);
         let process = ocs_plugin_api::process::PluginProcess::spawn(
-            std::path::Path::new(&plugin_path), &mut host, crate::plugin::v4_support::notification_handler(),
-        ).unwrap();
+            std::path::Path::new(&plugin_path),
+            &mut host,
+            crate::plugin::v4_support::notification_handler(),
+        )
+        .unwrap();
         let dispatch = |host: &mut HostSession<'_>, command: &str| {
-            assert!(process.dispatch(host, command, &mut |_| {}).expect("Python dispatch"));
+            assert!(process
+                .dispatch(host, command, &mut |_| {})
+                .expect("Python dispatch"));
         };
-        let last = |host: &HostSession<'_>| host.app.command_line.history.last().unwrap().text.clone();
+        let last =
+            |host: &HostSession<'_>| host.app.command_line.history.last().unwrap().text.clone();
         let regions = |host: &HostSession<'_>| -> Vec<Handle> {
-            let mut list: Vec<_> = host.document().entities().filter_map(|e| match e {
-                EntityType::Region(r) => Some(r.common.handle), _ => None }).collect();
+            let mut list: Vec<_> = host
+                .document()
+                .entities()
+                .filter_map(|e| match e {
+                    EntityType::Region(r) => Some(r.common.handle),
+                    _ => None,
+                })
+                .collect();
             list.sort_by_key(|h| h.value());
             list
         };
         let extent_in = |document: &CadDocument, handle: Handle| {
-            let Some(EntityType::Region(region)) = document.get_entity(handle) else { panic!("no region {handle:?}") };
-            let body = kernel_acis_body(&region.acis_data).expect("region payload lifts losslessly");
+            let Some(EntityType::Region(region)) = document.get_entity(handle) else {
+                panic!("no region {handle:?}")
+            };
+            let body =
+                kernel_acis_body(&region.acis_data).expect("region payload lifts losslessly");
             sm::extent(&body).unwrap()
         };
         let close = |a: f64, b: f64| (a - b).abs() < 1e-6;
 
         // C: regions from a circle (source kept), a closed rectangle (source
         // deleted) and a second circle on its own layer.
-        let script = std::env::temp_dir().join(format!("ocs_region_create_{}.py", std::process::id()));
+        let script =
+            std::env::temp_dir().join(format!("ocs_region_create_{}.py", std::process::id()));
         std::fs::write(&script, concat!(
             "doc = ocs.active_document\n",
             "circle = doc.create_entity('Circle', center=(0, 0, 0), radius=5)\n",
@@ -6877,24 +8558,77 @@ mod tests {
         let list = regions(&host);
         assert_eq!(list.len(), 3, "{}", last(&host));
         let (low, high) = extent_in(host.document(), list[0]);
-        assert!(close(low[0], -5.0) && close(high[0], 5.0) && close(low[1], -5.0) && close(high[1], 5.0) && close(low[2], 0.0) && close(high[2], 0.0), "{low:?} {high:?}");
+        assert!(
+            close(low[0], -5.0)
+                && close(high[0], 5.0)
+                && close(low[1], -5.0)
+                && close(high[1], 5.0)
+                && close(low[2], 0.0)
+                && close(high[2], 0.0),
+            "{low:?} {high:?}"
+        );
         let (low, high) = extent_in(host.document(), list[1]);
-        assert!(close(low[0], 20.0) && close(high[0], 30.0) && close(high[1], 6.0), "{low:?} {high:?}");
-        let layer_of = |host: &HostSession<'_>, handle: Handle| host.document().get_entity(handle).unwrap().common().layer.clone();
-        assert_eq!(layer_of(&host, list[0]), "0", "defaults to the profile's layer");
+        assert!(
+            close(low[0], 20.0) && close(high[0], 30.0) && close(high[1], 6.0),
+            "{low:?} {high:?}"
+        );
+        let layer_of = |host: &HostSession<'_>, handle: Handle| {
+            host.document()
+                .get_entity(handle)
+                .unwrap()
+                .common()
+                .layer
+                .clone()
+        };
+        assert_eq!(
+            layer_of(&host, list[0]),
+            "0",
+            "defaults to the profile's layer"
+        );
         assert_eq!(layer_of(&host, list[2]), "REGIONS");
-        let circles = host.document().entities().filter(|e| matches!(e, EntityType::Circle(_))).count();
-        let polylines = host.document().entities().filter(|e| matches!(e, EntityType::LwPolyline(_))).count();
-        assert_eq!((circles, polylines), (2, 0), "delete_source removed only the rectangle");
-        let Some(EntityType::Region(first)) = host.document().get_entity(list[0]) else { unreachable!() };
-        assert_eq!((first.wires.is_empty(), first.point_of_reference.z), (false, 0.0));
-        assert!(!host.app.tabs[0].scene.wire_models_for(&[list[0]]).is_empty(), "no canvas geometry");
-        dispatch(&mut host, &format!("PY_EVAL ocs.active_document.entities[{}].kind", list[0].value()));
+        let circles = host
+            .document()
+            .entities()
+            .filter(|e| matches!(e, EntityType::Circle(_)))
+            .count();
+        let polylines = host
+            .document()
+            .entities()
+            .filter(|e| matches!(e, EntityType::LwPolyline(_)))
+            .count();
+        assert_eq!(
+            (circles, polylines),
+            (2, 0),
+            "delete_source removed only the rectangle"
+        );
+        let Some(EntityType::Region(first)) = host.document().get_entity(list[0]) else {
+            unreachable!()
+        };
+        assert_eq!(
+            (first.wires.is_empty(), first.point_of_reference.z),
+            (false, 0.0)
+        );
+        assert!(
+            !host.app.tabs[0]
+                .scene
+                .wire_models_for(&[list[0]])
+                .is_empty(),
+            "no canvas geometry"
+        );
+        dispatch(
+            &mut host,
+            &format!(
+                "PY_EVAL ocs.active_document.entities[{}].kind",
+                list[0].value()
+            ),
+        );
         assert!(last(&host).contains("Region"));
 
         // V: refusals change nothing and leave no undo step.
         let open_line = host.add_entity(EntityType::Line(codec::entities::Line::from_points(
-            codec::types::Vector3::ZERO, codec::types::Vector3::new(5.0, 0.0, 0.0))));
+            codec::types::Vector3::ZERO,
+            codec::types::Vector3::new(5.0, 0.0, 0.0),
+        )));
         let mut open_poly = codec::entities::LwPolyline::new();
         open_poly.vertices = vec![
             codec::entities::LwVertex::new(codec::types::Vector2::new(0.0, 0.0)),
@@ -6906,56 +8640,140 @@ mod tests {
         let entity_count = host.document().entities().count();
         let undo_now = host.app.tabs[0].history.undo_stack.len();
         for (command, message) in [
-            (format!("ocs.active_document.solids.region({})", open_line.value()), "must be closed"),
-            (format!("ocs.active_document.solids.region({})", open_poly.value()), "must be closed"),
-            (format!("ocs.active_document.solids.region({})", ray.value()), "planar profile"),
-            (format!("ocs.active_document.solids.region({})", list[0].value()), "already a region"),
-            ("ocs.active_document.solids.region(999999)".to_string(), "does not exist"),
-            (format!("ocs.active_document.solids.region({}, layer='')", open_line.value()), "layer name is empty"),
+            (
+                format!("ocs.active_document.solids.region({})", open_line.value()),
+                "must be closed",
+            ),
+            (
+                format!("ocs.active_document.solids.region({})", open_poly.value()),
+                "must be closed",
+            ),
+            (
+                format!("ocs.active_document.solids.region({})", ray.value()),
+                "planar profile",
+            ),
+            (
+                format!("ocs.active_document.solids.region({})", list[0].value()),
+                "already a region",
+            ),
+            (
+                "ocs.active_document.solids.region(999999)".to_string(),
+                "does not exist",
+            ),
+            (
+                format!(
+                    "ocs.active_document.solids.region({}, layer='')",
+                    open_line.value()
+                ),
+                "layer name is empty",
+            ),
         ] {
             dispatch(&mut host, &format!("PY_EVAL {command}"));
             assert!(last(&host).contains(message), "{command}: {}", last(&host));
         }
         assert_eq!(host.document().entities().count(), entity_count);
-        assert_eq!(host.app.tabs[0].history.undo_stack.len(), undo_now, "refusals record no undo step");
+        assert_eq!(
+            host.app.tabs[0].history.undo_stack.len(),
+            undo_now,
+            "refusals record no undo step"
+        );
 
         // E: a region moves through the same kernel channel.
         let before = host.document().get_entity(list[0]).unwrap().clone();
-        dispatch(&mut host, &format!("PY_EVAL ocs.active_document.solids.translate({}, (10, 5, 0)).handle", list[0].value()));
+        dispatch(
+            &mut host,
+            &format!(
+                "PY_EVAL ocs.active_document.solids.translate({}, (10, 5, 0)).handle",
+                list[0].value()
+            ),
+        );
         let (low, high) = extent_in(host.document(), list[0]);
-        assert!(close(low[0], 5.0) && close(high[0], 15.0) && close(low[1], 0.0) && close(high[1], 10.0), "{low:?} {high:?}");
+        assert!(
+            close(low[0], 5.0)
+                && close(high[0], 15.0)
+                && close(low[1], 0.0)
+                && close(high[1], 10.0),
+            "{low:?} {high:?}"
+        );
 
         // W: both formats reopen a region that lifts with the same extent, and
         // a reopened region moves again.
-        let dwg = crate::io::load_bytes("region.dwg", codec::DwgWriter::write_to_vec(host.document()).unwrap()).unwrap();
-        let dxf = crate::io::load_bytes("region.dxf", codec::DxfWriter::new(host.document()).write_to_vec().unwrap()).unwrap();
+        let dwg = crate::io::load_bytes(
+            "region.dwg",
+            codec::DwgWriter::write_to_vec(host.document()).unwrap(),
+        )
+        .unwrap();
+        let dxf = crate::io::load_bytes(
+            "region.dxf",
+            codec::DxfWriter::new(host.document())
+                .write_to_vec()
+                .unwrap(),
+        )
+        .unwrap();
         let moved = extent_in(host.document(), list[0]);
         for (format, document) in [("DWG", &dwg), ("DXF", &dxf)] {
             assert_eq!(regions_in(document).len(), 3, "{format}");
             let reopened = extent_in(document, list[0]);
             for axis in 0..3 {
-                assert!(close(reopened.0[axis], moved.0[axis]) && close(reopened.1[axis], moved.1[axis]), "{format} extent {reopened:?} vs {moved:?}");
+                assert!(
+                    close(reopened.0[axis], moved.0[axis])
+                        && close(reopened.1[axis], moved.1[axis]),
+                    "{format} extent {reopened:?} vs {moved:?}"
+                );
             }
-            let Some(EntityType::Region(back)) = document.get_entity(list[0]) else { unreachable!() };
+            let Some(EntityType::Region(back)) = document.get_entity(list[0]) else {
+                unreachable!()
+            };
             let again = host.add_entity(EntityType::Region(back.clone()));
-            dispatch(&mut host, &format!("PY_EVAL ocs.active_document.solids.translate({}, (100, 0, 0)).handle", again.value()));
-            assert!(close(extent_in(host.document(), again).0[0], reopened.0[0] + 100.0), "{format} re-edit");
+            dispatch(
+                &mut host,
+                &format!(
+                    "PY_EVAL ocs.active_document.solids.translate({}, (100, 0, 0)).handle",
+                    again.value()
+                ),
+            );
+            assert!(
+                close(
+                    extent_in(host.document(), again).0[0],
+                    reopened.0[0] + 100.0
+                ),
+                "{format} re-edit"
+            );
         }
         fn regions_in(document: &CadDocument) -> Vec<Handle> {
-            document.entities().filter_map(|e| match e { EntityType::Region(r) => Some(r.common.handle), _ => None }).collect()
+            document
+                .entities()
+                .filter_map(|e| match e {
+                    EntityType::Region(r) => Some(r.common.handle),
+                    _ => None,
+                })
+                .collect()
         }
 
         // D and U: delete, undo, and undo the creation steps exactly.
-        dispatch(&mut host, &format!("PY_EVAL ocs.active_document.delete_entity({})", list[2].value()));
+        dispatch(
+            &mut host,
+            &format!(
+                "PY_EVAL ocs.active_document.delete_entity({})",
+                list[2].value()
+            ),
+        );
         assert!(host.document().get_entity(list[2]).is_none());
         drop(process);
         drop(host);
         app.finish_pending_history(0);
         app.undo_steps(1);
-        assert!(app.tabs[0].scene.document.get_entity(list[2]).is_some(), "undo restores the deleted region");
+        assert!(
+            app.tabs[0].scene.document.get_entity(list[2]).is_some(),
+            "undo restores the deleted region"
+        );
         // Two re-edits of reopened copies, then the move of the first region.
         app.undo_steps(3);
-        assert_eq!(app.tabs[0].scene.document.get_entity(list[0]), Some(&before), "undoing the move restores the region exactly");
+        assert_eq!(
+            app.tabs[0].scene.document.get_entity(list[0]),
+            Some(&before),
+            "undoing the move restores the region exactly"
+        );
     }
 
     #[test]
@@ -6970,29 +8788,65 @@ mod tests {
         app.tabs[0].is_start = false;
         let mut host = HostSession::new(&mut app, 0);
         let process = ocs_plugin_api::process::PluginProcess::spawn(
-            std::path::Path::new(&plugin_path), &mut host, crate::plugin::v4_support::notification_handler(),
-        ).unwrap();
+            std::path::Path::new(&plugin_path),
+            &mut host,
+            crate::plugin::v4_support::notification_handler(),
+        )
+        .unwrap();
         let dispatch = |host: &mut HostSession<'_>, command: &str| {
-            assert!(process.dispatch(host, command, &mut |_| {}).expect("Python dispatch"));
+            assert!(process
+                .dispatch(host, command, &mut |_| {})
+                .expect("Python dispatch"));
         };
-        let last = |host: &HostSession<'_>| host.app.command_line.history.last().unwrap().text.clone();
-        let sorted = |mut list: Vec<Handle>| { list.sort_by_key(|h| h.value()); list };
-        let surfaces_in = |document: &CadDocument| sorted(document.entities().filter_map(|e| match e {
-            EntityType::Surface(s) => Some(s.common.handle), _ => None }).collect());
-        let solids_in = |document: &CadDocument| sorted(document.entities().filter_map(|e| match e {
-            EntityType::Solid3D(s) => Some(s.common.handle), _ => None }).collect());
+        let last =
+            |host: &HostSession<'_>| host.app.command_line.history.last().unwrap().text.clone();
+        let sorted = |mut list: Vec<Handle>| {
+            list.sort_by_key(|h| h.value());
+            list
+        };
+        let surfaces_in = |document: &CadDocument| {
+            sorted(
+                document
+                    .entities()
+                    .filter_map(|e| match e {
+                        EntityType::Surface(s) => Some(s.common.handle),
+                        _ => None,
+                    })
+                    .collect(),
+            )
+        };
+        let solids_in = |document: &CadDocument| {
+            sorted(
+                document
+                    .entities()
+                    .filter_map(|e| match e {
+                        EntityType::Solid3D(s) => Some(s.common.handle),
+                        _ => None,
+                    })
+                    .collect(),
+            )
+        };
         let body_of = |document: &CadDocument, handle: Handle| match document.get_entity(handle) {
-            Some(EntityType::Surface(s)) => kernel_acis_body(&s.acis_data).expect("surface payload lifts losslessly"),
-            Some(EntityType::Solid3D(s)) => kernel_acis_body(&s.acis_data).expect("solid payload lifts losslessly"),
+            Some(EntityType::Surface(s)) => {
+                kernel_acis_body(&s.acis_data).expect("surface payload lifts losslessly")
+            }
+            Some(EntityType::Solid3D(s)) => {
+                kernel_acis_body(&s.acis_data).expect("solid payload lifts losslessly")
+            }
             other => panic!("no surface or solid {handle:?}: {other:?}"),
         };
-        let extent_in = |document: &CadDocument, handle: Handle| sm::extent(&body_of(document, handle)).unwrap();
+        let extent_in = |document: &CadDocument, handle: Handle| {
+            sm::extent(&body_of(document, handle)).unwrap()
+        };
         let close = |a: f64, b: f64| (a - b).abs() < 1e-6;
         let kind_in = |document: &CadDocument, handle: Handle| match document.get_entity(handle) {
-            Some(EntityType::Surface(s)) => s.kind, other => panic!("no surface {handle:?}: {other:?}") };
+            Some(EntityType::Surface(s)) => s.kind,
+            other => panic!("no surface {handle:?}: {other:?}"),
+        };
 
         // C: plane surfaces and extrusions from real profile entities.
-        let script = std::env::temp_dir().join(format!("ocs_surface_create_{}.py", std::process::id()));
+        let script =
+            std::env::temp_dir().join(format!("ocs_surface_create_{}.py", std::process::id()));
         std::fs::write(&script, concat!(
             "doc = ocs.active_document\n",
             "s = doc.solids\n",
@@ -7013,106 +8867,311 @@ mod tests {
         let solids = solids_in(host.document());
         assert_eq!((surfaces.len(), solids.len()), (3, 3), "{}", last(&host));
         // surfaces[0] plane of the circle, [1] plane of the rectangle, [2] extruded open path.
-        assert_eq!((kind_in(host.document(), surfaces[0]), kind_in(host.document(), surfaces[1]), kind_in(host.document(), surfaces[2])),
-            (SurfaceKind::Plane, SurfaceKind::Plane, SurfaceKind::Generic));
+        assert_eq!(
+            (
+                kind_in(host.document(), surfaces[0]),
+                kind_in(host.document(), surfaces[1]),
+                kind_in(host.document(), surfaces[2])
+            ),
+            (SurfaceKind::Plane, SurfaceKind::Plane, SurfaceKind::Generic)
+        );
         let (low, high) = extent_in(host.document(), surfaces[0]);
-        assert!(close(low[0], -3.0) && close(high[1], 3.0) && close(low[2], 0.0) && close(high[2], 0.0), "{low:?} {high:?}");
+        assert!(
+            close(low[0], -3.0) && close(high[1], 3.0) && close(low[2], 0.0) && close(high[2], 0.0),
+            "{low:?} {high:?}"
+        );
         let (low, high) = extent_in(host.document(), surfaces[2]);
-        assert!(close(low[0], 50.0) && close(high[0], 54.0) && close(low[2], 0.0) && close(high[2], 3.0), "open path extrusion {low:?} {high:?}");
-        assert_eq!(host.document().get_entity(surfaces[1]).unwrap().common().layer, "SURFACES");
+        assert!(
+            close(low[0], 50.0)
+                && close(high[0], 54.0)
+                && close(low[2], 0.0)
+                && close(high[2], 3.0),
+            "open path extrusion {low:?} {high:?}"
+        );
+        assert_eq!(
+            host.document()
+                .get_entity(surfaces[1])
+                .unwrap()
+                .common()
+                .layer,
+            "SURFACES"
+        );
         let pi = std::f64::consts::PI;
-        for (index, expected, tolerance) in [(0, 240.0, 1e-9), (1, pi * 9.0 * 5.0, 0.02), (2, pi * 4.0 * 2.0, 0.02)] {
+        for (index, expected, tolerance) in [
+            (0, 240.0, 1e-9),
+            (1, pi * 9.0 * 5.0, 0.02),
+            (2, pi * 4.0 * 2.0, 0.02),
+        ] {
             let volume = sm::volume(&body_of(host.document(), solids[index]));
-            assert!((volume - expected).abs() <= tolerance * expected, "solid {index}: {volume} vs {expected}");
+            assert!(
+                (volume - expected).abs() <= tolerance * expected,
+                "solid {index}: {volume} vs {expected}"
+            );
         }
-        assert_eq!(host.document().entities().filter(|e| matches!(e, EntityType::Circle(_))).count(), 1,
-            "delete_source removed only the extruded temporary circle");
-        assert!(!host.app.tabs[0].scene.wire_models_for(&[surfaces[0]]).is_empty(), "no canvas geometry");
-        dispatch(&mut host, &format!("PY_EVAL ocs.active_document.entities[{}].kind", surfaces[0].value()));
+        assert_eq!(
+            host.document()
+                .entities()
+                .filter(|e| matches!(e, EntityType::Circle(_)))
+                .count(),
+            1,
+            "delete_source removed only the extruded temporary circle"
+        );
+        assert!(
+            !host.app.tabs[0]
+                .scene
+                .wire_models_for(&[surfaces[0]])
+                .is_empty(),
+            "no canvas geometry"
+        );
+        dispatch(
+            &mut host,
+            &format!(
+                "PY_EVAL ocs.active_document.entities[{}].kind",
+                surfaces[0].value()
+            ),
+        );
         assert!(last(&host).contains("Surface"));
 
         // V: refusals change nothing and leave no undo step.
         let ray = host.add_entity(EntityType::Ray(codec::entities::Ray::default()));
-        let circle = host.document().entities().find_map(|e| match e { EntityType::Circle(c) => Some(c.common.handle), _ => None }).unwrap();
-        let counts = (host.document().entities().count(), host.app.tabs[0].history.undo_stack.len());
+        let circle = host
+            .document()
+            .entities()
+            .find_map(|e| match e {
+                EntityType::Circle(c) => Some(c.common.handle),
+                _ => None,
+            })
+            .unwrap();
+        let counts = (
+            host.document().entities().count(),
+            host.app.tabs[0].history.undo_stack.len(),
+        );
         for (command, message) in [
-            (format!("ocs.active_document.solids.extrude({}, (0, 0, 0))", circle.value()), "nonzero"),
-            (format!("ocs.active_document.solids.extrude({}, (float('nan'), 0, 1))", circle.value()), "must be finite"),
-            (format!("ocs.active_document.solids.extrude({}, (0, 0, 1))", ray.value()), "planar profile"),
-            (format!("ocs.active_document.solids.extrude({}, (0, 0, 1))", solids[0].value()), "curve profile"),
-            (format!("ocs.active_document.solids.surface({})", surfaces[0].value()), "curve profile"),
-            (format!("ocs.active_document.solids.surface({})", ray.value()), "planar profile"),
-            (format!("ocs.active_document.solids.surface({}, layer='')", circle.value()), "layer name is empty"),
-            ("ocs.active_document.solids.surface(999999)".to_string(), "does not exist"),
-            ("ocs.solid_extrude(1, [1.0], None, False)".to_string(), "3 numbers"),
+            (
+                format!(
+                    "ocs.active_document.solids.extrude({}, (0, 0, 0))",
+                    circle.value()
+                ),
+                "nonzero",
+            ),
+            (
+                format!(
+                    "ocs.active_document.solids.extrude({}, (float('nan'), 0, 1))",
+                    circle.value()
+                ),
+                "must be finite",
+            ),
+            (
+                format!(
+                    "ocs.active_document.solids.extrude({}, (0, 0, 1))",
+                    ray.value()
+                ),
+                "planar profile",
+            ),
+            (
+                format!(
+                    "ocs.active_document.solids.extrude({}, (0, 0, 1))",
+                    solids[0].value()
+                ),
+                "curve profile",
+            ),
+            (
+                format!(
+                    "ocs.active_document.solids.surface({})",
+                    surfaces[0].value()
+                ),
+                "curve profile",
+            ),
+            (
+                format!("ocs.active_document.solids.surface({})", ray.value()),
+                "planar profile",
+            ),
+            (
+                format!(
+                    "ocs.active_document.solids.surface({}, layer='')",
+                    circle.value()
+                ),
+                "layer name is empty",
+            ),
+            (
+                "ocs.active_document.solids.surface(999999)".to_string(),
+                "does not exist",
+            ),
+            (
+                "ocs.solid_extrude(1, [1.0], None, False)".to_string(),
+                "3 numbers",
+            ),
         ] {
             dispatch(&mut host, &format!("PY_EVAL {command}"));
             assert!(last(&host).contains(message), "{command}: {}", last(&host));
         }
-        assert_eq!((host.document().entities().count(), host.app.tabs[0].history.undo_stack.len()), counts,
-            "refusals change nothing and record no undo step");
+        assert_eq!(
+            (
+                host.document().entities().count(),
+                host.app.tabs[0].history.undo_stack.len()
+            ),
+            counts,
+            "refusals change nothing and record no undo step"
+        );
 
         // E: isoline density is scriptable and validated; kind and payload are not.
         let plane = surfaces[0];
         let plane_before = host.document().get_entity(plane).unwrap().clone();
-        let script = std::env::temp_dir().join(format!("ocs_surface_edit_{}.py", std::process::id()));
-        std::fs::write(&script, format!(concat!(
-            "doc = ocs.active_document\n",
-            "e = doc.entities[{}]\n",
-            "with doc.transaction('Edit surface'):\n",
-            "    e.u_isolines = 8\n",
-            "    e.v_isolines = 6\n",
-        ), plane.value())).unwrap();
+        let script =
+            std::env::temp_dir().join(format!("ocs_surface_edit_{}.py", std::process::id()));
+        std::fs::write(
+            &script,
+            format!(
+                concat!(
+                    "doc = ocs.active_document\n",
+                    "e = doc.entities[{}]\n",
+                    "with doc.transaction('Edit surface'):\n",
+                    "    e.u_isolines = 8\n",
+                    "    e.v_isolines = 6\n",
+                ),
+                plane.value()
+            ),
+        )
+        .unwrap();
         dispatch(&mut host, &format!("PY_RUN {}", script.display()));
         let _ = std::fs::remove_file(&script);
-        let Some(EntityType::Surface(edited)) = host.document().get_entity(plane) else { unreachable!() };
-        assert_eq!((edited.u_isolines, edited.v_isolines, edited.kind), (8, 6, SurfaceKind::Plane), "{}", last(&host));
+        let Some(EntityType::Surface(edited)) = host.document().get_entity(plane) else {
+            unreachable!()
+        };
+        assert_eq!(
+            (edited.u_isolines, edited.v_isolines, edited.kind),
+            (8, 6, SurfaceKind::Plane),
+            "{}",
+            last(&host)
+        );
         let edited_state = host.document().get_entity(plane).unwrap().clone();
-        for (patch, message) in [("'u_isolines':500", "between 0 and 200"), ("'surface_kind':'Extruded'", "read-only"),
-            ("'surface_data':{}", "outside the editable schema"), ("'v_isolines':-1", "between 0 and 200")] {
-            dispatch(&mut host, &format!("PY_EVAL ocs.update_many('Reject surface', [{{'handle':{}, {patch}}}])", plane.value()));
-            assert_eq!(host.document().get_entity(plane), Some(&edited_state), "{patch}");
+        for (patch, message) in [
+            ("'u_isolines':500", "between 0 and 200"),
+            ("'surface_kind':'Extruded'", "read-only"),
+            ("'surface_data':{}", "outside the editable schema"),
+            ("'v_isolines':-1", "between 0 and 200"),
+        ] {
+            dispatch(
+                &mut host,
+                &format!(
+                    "PY_EVAL ocs.update_many('Reject surface', [{{'handle':{}, {patch}}}])",
+                    plane.value()
+                ),
+            );
+            assert_eq!(
+                host.document().get_entity(plane),
+                Some(&edited_state),
+                "{patch}"
+            );
             assert!(last(&host).contains(message), "{patch}: {}", last(&host));
         }
         // Moves keep a plane a plane and turn a swept surface generic.
-        dispatch(&mut host, &format!("PY_EVAL ocs.active_document.solids.translate({}, (10, 5, 0)).handle", plane.value()));
-        dispatch(&mut host, &format!("PY_EVAL ocs.active_document.solids.translate({}, (0, 0, 7)).handle", surfaces[2].value()));
+        dispatch(
+            &mut host,
+            &format!(
+                "PY_EVAL ocs.active_document.solids.translate({}, (10, 5, 0)).handle",
+                plane.value()
+            ),
+        );
+        dispatch(
+            &mut host,
+            &format!(
+                "PY_EVAL ocs.active_document.solids.translate({}, (0, 0, 7)).handle",
+                surfaces[2].value()
+            ),
+        );
         assert_eq!(kind_in(host.document(), plane), SurfaceKind::Plane);
         let (low, high) = extent_in(host.document(), plane);
-        assert!(close(low[0], 7.0) && close(high[0], 13.0) && close(low[1], 2.0) && close(high[1], 8.0), "{low:?} {high:?}");
+        assert!(
+            close(low[0], 7.0) && close(high[0], 13.0) && close(low[1], 2.0) && close(high[1], 8.0),
+            "{low:?} {high:?}"
+        );
         let (low, _) = extent_in(host.document(), surfaces[2]);
         assert!(close(low[2], 7.0), "{low:?}");
 
         // W: both formats reopen surfaces that lift with the same extents, keep
         // the isolines, and a reopened surface moves again.
-        let dwg = crate::io::load_bytes("surface.dwg", codec::DwgWriter::write_to_vec(host.document()).unwrap()).unwrap();
-        let dxf = crate::io::load_bytes("surface.dxf", codec::DxfWriter::new(host.document()).write_to_vec().unwrap()).unwrap();
+        let dwg = crate::io::load_bytes(
+            "surface.dwg",
+            codec::DwgWriter::write_to_vec(host.document()).unwrap(),
+        )
+        .unwrap();
+        let dxf = crate::io::load_bytes(
+            "surface.dxf",
+            codec::DxfWriter::new(host.document())
+                .write_to_vec()
+                .unwrap(),
+        )
+        .unwrap();
         let moved = extent_in(host.document(), plane);
         for (format, document) in [("DWG", &dwg), ("DXF", &dxf)] {
-            assert_eq!((surfaces_in(document).len(), solids_in(document).len()), (3, 3), "{format}");
+            assert_eq!(
+                (surfaces_in(document).len(), solids_in(document).len()),
+                (3, 3),
+                "{format}"
+            );
             let reopened = extent_in(document, plane);
             for axis in 0..3 {
-                assert!(close(reopened.0[axis], moved.0[axis]) && close(reopened.1[axis], moved.1[axis]), "{format} extent");
+                assert!(
+                    close(reopened.0[axis], moved.0[axis])
+                        && close(reopened.1[axis], moved.1[axis]),
+                    "{format} extent"
+                );
             }
-            let Some(EntityType::Surface(back)) = document.get_entity(plane) else { unreachable!() };
-            assert_eq!((back.u_isolines, back.v_isolines), (8, 6), "{format} isolines");
-            assert_eq!(back.kind, SurfaceKind::Plane, "{format} keeps the plane kind");
+            let Some(EntityType::Surface(back)) = document.get_entity(plane) else {
+                unreachable!()
+            };
+            assert_eq!(
+                (back.u_isolines, back.v_isolines),
+                (8, 6),
+                "{format} isolines"
+            );
+            assert_eq!(
+                back.kind,
+                SurfaceKind::Plane,
+                "{format} keeps the plane kind"
+            );
             let again = host.add_entity(EntityType::Surface(back.clone()));
-            dispatch(&mut host, &format!("PY_EVAL ocs.active_document.solids.translate({}, (100, 0, 0)).handle", again.value()));
-            assert!(close(extent_in(host.document(), again).0[0], reopened.0[0] + 100.0), "{format} re-edit");
+            dispatch(
+                &mut host,
+                &format!(
+                    "PY_EVAL ocs.active_document.solids.translate({}, (100, 0, 0)).handle",
+                    again.value()
+                ),
+            );
+            assert!(
+                close(
+                    extent_in(host.document(), again).0[0],
+                    reopened.0[0] + 100.0
+                ),
+                "{format} re-edit"
+            );
         }
 
         // D and U.
-        dispatch(&mut host, &format!("PY_EVAL ocs.active_document.delete_entity({})", surfaces[1].value()));
+        dispatch(
+            &mut host,
+            &format!(
+                "PY_EVAL ocs.active_document.delete_entity({})",
+                surfaces[1].value()
+            ),
+        );
         assert!(host.document().get_entity(surfaces[1]).is_none());
         drop(process);
         drop(host);
         app.finish_pending_history(0);
         app.undo_steps(1);
-        assert!(app.tabs[0].scene.document.get_entity(surfaces[1]).is_some(), "undo restores the deleted surface");
+        assert!(
+            app.tabs[0].scene.document.get_entity(surfaces[1]).is_some(),
+            "undo restores the deleted surface"
+        );
         // Two re-edits of reopened copies, two moves, and the isoline edit come before.
         app.undo_steps(2 + 2 + 1);
-        assert_eq!(app.tabs[0].scene.document.get_entity(plane), Some(&plane_before), "undoing the edits restores the surface exactly");
+        assert_eq!(
+            app.tabs[0].scene.document.get_entity(plane),
+            Some(&plane_before),
+            "undoing the edits restores the surface exactly"
+        );
     }
 
     #[test]
@@ -7126,131 +9185,313 @@ mod tests {
         app.tabs[0].is_start = false;
         let mut host = HostSession::new(&mut app, 0);
         let process = ocs_plugin_api::process::PluginProcess::spawn(
-            std::path::Path::new(&plugin_path), &mut host, crate::plugin::v4_support::notification_handler(),
-        ).unwrap();
+            std::path::Path::new(&plugin_path),
+            &mut host,
+            crate::plugin::v4_support::notification_handler(),
+        )
+        .unwrap();
         let dispatch = |host: &mut HostSession<'_>, command: &str| {
-            assert!(process.dispatch(host, command, &mut |_| {}).expect("Python dispatch"));
+            assert!(process
+                .dispatch(host, command, &mut |_| {})
+                .expect("Python dispatch"));
         };
-        let last = |host: &HostSession<'_>| host.app.command_line.history.last().unwrap().text.clone();
+        let last =
+            |host: &HostSession<'_>| host.app.command_line.history.last().unwrap().text.clone();
         let solids_in = |document: &CadDocument| {
-            let mut list: Vec<Handle> = document.entities().filter_map(|e| match e {
-                EntityType::Solid3D(s) => Some(s.common.handle), _ => None }).collect();
+            let mut list: Vec<Handle> = document
+                .entities()
+                .filter_map(|e| match e {
+                    EntityType::Solid3D(s) => Some(s.common.handle),
+                    _ => None,
+                })
+                .collect();
             list.sort_by_key(|h| h.value());
             list
         };
         let body_in = |document: &CadDocument, handle: Handle| {
-            let Some(EntityType::Solid3D(solid)) = document.get_entity(handle) else { panic!("no solid {handle:?}") };
+            let Some(EntityType::Solid3D(solid)) = document.get_entity(handle) else {
+                panic!("no solid {handle:?}")
+            };
             kernel_body(solid).expect("payload lifts losslessly")
         };
-        let volume_in = |document: &CadDocument, handle: Handle| sm::volume(&body_in(document, handle));
-        let extent_in = |document: &CadDocument, handle: Handle| sm::extent(&body_in(document, handle)).unwrap();
+        let volume_in =
+            |document: &CadDocument, handle: Handle| sm::volume(&body_in(document, handle));
+        let extent_in = |document: &CadDocument, handle: Handle| {
+            sm::extent(&body_in(document, handle)).unwrap()
+        };
         let close = |a: f64, b: f64| (a - b).abs() < 1e-6 * b.abs().max(1.0);
 
         // C: all three operations on two overlapping boxes, keeping the
         // operands. A: x 0..10, B: x 5..15, both 6 by 4; the overlap is 120.
-        let script = std::env::temp_dir().join(format!("ocs_boolean_create_{}.py", std::process::id()));
-        std::fs::write(&script, concat!(
-            "s = ocs.active_document.solids\n",
-            "a = s.box(center=(5, 3, 2), size=(10, 6, 4))\n",
-            "b = s.box(center=(10, 3, 2), size=(10, 6, 4))\n",
-            "s.union(a, b, keep_operands=True)\n",
-            "s.subtract(a, b, keep_operands=True)\n",
-            "s.intersect(a, b, keep_operands=True)\n",
-        )).unwrap();
+        let script =
+            std::env::temp_dir().join(format!("ocs_boolean_create_{}.py", std::process::id()));
+        std::fs::write(
+            &script,
+            concat!(
+                "s = ocs.active_document.solids\n",
+                "a = s.box(center=(5, 3, 2), size=(10, 6, 4))\n",
+                "b = s.box(center=(10, 3, 2), size=(10, 6, 4))\n",
+                "s.union(a, b, keep_operands=True)\n",
+                "s.subtract(a, b, keep_operands=True)\n",
+                "s.intersect(a, b, keep_operands=True)\n",
+            ),
+        )
+        .unwrap();
         dispatch(&mut host, &format!("PY_RUN {}", script.display()));
         let _ = std::fs::remove_file(&script);
         let list = solids_in(host.document());
-        assert_eq!(list.len(), 5, "operands kept and three results: {}", last(&host));
+        assert_eq!(
+            list.len(),
+            5,
+            "operands kept and three results: {}",
+            last(&host)
+        );
         let (a, b) = (list[0], list[1]);
         for (index, expected) in [(2, 360.0), (3, 120.0), (4, 120.0)] {
             let actual = volume_in(host.document(), list[index]);
-            assert!(close(actual, expected), "result {index}: volume {actual}, expected {expected}");
+            assert!(
+                close(actual, expected),
+                "result {index}: volume {actual}, expected {expected}"
+            );
         }
         let (low, high) = extent_in(host.document(), list[3]);
-        assert!(close(low[0], 0.0) && close(high[0], 5.0), "subtract keeps x 0..5: {low:?} {high:?}");
+        assert!(
+            close(low[0], 0.0) && close(high[0], 5.0),
+            "subtract keeps x 0..5: {low:?} {high:?}"
+        );
         let (low, high) = extent_in(host.document(), list[4]);
-        assert!(close(low[0], 5.0) && close(high[0], 10.0), "intersect keeps x 5..10: {low:?} {high:?}");
-        let Some(EntityType::Solid3D(union)) = host.document().get_entity(list[2]) else { unreachable!() };
-        assert_eq!((union.wires.is_empty(), union.history_handle), (false, None));
-        assert!(!host.app.tabs[0].scene.wire_models_for(&[list[2]]).is_empty(), "no canvas geometry");
-        dispatch(&mut host, &format!("PY_EVAL ocs.active_document.entities[{}].kind", list[2].value()));
+        assert!(
+            close(low[0], 5.0) && close(high[0], 10.0),
+            "intersect keeps x 5..10: {low:?} {high:?}"
+        );
+        let Some(EntityType::Solid3D(union)) = host.document().get_entity(list[2]) else {
+            unreachable!()
+        };
+        assert_eq!(
+            (union.wires.is_empty(), union.history_handle),
+            (false, None)
+        );
+        assert!(
+            !host.app.tabs[0]
+                .scene
+                .wire_models_for(&[list[2]])
+                .is_empty(),
+            "no canvas geometry"
+        );
+        dispatch(
+            &mut host,
+            &format!(
+                "PY_EVAL ocs.active_document.entities[{}].kind",
+                list[2].value()
+            ),
+        );
         assert!(last(&host).contains("Solid3D"));
 
         // Consuming operands: A minus B leaves only the result, on a new layer.
-        let before_consume = (host.document().get_entity(a).unwrap().clone(), host.document().get_entity(b).unwrap().clone());
+        let before_consume = (
+            host.document().get_entity(a).unwrap().clone(),
+            host.document().get_entity(b).unwrap().clone(),
+        );
         let undo_before = host.app.tabs[0].history.undo_stack.len();
-        dispatch(&mut host, &format!("PY_EVAL ocs.active_document.solids.subtract({}, {}, layer='CUT').handle", a.value(), b.value()));
-        assert!(host.document().get_entity(a).is_none() && host.document().get_entity(b).is_none(), "operands are consumed");
+        dispatch(
+            &mut host,
+            &format!(
+                "PY_EVAL ocs.active_document.solids.subtract({}, {}, layer='CUT').handle",
+                a.value(),
+                b.value()
+            ),
+        );
+        assert!(
+            host.document().get_entity(a).is_none() && host.document().get_entity(b).is_none(),
+            "operands are consumed"
+        );
         let cut = *solids_in(host.document()).last().unwrap();
         assert!(close(volume_in(host.document(), cut), 120.0));
-        assert_eq!(host.document().get_entity(cut).unwrap().common().layer, "CUT");
-        assert_eq!(host.app.tabs[0].history.undo_stack.len() - undo_before, 1, "one undo step per boolean");
+        assert_eq!(
+            host.document().get_entity(cut).unwrap().common().layer,
+            "CUT"
+        );
+        assert_eq!(
+            host.app.tabs[0].history.undo_stack.len() - undo_before,
+            1,
+            "one undo step per boolean"
+        );
 
         // A second planar operation chains on the result: drill a through-hole.
-        dispatch(&mut host, "PY_EVAL ocs.active_document.solids.box(center=(2.5, 3, 2), size=(2, 2, 6)).handle");
+        dispatch(
+            &mut host,
+            "PY_EVAL ocs.active_document.solids.box(center=(2.5, 3, 2), size=(2, 2, 6)).handle",
+        );
         let hole = *solids_in(host.document()).last().unwrap();
-        dispatch(&mut host, &format!("PY_EVAL ocs.active_document.solids.subtract({}, {}).handle", cut.value(), hole.value()));
+        dispatch(
+            &mut host,
+            &format!(
+                "PY_EVAL ocs.active_document.solids.subtract({}, {}).handle",
+                cut.value(),
+                hole.value()
+            ),
+        );
         let drilled = *solids_in(host.document()).last().unwrap();
-        assert!(close(volume_in(host.document(), drilled), 104.0), "120 minus a 2x2x4 hole is 104");
+        assert!(
+            close(volume_in(host.document(), drilled), 104.0),
+            "120 minus a 2x2x4 hole is 104"
+        );
 
         // V: refusals change nothing and leave no undo step.
         let line = host.add_entity(EntityType::Line(codec::entities::Line::from_points(
-            codec::types::Vector3::ZERO, codec::types::Vector3::new(1.0, 0.0, 0.0))));
+            codec::types::Vector3::ZERO,
+            codec::types::Vector3::new(1.0, 0.0, 0.0),
+        )));
         let unliftable = host.add_entity(EntityType::Solid3D(codec::entities::Solid3D::new()));
         let mut plane = codec::entities::Surface::new(codec::entities::SurfaceKind::Plane);
         plane.acis_data = codec::entities::AcisData::new();
-        let surface = host.add_entity(EntityType::Surface(plane));
-        let far = { dispatch(&mut host, "PY_EVAL ocs.active_document.solids.box(center=(500, 500, 500), size=(1, 1, 1)).handle");
-            *solids_in(host.document()).last().unwrap() };
-        let counts = (host.document().entities().count(), host.app.tabs[0].history.undo_stack.len());
+        let surface = host.add_entity(EntityType::Surface(Box::new(plane)));
+        let far = {
+            dispatch(&mut host, "PY_EVAL ocs.active_document.solids.box(center=(500, 500, 500), size=(1, 1, 1)).handle");
+            *solids_in(host.document()).last().unwrap()
+        };
+        let counts = (
+            host.document().entities().count(),
+            host.app.tabs[0].history.undo_stack.len(),
+        );
         let z = drilled.value();
         for (command, message) in [
-            (format!("ocs.active_document.solids.union({z}, {z})"), "cannot be combined with itself"),
-            (format!("ocs.active_document.solids.union({z}, {})", line.value()), "must be a Solid3D"),
-            (format!("ocs.active_document.solids.union({}, {z})", surface.value()), "must be a Solid3D"),
-            (format!("ocs.active_document.solids.union({z}, 999999)"), "does not exist"),
-            (format!("ocs.active_document.solids.union({z}, {})", unliftable.value()), "cannot be lifted losslessly"),
-            (format!("ocs.active_document.solids.union({z}, {}, layer='')", far.value()), "layer name is empty"),
-            (format!("ocs.solid_boolean({z}, {}, 'xor', None, False)", far.value()), "unknown operation"),
-            (format!("ocs.active_document.solids.intersect({z}, {})", far.value()), "changed"),
+            (
+                format!("ocs.active_document.solids.union({z}, {z})"),
+                "cannot be combined with itself",
+            ),
+            (
+                format!("ocs.active_document.solids.union({z}, {})", line.value()),
+                "must be a Solid3D",
+            ),
+            (
+                format!("ocs.active_document.solids.union({}, {z})", surface.value()),
+                "must be a Solid3D",
+            ),
+            (
+                format!("ocs.active_document.solids.union({z}, 999999)"),
+                "does not exist",
+            ),
+            (
+                format!(
+                    "ocs.active_document.solids.union({z}, {})",
+                    unliftable.value()
+                ),
+                "cannot be lifted losslessly",
+            ),
+            (
+                format!(
+                    "ocs.active_document.solids.union({z}, {}, layer='')",
+                    far.value()
+                ),
+                "layer name is empty",
+            ),
+            (
+                format!(
+                    "ocs.solid_boolean({z}, {}, 'xor', None, False)",
+                    far.value()
+                ),
+                "unknown operation",
+            ),
+            (
+                format!("ocs.active_document.solids.intersect({z}, {})", far.value()),
+                "changed",
+            ),
         ] {
             dispatch(&mut host, &format!("PY_EVAL {command}"));
             assert!(last(&host).contains(message), "{command}: {}", last(&host));
         }
-        assert_eq!((host.document().entities().count(), host.app.tabs[0].history.undo_stack.len()), counts,
-            "refusals change nothing and record no undo step");
+        assert_eq!(
+            (
+                host.document().entities().count(),
+                host.app.tabs[0].history.undo_stack.len()
+            ),
+            counts,
+            "refusals change nothing and record no undo step"
+        );
 
         // W: both formats reopen the drilled result losslessly; it moves again.
         let expected_volume = volume_in(host.document(), drilled);
         let expected_extent = extent_in(host.document(), drilled);
-        let dwg = crate::io::load_bytes("boolean.dwg", codec::DwgWriter::write_to_vec(host.document()).unwrap()).unwrap();
-        let dxf = crate::io::load_bytes("boolean.dxf", codec::DxfWriter::new(host.document()).write_to_vec().unwrap()).unwrap();
+        let dwg = crate::io::load_bytes(
+            "boolean.dwg",
+            codec::DwgWriter::write_to_vec(host.document()).unwrap(),
+        )
+        .unwrap();
+        let dxf = crate::io::load_bytes(
+            "boolean.dxf",
+            codec::DxfWriter::new(host.document())
+                .write_to_vec()
+                .unwrap(),
+        )
+        .unwrap();
         for (format, document) in [("DWG", &dwg), ("DXF", &dxf)] {
-            assert!(close(volume_in(document, drilled), expected_volume), "{format} volume");
+            assert!(
+                close(volume_in(document, drilled), expected_volume),
+                "{format} volume"
+            );
             let reopened = extent_in(document, drilled);
             for axis in 0..3 {
-                assert!(close(reopened.0[axis], expected_extent.0[axis]) && close(reopened.1[axis], expected_extent.1[axis]), "{format} extent");
+                assert!(
+                    close(reopened.0[axis], expected_extent.0[axis])
+                        && close(reopened.1[axis], expected_extent.1[axis]),
+                    "{format} extent"
+                );
             }
-            let Some(EntityType::Solid3D(back)) = document.get_entity(drilled) else { unreachable!() };
+            let Some(EntityType::Solid3D(back)) = document.get_entity(drilled) else {
+                unreachable!()
+            };
             let again = host.add_entity(EntityType::Solid3D(back.clone()));
-            dispatch(&mut host, &format!("PY_EVAL ocs.active_document.solids.translate({}, (100, 0, 0)).handle", again.value()));
-            assert!(close(extent_in(host.document(), again).0[0], reopened.0[0] + 100.0), "{format} re-edit");
+            dispatch(
+                &mut host,
+                &format!(
+                    "PY_EVAL ocs.active_document.solids.translate({}, (100, 0, 0)).handle",
+                    again.value()
+                ),
+            );
+            assert!(
+                close(
+                    extent_in(host.document(), again).0[0],
+                    reopened.0[0] + 100.0
+                ),
+                "{format} re-edit"
+            );
         }
 
         // D and U: delete, then undo restores it, and undoing the consuming
         // boolean brings both operands back exactly.
-        dispatch(&mut host, &format!("PY_EVAL ocs.active_document.delete_entity({})", drilled.value()));
+        dispatch(
+            &mut host,
+            &format!(
+                "PY_EVAL ocs.active_document.delete_entity({})",
+                drilled.value()
+            ),
+        );
         assert!(host.document().get_entity(drilled).is_none());
         drop(process);
         drop(host);
         app.finish_pending_history(0);
         app.undo_steps(1);
-        assert!(app.tabs[0].scene.document.get_entity(drilled).is_some(), "undo restores the deleted result");
+        assert!(
+            app.tabs[0].scene.document.get_entity(drilled).is_some(),
+            "undo restores the deleted result"
+        );
         // Two re-edits, the far box, the drilling subtract and the hole box, then the consuming subtract.
         app.undo_steps(2 + 1 + 1 + 1 + 1);
-        assert_eq!(app.tabs[0].scene.document.get_entity(a), Some(&before_consume.0), "undo restores operand A exactly");
-        assert_eq!(app.tabs[0].scene.document.get_entity(b), Some(&before_consume.1), "undo restores operand B exactly");
-        assert!(app.tabs[0].scene.document.get_entity(cut).is_none(), "undo removes the boolean result");
+        assert_eq!(
+            app.tabs[0].scene.document.get_entity(a),
+            Some(&before_consume.0),
+            "undo restores operand A exactly"
+        );
+        assert_eq!(
+            app.tabs[0].scene.document.get_entity(b),
+            Some(&before_consume.1),
+            "undo restores operand B exactly"
+        );
+        assert!(
+            app.tabs[0].scene.document.get_entity(cut).is_none(),
+            "undo removes the boolean result"
+        );
     }
 
     /// Release-only evidence for docs/cadkernel-body-path.md: the kernel's
@@ -7266,22 +9507,35 @@ mod tests {
         app.tabs[0].is_start = false;
         let mut host = HostSession::new(&mut app, 0);
         let process = ocs_plugin_api::process::PluginProcess::spawn(
-            std::path::Path::new(&plugin_path), &mut host, crate::plugin::v4_support::notification_handler(),
-        ).unwrap();
+            std::path::Path::new(&plugin_path),
+            &mut host,
+            crate::plugin::v4_support::notification_handler(),
+        )
+        .unwrap();
         let dispatch = |host: &mut HostSession<'_>, command: &str| {
-            assert!(process.dispatch(host, command, &mut |_| {}).expect("Python dispatch"));
+            assert!(process
+                .dispatch(host, command, &mut |_| {})
+                .expect("Python dispatch"));
         };
-        let script = std::env::temp_dir().join(format!("ocs_boolean_refusal_{}.py", std::process::id()));
-        std::fs::write(&script, concat!(
-            "s = ocs.active_document.solids\n",
-            "box = s.box(center=(0, 0, 0), size=(10, 6, 4))\n",
-            "sphere = s.sphere(center=(0, 0, 0), radius=3)\n",
-            "s.subtract(box, sphere)\n",
-        )).unwrap();
+        let script =
+            std::env::temp_dir().join(format!("ocs_boolean_refusal_{}.py", std::process::id()));
+        std::fs::write(
+            &script,
+            concat!(
+                "s = ocs.active_document.solids\n",
+                "box = s.box(center=(0, 0, 0), size=(10, 6, 4))\n",
+                "sphere = s.sphere(center=(0, 0, 0), radius=3)\n",
+                "s.subtract(box, sphere)\n",
+            ),
+        )
+        .unwrap();
         dispatch(&mut host, &format!("PY_RUN {}", script.display()));
         let _ = std::fs::remove_file(&script);
         let message = host.app.command_line.history.last().unwrap().text.clone();
-        assert!(message.contains("Coincident") && message.contains("nothing was changed"), "{message}");
+        assert!(
+            message.contains("Coincident") && message.contains("nothing was changed"),
+            "{message}"
+        );
     }
 
     #[test]
@@ -7338,40 +9592,88 @@ mod tests {
             let handle = host.document_mut().allocate_handle();
             let mut class_object = ClassObject::new(data);
             class_object.handle = handle;
-            host.document_mut().objects.insert(handle, ObjectType::ClassObject(class_object));
+            host.document_mut()
+                .objects
+                .insert(handle, ObjectType::ClassObject(class_object));
             handle
         };
-        let style = object(&mut host, ClassObjectData::SectionViewStyle(Default::default()));
+        let style = object(
+            &mut host,
+            ClassObjectData::SectionViewStyle(Default::default()),
+        );
         let view_rep = object(&mut host, ClassObjectData::ViewRep(Default::default()));
         let scale = host.document_mut().allocate_handle();
         let mut scale_object = codec::objects::Scale::new("1:1", 1.0, 1.0);
         scale_object.handle = scale;
-        host.document_mut().objects.insert(scale, ObjectType::Scale(scale_object));
+        host.document_mut()
+            .objects
+            .insert(scale, ObjectType::Scale(scale_object));
         let process = ocs_plugin_api::process::PluginProcess::spawn(
-            std::path::Path::new(&plugin_path), &mut host, crate::plugin::v4_support::notification_handler(),
-        ).unwrap();
+            std::path::Path::new(&plugin_path),
+            &mut host,
+            crate::plugin::v4_support::notification_handler(),
+        )
+        .unwrap();
         let dispatch = |host: &mut HostSession<'_>, command: &str| {
-            assert!(process.dispatch(host, command, &mut |_| {}).expect("Python dispatch"));
+            assert!(process
+                .dispatch(host, command, &mut |_| {})
+                .expect("Python dispatch"));
         };
-        let last = |host: &HostSession<'_>| host.app.command_line.history.last().unwrap().text.clone();
-        let count = |host: &HostSession<'_>| host.document().entities().filter(|e| matches!(e, EntityType::SectionSymbol(_))).count();
-        let create = |extra: &str| format!(
-            "PY_EVAL ocs.active_document.create_entity('SectionSymbol', points=[{{'point': {{'x': 0.0, 'y': 0.0, 'z': 0.0}}}}, {{'point': {{'x': 10.0, 'y': 0.0, 'z': 0.0}}}}]{extra}).handle");
+        let last =
+            |host: &HostSession<'_>| host.app.command_line.history.last().unwrap().text.clone();
+        let count = |host: &HostSession<'_>| {
+            host.document()
+                .entities()
+                .filter(|e| matches!(e, EntityType::SectionSymbol(_)))
+                .count()
+        };
+        let create = |extra: &str| {
+            format!(
+            "PY_EVAL ocs.active_document.create_entity('SectionSymbol', points=[{{'point': {{'x': 0.0, 'y': 0.0, 'z': 0.0}}}}, {{'point': {{'x': 10.0, 'y': 0.0, 'z': 0.0}}}}]{extra}).handle")
+        };
         // A symbol may reference the drawing's own style and view representation.
-        dispatch(&mut host, &create(&format!(", style_handle={}, view_rep_handle={}", style.value(), view_rep.value())));
+        dispatch(
+            &mut host,
+            &create(&format!(
+                ", style_handle={}, view_rep_handle={}",
+                style.value(),
+                view_rep.value()
+            )),
+        );
         assert_eq!(count(&host), 1, "{}", last(&host));
-        let Some(EntityType::SectionSymbol(symbol)) = host.document().entities().find(|e| matches!(e, EntityType::SectionSymbol(_))) else { unreachable!() };
-        assert_eq!((symbol.style_handle, symbol.view_rep_handle), (style, view_rep));
+        let Some(EntityType::SectionSymbol(symbol)) = host
+            .document()
+            .entities()
+            .find(|e| matches!(e, EntityType::SectionSymbol(_)))
+        else {
+            unreachable!()
+        };
+        assert_eq!(
+            (symbol.style_handle, symbol.view_rep_handle),
+            (style, view_rep)
+        );
         // A standalone symbol needs neither.
         dispatch(&mut host, &create(""));
         assert_eq!(count(&host), 2, "{}", last(&host));
         // Wrong object kinds are refused: a style slot cannot hold a view rep, a
         // scale object is neither, and a swapped pair fails.
         for (extra, message) in [
-            (format!(", style_handle={}", view_rep.value()), "not an existing SectionViewStyle"),
-            (format!(", style_handle={}", scale.value()), "not an existing SectionViewStyle"),
-            (format!(", view_rep_handle={}", style.value()), "not an existing ViewRep"),
-            (", view_rep_handle=424242".to_string(), "not an existing ViewRep"),
+            (
+                format!(", style_handle={}", view_rep.value()),
+                "not an existing SectionViewStyle",
+            ),
+            (
+                format!(", style_handle={}", scale.value()),
+                "not an existing SectionViewStyle",
+            ),
+            (
+                format!(", view_rep_handle={}", style.value()),
+                "not an existing ViewRep",
+            ),
+            (
+                ", view_rep_handle=424242".to_string(),
+                "not an existing ViewRep",
+            ),
         ] {
             dispatch(&mut host, &create(&extra));
             assert_eq!(count(&host), 2, "{extra}");
@@ -7398,24 +9700,43 @@ mod tests {
         app.tabs[0].is_start = false;
         let mut host = HostSession::new(&mut app, 0);
         let process = ocs_plugin_api::process::PluginProcess::spawn(
-            std::path::Path::new(&plugin_path), &mut host, crate::plugin::v4_support::notification_handler(),
-        ).unwrap();
+            std::path::Path::new(&plugin_path),
+            &mut host,
+            crate::plugin::v4_support::notification_handler(),
+        )
+        .unwrap();
         let dispatch = |host: &mut HostSession<'_>, command: &str| {
-            assert!(process.dispatch(host, command, &mut |_| {}).expect("Python dispatch"));
+            assert!(process
+                .dispatch(host, command, &mut |_| {})
+                .expect("Python dispatch"));
         };
-        let last = |host: &HostSession<'_>| host.app.command_line.history.last().unwrap().text.clone();
-        let frames = |host: &HostSession<'_>| host.document().entities().filter(|e| matches!(e, EntityType::Ole2Frame(_))).count();
+        let last =
+            |host: &HostSession<'_>| host.app.command_line.history.last().unwrap().text.clone();
+        let frames = |host: &HostSession<'_>| {
+            host.document()
+                .entities()
+                .filter(|e| matches!(e, EntityType::Ole2Frame(_)))
+                .count()
+        };
         let picture_len = |host: &HostSession<'_>, index: usize| {
-            let mut all: Vec<_> = host.document().entities().filter_map(|e| match e {
-                EntityType::Ole2Frame(f) => Some(f.clone()), _ => None }).collect();
+            let mut all: Vec<_> = host
+                .document()
+                .entities()
+                .filter_map(|e| match e {
+                    EntityType::Ole2Frame(f) => Some(f.clone()),
+                    _ => None,
+                })
+                .collect();
             all.sort_by_key(|f| f.common.handle.value());
             match codec::entities::extract_presentation(&all[index].encoded_payload()) {
                 Some(codec::entities::OlePresentation::Raster(bytes)) => bytes,
                 other => panic!("no embedded raster: {other:?}"),
             }
         };
-        let embed = |file: &std::path::Path, extra: &str| format!(
-            "PY_EVAL ocs.active_document.embed_picture({:?}, origin=(1, 2, 3), width=16{extra}).handle", file.display().to_string());
+        let embed = |file: &std::path::Path, extra: &str| {
+            format!(
+            "PY_EVAL ocs.active_document.embed_picture({:?}, origin=(1, 2, 3), width=16{extra}).handle", file.display().to_string())
+        };
 
         // C: PNG and JPEG are stored as read, a TIFF is re-encoded as PNG, and
         // the frame keeps the picture's 2:1 aspect and the requested layer.
@@ -7423,17 +9744,48 @@ mod tests {
         dispatch(&mut host, &embed(&jpeg, ""));
         dispatch(&mut host, &embed(&tiff, ""));
         assert_eq!(frames(&host), 3, "{}", last(&host));
-        assert_eq!(picture_len(&host, 0), std::fs::read(&png).unwrap(), "PNG is stored as read");
-        assert_eq!(picture_len(&host, 1), std::fs::read(&jpeg).unwrap(), "JPEG is stored as read");
-        assert_eq!(&picture_len(&host, 2)[..4], b"\x89PNG", "TIFF is re-encoded as PNG");
-        let mut all: Vec<_> = host.document().entities().filter_map(|e| match e {
-            EntityType::Ole2Frame(f) => Some(f.clone()), _ => None }).collect();
+        assert_eq!(
+            picture_len(&host, 0),
+            std::fs::read(&png).unwrap(),
+            "PNG is stored as read"
+        );
+        assert_eq!(
+            picture_len(&host, 1),
+            std::fs::read(&jpeg).unwrap(),
+            "JPEG is stored as read"
+        );
+        assert_eq!(
+            &picture_len(&host, 2)[..4],
+            b"\x89PNG",
+            "TIFF is re-encoded as PNG"
+        );
+        let mut all: Vec<_> = host
+            .document()
+            .entities()
+            .filter_map(|e| match e {
+                EntityType::Ole2Frame(f) => Some(f.clone()),
+                _ => None,
+            })
+            .collect();
         all.sort_by_key(|f| f.common.handle.value());
-        assert_eq!((all[0].common.layer.as_str(), all[1].common.layer.as_str()), ("PICTURES", "0"));
+        assert_eq!(
+            (all[0].common.layer.as_str(), all[1].common.layer.as_str()),
+            ("PICTURES", "0")
+        );
         let frame = &all[0];
-        assert!((frame.lower_right_corner.x - frame.upper_left_corner.x - 16.0).abs() < 1e-9, "width 16");
-        assert!((frame.upper_left_corner.y - frame.lower_right_corner.y - 8.0).abs() < 1e-9, "height 8 keeps the 2:1 aspect");
-        assert!((frame.lower_right_corner.y - 2.0).abs() < 1e-9 && (frame.upper_left_corner.x - 1.0).abs() < 1e-9, "origin is the bottom-left corner");
+        assert!(
+            (frame.lower_right_corner.x - frame.upper_left_corner.x - 16.0).abs() < 1e-9,
+            "width 16"
+        );
+        assert!(
+            (frame.upper_left_corner.y - frame.lower_right_corner.y - 8.0).abs() < 1e-9,
+            "height 8 keeps the 2:1 aspect"
+        );
+        assert!(
+            (frame.lower_right_corner.y - 2.0).abs() < 1e-9
+                && (frame.upper_left_corner.x - 1.0).abs() < 1e-9,
+            "origin is the bottom-left corner"
+        );
 
         // V: refusals change nothing and record no undo step.
         let undo = host.app.tabs[0].history.undo_stack.len();
@@ -7451,7 +9803,11 @@ mod tests {
             assert!(last(&host).contains(message), "{command}: {}", last(&host));
         }
         assert_eq!(frames(&host), 3);
-        assert_eq!(host.app.tabs[0].history.undo_stack.len(), undo, "refusals record no undo step");
+        assert_eq!(
+            host.app.tabs[0].history.undo_stack.len(),
+            undo,
+            "refusals record no undo step"
+        );
         for file in [&png, &jpeg, &tiff, &text] {
             let _ = std::fs::remove_file(file);
         }
@@ -7465,48 +9821,120 @@ mod tests {
         let mut app = OpenCADStudio::new_for_test();
         app.tabs[0].is_start = false;
         let mut host = HostSession::new(&mut app, 0);
-        let paper = host.document().block_records.iter().find(|r| r.is_paper_space()).map(|r| r.handle).unwrap();
-        let layout = host.document().objects.values().find_map(|o| match o {
-            codec::objects::ObjectType::Layout(l) if l.block_record == paper => Some(l.name.clone()), _ => None }).unwrap();
+        let paper = host
+            .document()
+            .block_records
+            .iter()
+            .find(|r| r.is_paper_space())
+            .map(|r| r.handle)
+            .unwrap();
+        let layout = host
+            .document()
+            .objects
+            .values()
+            .find_map(|o| match o {
+                codec::objects::ObjectType::Layout(l) if l.block_record == paper => {
+                    Some(l.name.clone())
+                }
+                _ => None,
+            })
+            .unwrap();
         host.app.tabs[0].scene.set_current_layout(layout);
         let process = ocs_plugin_api::process::PluginProcess::spawn(
-            std::path::Path::new(&plugin_path), &mut host, crate::plugin::v4_support::notification_handler(),
-        ).unwrap();
+            std::path::Path::new(&plugin_path),
+            &mut host,
+            crate::plugin::v4_support::notification_handler(),
+        )
+        .unwrap();
         let dispatch = |host: &mut HostSession<'_>, command: &str| {
-            assert!(process.dispatch(host, command, &mut |_| {}).expect("Python dispatch"));
+            assert!(process
+                .dispatch(host, command, &mut |_| {})
+                .expect("Python dispatch"));
         };
-        let last = |host: &HostSession<'_>| host.app.command_line.history.last().unwrap().text.clone();
+        let last =
+            |host: &HostSession<'_>| host.app.command_line.history.last().unwrap().text.clone();
         let viewports = |host: &HostSession<'_>| {
-            let mut list: Vec<_> = host.document().entities().filter_map(|e| match e {
-                EntityType::Viewport(v) => Some((v.common.handle, v.id)), _ => None }).collect();
+            let mut list: Vec<_> = host
+                .document()
+                .entities()
+                .filter_map(|e| match e {
+                    EntityType::Viewport(v) => Some((v.common.handle, v.id)),
+                    _ => None,
+                })
+                .collect();
             list.sort_by_key(|(h, _)| h.value());
             list
         };
-        let create = |width: f64, height: f64, view_height: f64| format!(
-            "PY_EVAL ocs.active_document.create_entity('Viewport', owner_handle={}, center=(50, 50, 0), width={width}, height={height}, view_height={view_height}).handle", paper.value());
+        let create = |width: f64, height: f64, view_height: f64| {
+            format!(
+            "PY_EVAL ocs.active_document.create_entity('Viewport', owner_handle={}, center=(50, 50, 0), width={width}, height={height}, view_height={view_height}).handle", paper.value())
+        };
         dispatch(&mut host, &create(80.0, 60.0, 50.0));
         dispatch(&mut host, &create(40.0, 30.0, 10.0));
         dispatch(&mut host, &create(20.0, 20.0, 20.0));
         let list = viewports(&host);
         assert_eq!(list.len(), 3, "{}", last(&host));
         let ids: Vec<i16> = list.iter().map(|(_, id)| *id).collect();
-        assert_eq!(ids, vec![2, 3, 4], "scripted viewports get unique ids of at least 2: {ids:?}");
-        for (handle, expected) in [(list[0].0, 60.0 / 50.0), (list[1].0, 30.0 / 10.0), (list[2].0, 1.0)] {
-            let Some(EntityType::Viewport(v)) = host.document().get_entity(handle) else { unreachable!() };
-            assert!((v.custom_scale - expected).abs() < 1e-12, "custom_scale {} vs {expected}", v.custom_scale);
-            assert!(!host.app.tabs[0].scene.wire_models_for(&[handle]).is_empty(), "viewport {handle:?} draws a frame");
+        assert_eq!(
+            ids,
+            vec![2, 3, 4],
+            "scripted viewports get unique ids of at least 2: {ids:?}"
+        );
+        for (handle, expected) in [
+            (list[0].0, 60.0 / 50.0),
+            (list[1].0, 30.0 / 10.0),
+            (list[2].0, 1.0),
+        ] {
+            let Some(EntityType::Viewport(v)) = host.document().get_entity(handle) else {
+                unreachable!()
+            };
+            assert!(
+                (v.custom_scale - expected).abs() < 1e-12,
+                "custom_scale {} vs {expected}",
+                v.custom_scale
+            );
+            assert!(
+                !host.app.tabs[0].scene.wire_models_for(&[handle]).is_empty(),
+                "viewport {handle:?} draws a frame"
+            );
         }
         // The scale follows the geometry; it cannot be set directly.
         let second = list[0].0;
-        dispatch(&mut host, &format!("PY_EVAL ocs.update_many('Zoom', [{{'handle':{}, 'view_height':25.0}}])", second.value()));
-        let Some(EntityType::Viewport(zoomed)) = host.document().get_entity(second) else { unreachable!() };
-        assert!((zoomed.custom_scale - 60.0 / 25.0).abs() < 1e-12, "{}", last(&host));
+        dispatch(
+            &mut host,
+            &format!(
+                "PY_EVAL ocs.update_many('Zoom', [{{'handle':{}, 'view_height':25.0}}])",
+                second.value()
+            ),
+        );
+        let Some(EntityType::Viewport(zoomed)) = host.document().get_entity(second) else {
+            unreachable!()
+        };
+        assert!(
+            (zoomed.custom_scale - 60.0 / 25.0).abs() < 1e-12,
+            "{}",
+            last(&host)
+        );
         assert_eq!(zoomed.id, 2, "an edit keeps the id");
-        dispatch(&mut host, &format!("PY_EVAL ocs.update_many('Resize', [{{'handle':{}, 'height':90.0}}])", second.value()));
-        let Some(EntityType::Viewport(resized)) = host.document().get_entity(second) else { unreachable!() };
+        dispatch(
+            &mut host,
+            &format!(
+                "PY_EVAL ocs.update_many('Resize', [{{'handle':{}, 'height':90.0}}])",
+                second.value()
+            ),
+        );
+        let Some(EntityType::Viewport(resized)) = host.document().get_entity(second) else {
+            unreachable!()
+        };
         assert!((resized.custom_scale - 90.0 / 25.0).abs() < 1e-12);
         let before = host.document().get_entity(second).unwrap().clone();
-        dispatch(&mut host, &format!("PY_EVAL ocs.update_many('Scale', [{{'handle':{}, 'custom_scale':3.0}}])", second.value()));
+        dispatch(
+            &mut host,
+            &format!(
+                "PY_EVAL ocs.update_many('Scale', [{{'handle':{}, 'custom_scale':3.0}}])",
+                second.value()
+            ),
+        );
         assert!(last(&host).contains("read-only"), "{}", last(&host));
         assert_eq!(host.document().get_entity(second), Some(&before));
         // Control: the engine's default id 0 is not invisible here (there is no
@@ -7516,8 +9944,17 @@ mod tests {
         bare.common.owner_handle = paper;
         bare.width = 40.0;
         bare.height = 30.0;
-        let bare = host.document_mut().add_entity(EntityType::Viewport(bare)).unwrap();
-        assert_eq!(host.document().get_entity(bare).map(|e| match e { EntityType::Viewport(v) => v.id, _ => -1 }), Some(0));
+        let bare = host
+            .document_mut()
+            .add_entity(EntityType::Viewport(bare))
+            .unwrap();
+        assert_eq!(
+            host.document().get_entity(bare).map(|e| match e {
+                EntityType::Viewport(v) => v.id,
+                _ => -1,
+            }),
+            Some(0)
+        );
         assert!(!host.app.tabs[0].scene.wire_models_for(&[bare]).is_empty());
     }
 
@@ -7527,27 +9964,59 @@ mod tests {
     #[ignore = "exploratory evidence"]
     fn spike_raster_image_definition_persistence() {
         let dir = std::env::temp_dir();
-        let path = dir.join("ocs_spike_image.png").to_string_lossy().into_owned();
-        image::RgbaImage::from_pixel(8, 4, image::Rgba([1, 2, 3, 255])).save(&path).unwrap();
+        let path = dir
+            .join("ocs_spike_image.png")
+            .to_string_lossy()
+            .into_owned();
+        image::RgbaImage::from_pixel(8, 4, image::Rgba([1, 2, 3, 255]))
+            .save(&path)
+            .unwrap();
         for linked in [false, true] {
             let mut doc = codec::CadDocument::new();
-            let mut img = codec::entities::RasterImage::with_size(&path, codec::types::Vector3::ZERO, 8.0, 4.0, 16.0, 8.0);
+            let mut img = codec::entities::RasterImage::with_size(
+                &path,
+                codec::types::Vector3::ZERO,
+                8.0,
+                4.0,
+                16.0,
+                8.0,
+            );
             if linked {
                 let h = doc.allocate_handle();
                 let mut def = codec::objects::ImageDefinition::with_dimensions(path.clone(), 8, 4);
                 def.handle = h;
                 def.is_loaded = true;
-                doc.objects.insert(h, codec::objects::ObjectType::ImageDefinition(def));
+                doc.objects
+                    .insert(h, codec::objects::ObjectType::ImageDefinition(def));
                 img.definition_handle = Some(h);
             }
             let handle = doc.add_entity(EntityType::RasterImage(img)).unwrap();
             for (label, document) in [
-                ("DWG", crate::io::load_bytes("i.dwg", codec::DwgWriter::write_to_vec(&doc).unwrap()).unwrap()),
-                ("DXF", crate::io::load_bytes("i.dxf", codec::DxfWriter::new(&doc).write_to_vec().unwrap()).unwrap()),
+                (
+                    "DWG",
+                    crate::io::load_bytes("i.dwg", codec::DwgWriter::write_to_vec(&doc).unwrap())
+                        .unwrap(),
+                ),
+                (
+                    "DXF",
+                    crate::io::load_bytes(
+                        "i.dxf",
+                        codec::DxfWriter::new(&doc).write_to_vec().unwrap(),
+                    )
+                    .unwrap(),
+                ),
             ] {
                 let entity = document.get_entity(handle);
-                let defs = document.objects.values().filter(|o| matches!(o, codec::objects::ObjectType::ImageDefinition(_))).count();
-                let reactors = document.objects.values().filter(|o| matches!(o, codec::objects::ObjectType::ImageDefinitionReactor(_))).count();
+                let defs = document
+                    .objects
+                    .values()
+                    .filter(|o| matches!(o, codec::objects::ObjectType::ImageDefinition(_)))
+                    .count();
+                let reactors = document
+                    .objects
+                    .values()
+                    .filter(|o| matches!(o, codec::objects::ObjectType::ImageDefinitionReactor(_)))
+                    .count();
                 let dicts = document.objects.values().filter(|o| matches!(o, codec::objects::ObjectType::Dictionary(d) if d.entries.iter().any(|(k, _)| k.contains("IMAGE")))).count();
                 match entity {
                     Some(EntityType::RasterImage(i)) => eprintln!("SPIKE linked={linked} {label}: file_path_ok={} definition={:?} reactor={:?} defs={defs} reactors={reactors} image_dicts={dicts}",
@@ -7571,8 +10040,11 @@ mod tests {
         app.tabs[0].is_start = false;
         let mut host = HostSession::new(&mut app, 0);
         let process = ocs_plugin_api::process::PluginProcess::spawn(
-            std::path::Path::new(&plugin_path), &mut host, crate::plugin::v4_support::notification_handler(),
-        ).unwrap();
+            std::path::Path::new(&plugin_path),
+            &mut host,
+            crate::plugin::v4_support::notification_handler(),
+        )
+        .unwrap();
         let dir = std::env::temp_dir();
         let run = |host: &mut HostSession<'_>, tag: &str, body: &str| {
             let script = dir.join(format!("ocs_layers_{tag}_{}.py", std::process::id()));
@@ -7588,11 +10060,18 @@ mod tests {
                 "    accepted.append('SCRIPTERROR_' + ''.join(c if c.isalnum() else '_' for c in str(error))[:120])\n",
                 "L.create('REPORT ' + ' '.join(refused) + ' ~ ' + ' '.join(accepted))\n",
             ), body = body.lines().map(|line| format!("    {line}")).collect::<Vec<_>>().join("\n"))).unwrap();
-            assert!(process.dispatch(host, &format!("PY_RUN {}", script.display()), &mut |_| {}).unwrap());
+            assert!(process
+                .dispatch(host, &format!("PY_RUN {}", script.display()), &mut |_| {})
+                .unwrap());
             let _ = std::fs::remove_file(&script);
         };
         let report = |document: &CadDocument| -> (Vec<String>, Vec<String>) {
-            let name = document.layers.iter().map(|l| l.name.clone()).filter(|n| n.starts_with("REPORT")).last()
+            let name = document
+                .layers
+                .iter()
+                .map(|l| l.name.clone())
+                .filter(|n| n.starts_with("REPORT"))
+                .last()
                 .expect("script report layer");
             let (refused, accepted) = name["REPORT".len()..].split_once('~').unwrap();
             let words = |s: &str| s.split_whitespace().map(str::to_owned).collect::<Vec<_>>();
@@ -7600,7 +10079,10 @@ mod tests {
         };
 
         // Build: two layers with full properties, a modify, an entity, a rename, and the refusals.
-        run(&mut host, "build", r#"
+        run(
+            &mut host,
+            "build",
+            r#"
 L.create('Walls', color=1, lineweight=50, description='load bearing', transparency=30)
 L.create('Grid', color=(10, 200, 30), linetype='Continuous', off=True, plottable=False)
 L.modify('Walls', color=5, locked=True)
@@ -7625,37 +10107,86 @@ check('freezecurrent', lambda: L.modify(L.current['name'], frozen=True))
 check('modnone', lambda: L.modify('Grid'))
 check('modmissing', lambda: L.modify('Nope', off=True))
 check('currentmissing', lambda: L.set_current('Nope'))
-"#);
+"#,
+        );
         let (refused, accepted) = report(host.document());
-        assert!(accepted.is_empty(), "accepted invalid requests: {accepted:?}");
+        assert!(
+            accepted.is_empty(),
+            "accepted invalid requests: {accepted:?}"
+        );
         assert_eq!(refused.len(), 19, "{refused:?}");
 
         let check_state = |label: &str, document: &CadDocument| {
             let names: Vec<_> = document.layers.iter().map(|l| l.name.as_str()).collect();
-            assert!(!names.iter().any(|n| n.eq_ignore_ascii_case("Walls")), "{label}: old name gone: {names:?}");
-            assert!(!names.iter().any(|n| n.starts_with('C') && n.len() == 2), "{label}: a refused request left a layer: {names:?}");
-            let structure = document.layers.get("Structure").unwrap_or_else(|| panic!("{label}: Structure missing"));
+            assert!(
+                !names.iter().any(|n| n.eq_ignore_ascii_case("Walls")),
+                "{label}: old name gone: {names:?}"
+            );
+            assert!(
+                !names.iter().any(|n| n.starts_with('C') && n.len() == 2),
+                "{label}: a refused request left a layer: {names:?}"
+            );
+            let structure = document
+                .layers
+                .get("Structure")
+                .unwrap_or_else(|| panic!("{label}: Structure missing"));
             assert_eq!(structure.color, Color::Index(5), "{label}");
             assert_eq!(structure.line_weight, LineWeight::Value(50), "{label}");
             assert!(structure.flags.locked, "{label}");
             assert_eq!(structure.description, "load bearing", "{label}");
-            assert_ne!(structure.transparency, codec::types::Transparency::ByLayer, "{label}: transparency");
-            let grid = document.layers.get("Grid").unwrap_or_else(|| panic!("{label}: Grid missing"));
-            assert_eq!(grid.color, Color::Rgb { r: 10, g: 200, b: 30 }, "{label}");
+            assert_ne!(
+                structure.transparency,
+                codec::types::Transparency::ByLayer,
+                "{label}: transparency"
+            );
+            let grid = document
+                .layers
+                .get("Grid")
+                .unwrap_or_else(|| panic!("{label}: Grid missing"));
+            assert_eq!(
+                grid.color,
+                Color::Rgb {
+                    r: 10,
+                    g: 200,
+                    b: 30
+                },
+                "{label}"
+            );
             assert!(grid.flags.off && !grid.is_plottable, "{label}");
             assert_eq!(grid.line_type.to_uppercase(), "CONTINUOUS", "{label}");
-            let line = document.entities().find_map(|e| match e { EntityType::Line(l) => Some(l.clone()), _ => None })
+            let line = document
+                .entities()
+                .find_map(|e| match e {
+                    EntityType::Line(l) => Some(l.clone()),
+                    _ => None,
+                })
                 .unwrap_or_else(|| panic!("{label}: line missing"));
-            assert_eq!(line.common.layer, "Structure", "{label}: entity followed the rename");
+            assert_eq!(
+                line.common.layer, "Structure",
+                "{label}: entity followed the rename"
+            );
         };
         check_state("live", host.document());
-        let dwg = crate::io::load_bytes("layers.dwg", codec::DwgWriter::write_to_vec(host.document()).unwrap()).unwrap();
-        let dxf = crate::io::load_bytes("layers.dxf", codec::DxfWriter::new(host.document()).write_to_vec().unwrap()).unwrap();
+        let dwg = crate::io::load_bytes(
+            "layers.dwg",
+            codec::DwgWriter::write_to_vec(host.document()).unwrap(),
+        )
+        .unwrap();
+        let dxf = crate::io::load_bytes(
+            "layers.dxf",
+            codec::DxfWriter::new(host.document())
+                .write_to_vec()
+                .unwrap(),
+        )
+        .unwrap();
         check_state("DWG", &dwg);
         check_state("DXF", &dxf);
 
         // Destroy: current layer, delete with and without objects.
-        run(&mut host, "destroy", r#"
+        run(
+            &mut host,
+            "destroy",
+            r#"
 L.set_current('Grid')
 check('delcurrent2', lambda: L.delete('Grid'))
 check('freezecurrent2', lambda: L.modify('Grid', frozen=True))
@@ -7663,14 +10194,22 @@ L.set_current('0')
 L.delete('Grid')
 check('delused2', lambda: L.delete('Structure'))
 L.delete('Structure', erase_objects=True)
-"#);
+"#,
+        );
         let (refused, accepted) = report(host.document());
         assert!(accepted.is_empty(), "{accepted:?}");
         assert_eq!(refused, vec!["delcurrent2", "freezecurrent2", "delused2"]);
         let document = host.document();
-        assert!(document.layers.get("Grid").is_none() && document.layers.get("Structure").is_none());
+        assert!(
+            document.layers.get("Grid").is_none() && document.layers.get("Structure").is_none()
+        );
         assert_eq!(document.header.current_layer_name, "0");
-        assert!(!document.entities().any(|e| matches!(e, EntityType::Line(_))), "erase_objects erased the line");
+        assert!(
+            !document
+                .entities()
+                .any(|e| matches!(e, EntityType::Line(_))),
+            "erase_objects erased the line"
+        );
 
         // U: the last two steps are the report layer and the erasing delete;
         // undoing them restores the deleted layer and its object together.
@@ -7681,8 +10220,16 @@ L.delete('Structure', erase_objects=True)
         app.undo_steps(2);
         assert_eq!(app.tabs[0].history.undo_stack.len(), before - 2);
         let document = &app.tabs[0].scene.document;
-        assert!(document.layers.get("Structure").is_some(), "undo restored the layer");
-        assert!(document.entities().any(|e| matches!(e, EntityType::Line(_))), "undo restored the line");
+        assert!(
+            document.layers.get("Structure").is_some(),
+            "undo restored the layer"
+        );
+        assert!(
+            document
+                .entities()
+                .any(|e| matches!(e, EntityType::Line(_))),
+            "undo restored the line"
+        );
     }
 
     /// Text and dimension styles through Python over the real runner: create,
@@ -7697,8 +10244,11 @@ L.delete('Structure', erase_objects=True)
         app.tabs[0].is_start = false;
         let mut host = HostSession::new(&mut app, 0);
         let process = ocs_plugin_api::process::PluginProcess::spawn(
-            std::path::Path::new(&plugin_path), &mut host, crate::plugin::v4_support::notification_handler(),
-        ).unwrap();
+            std::path::Path::new(&plugin_path),
+            &mut host,
+            crate::plugin::v4_support::notification_handler(),
+        )
+        .unwrap();
         let dir = std::env::temp_dir();
         let run = |host: &mut HostSession<'_>, tag: &str, body: &str| {
             let script = dir.join(format!("ocs_styles_{tag}_{}.py", std::process::id()));
@@ -7713,17 +10263,30 @@ L.delete('Structure', erase_objects=True)
                 "    accepted.append('SCRIPTERROR_' + ''.join(c if c.isalnum() else '_' for c in str(error))[:120])\n",
                 "L.create('REPORT ' + str(len(refused)) + ' ~ ' + ' '.join(accepted))\n",
             ), body = body.lines().map(|line| format!("    {line}")).collect::<Vec<_>>().join("\n"))).unwrap();
-            assert!(process.dispatch(host, &format!("PY_RUN {}", script.display()), &mut |_| {}).unwrap());
+            assert!(process
+                .dispatch(host, &format!("PY_RUN {}", script.display()), &mut |_| {})
+                .unwrap());
             let _ = std::fs::remove_file(&script);
         };
         let report = |document: &CadDocument| -> (usize, Vec<String>) {
-            let name = document.layers.iter().map(|l| l.name.clone()).filter(|n| n.starts_with("REPORT")).last()
+            let name = document
+                .layers
+                .iter()
+                .map(|l| l.name.clone())
+                .filter(|n| n.starts_with("REPORT"))
+                .last()
                 .expect("script report layer");
             let (refused, accepted) = name["REPORT".len()..].split_once('~').unwrap();
-            (refused.trim().parse().unwrap(), accepted.split_whitespace().map(str::to_owned).collect())
+            (
+                refused.trim().parse().unwrap(),
+                accepted.split_whitespace().map(str::to_owned).collect(),
+            )
         };
 
-        run(&mut host, "build", r#"
+        run(
+            &mut host,
+            "build",
+            r#"
 S.create('Title', height=5, width_factor=0.8, oblique=15, font='romans', big_font='bigfont', backward=True, annotative=True)
 S.create('Notes', font='arial.ttf')
 S.modify('Title', height=6, upside_down=True)
@@ -7758,41 +10321,107 @@ check('d_txsty', lambda: D.create('D6', dimtxsty='Nope'))
 check('d_copy_missing', lambda: D.create('D7', copy_from='Nope'))
 check('d_delStandard', lambda: D.delete('Standard'))
 check('d_modmissing', lambda: D.modify('Nope', dimscale=2))
-"#);
+"#,
+        );
         let (refused, accepted) = report(host.document());
-        assert!(accepted.is_empty(), "accepted invalid requests: {accepted:?}");
+        assert!(
+            accepted.is_empty(),
+            "accepted invalid requests: {accepted:?}"
+        );
         assert_eq!(refused, 26);
 
         let check_state = |label: &str, document: &CadDocument| {
-            assert!(document.text_styles.get("Title").is_none() && document.text_styles.get("Notes").is_none(), "{label}: old names gone");
-            let title = document.text_styles.get("Heading").unwrap_or_else(|| panic!("{label}: Heading missing"));
+            assert!(
+                document.text_styles.get("Title").is_none()
+                    && document.text_styles.get("Notes").is_none(),
+                "{label}: old names gone"
+            );
+            let title = document
+                .text_styles
+                .get("Heading")
+                .unwrap_or_else(|| panic!("{label}: Heading missing"));
             assert_eq!(title.height, 6.0, "{label}");
             assert!((title.width_factor - 0.8).abs() < 1e-9, "{label}");
-            assert!((title.oblique_angle - 15f64.to_radians()).abs() < 1e-6, "{label}: oblique {}", title.oblique_angle);
+            assert!(
+                (title.oblique_angle - 15f64.to_radians()).abs() < 1e-6,
+                "{label}: oblique {}",
+                title.oblique_angle
+            );
             assert_eq!(title.font_file.to_lowercase(), "romans", "{label}");
             assert_eq!(title.big_font_file.to_lowercase(), "bigfont", "{label}");
             assert!(title.flags.backward && title.flags.upside_down, "{label}");
-            let remarks = document.text_styles.get("Remarks").unwrap_or_else(|| panic!("{label}: Remarks missing"));
-            assert_eq!(remarks.font_file.to_lowercase(), "arial.ttf", "{label}: {remarks:?}");
-            let metric = document.dim_styles.get("Metric").unwrap_or_else(|| panic!("{label}: Metric missing"));
-            assert_eq!((metric.dimscale, metric.dimtxt, metric.dimasz), (3.0, 3.5, 2.5), "{label}");
-            assert_eq!(metric.dimtxsty, "Heading", "{label}: dimtxsty followed the rename");
+            let remarks = document
+                .text_styles
+                .get("Remarks")
+                .unwrap_or_else(|| panic!("{label}: Remarks missing"));
+            assert_eq!(
+                remarks.font_file.to_lowercase(),
+                "arial.ttf",
+                "{label}: {remarks:?}"
+            );
+            let metric = document
+                .dim_styles
+                .get("Metric")
+                .unwrap_or_else(|| panic!("{label}: Metric missing"));
+            assert_eq!(
+                (metric.dimscale, metric.dimtxt, metric.dimasz),
+                (3.0, 3.5, 2.5),
+                "{label}"
+            );
+            assert_eq!(
+                metric.dimtxsty, "Heading",
+                "{label}: dimtxsty followed the rename"
+            );
             if label == "DXF" {
-                assert_eq!(metric.dimtxsty_handle, title.handle, "{label}: text style link by handle");
+                assert_eq!(
+                    metric.dimtxsty_handle, title.handle,
+                    "{label}: text style link by handle"
+                );
             }
-            let copy = document.dim_styles.get("Metric2").unwrap_or_else(|| panic!("{label}: Metric2 missing"));
-            assert_eq!((copy.dimscale, copy.dimtxt), (2.0, 4.0), "{label}: copied before Metric changed");
+            let copy = document
+                .dim_styles
+                .get("Metric2")
+                .unwrap_or_else(|| panic!("{label}: Metric2 missing"));
+            assert_eq!(
+                (copy.dimscale, copy.dimtxt),
+                (2.0, 4.0),
+                "{label}: copied before Metric changed"
+            );
         };
         check_state("live", host.document());
         let live_title = host.document().text_styles.get("Heading").unwrap().clone();
-        assert!(live_title.annotative, "annotative is kept in the live style");
-        assert_eq!(host.document().dim_styles.get("Metric").unwrap().dimtxsty_handle, live_title.handle, "dim style links the text style handle");
-        let dwg = crate::io::load_bytes("styles.dwg", codec::DwgWriter::write_to_vec(host.document()).unwrap()).unwrap();
-        let dxf = crate::io::load_bytes("styles.dxf", codec::DxfWriter::new(host.document()).write_to_vec().unwrap()).unwrap();
+        assert!(
+            live_title.annotative,
+            "annotative is kept in the live style"
+        );
+        assert_eq!(
+            host.document()
+                .dim_styles
+                .get("Metric")
+                .unwrap()
+                .dimtxsty_handle,
+            live_title.handle,
+            "dim style links the text style handle"
+        );
+        let dwg = crate::io::load_bytes(
+            "styles.dwg",
+            codec::DwgWriter::write_to_vec(host.document()).unwrap(),
+        )
+        .unwrap();
+        let dxf = crate::io::load_bytes(
+            "styles.dxf",
+            codec::DxfWriter::new(host.document())
+                .write_to_vec()
+                .unwrap(),
+        )
+        .unwrap();
         check_state("DWG", &dwg);
         check_state("DXF", &dxf);
 
-        run(&mut host, "destroy", r#"
+        run(
+            &mut host,
+            "destroy",
+            r#"
 S.set_current('Remarks')
 D.set_current('Metric2')
 check('t_delcurrent', lambda: S.delete('Remarks'))
@@ -7804,7 +10433,8 @@ S.delete('Remarks')
 D.delete('Metric2')
 D.delete('Metric')
 S.delete('Heading')
-"#);
+"#,
+        );
         let (refused, accepted) = report(host.document());
         assert!(accepted.is_empty(), "{accepted:?}");
         assert_eq!(refused, 3);
@@ -7825,8 +10455,16 @@ S.delete('Heading')
         app.finish_pending_history(0);
         app.undo_steps(5);
         let document = &app.tabs[0].scene.document;
-        assert!(document.text_styles.get("Heading").is_some() && document.text_styles.get("Remarks").is_some(), "undo restored the text styles");
-        assert!(document.dim_styles.get("Metric").is_some() && document.dim_styles.get("Metric2").is_some(), "undo restored the dimension styles");
+        assert!(
+            document.text_styles.get("Heading").is_some()
+                && document.text_styles.get("Remarks").is_some(),
+            "undo restored the text styles"
+        );
+        assert!(
+            document.dim_styles.get("Metric").is_some()
+                && document.dim_styles.get("Metric2").is_some(),
+            "undo restored the dimension styles"
+        );
     }
 
     /// Block definitions through Python over the real runner: create from
@@ -7841,8 +10479,11 @@ S.delete('Heading')
         app.tabs[0].is_start = false;
         let mut host = HostSession::new(&mut app, 0);
         let process = ocs_plugin_api::process::PluginProcess::spawn(
-            std::path::Path::new(&plugin_path), &mut host, crate::plugin::v4_support::notification_handler(),
-        ).unwrap();
+            std::path::Path::new(&plugin_path),
+            &mut host,
+            crate::plugin::v4_support::notification_handler(),
+        )
+        .unwrap();
         let dir = std::env::temp_dir();
         let run = |host: &mut HostSession<'_>, tag: &str, body: &str| {
             let script = dir.join(format!("ocs_blocks_{tag}_{}.py", std::process::id()));
@@ -7858,17 +10499,30 @@ S.delete('Heading')
                 "    accepted.append('SCRIPTERROR_' + ''.join(c if c.isalnum() else '_' for c in str(error))[:120])\n",
                 "L.create('REPORT ' + str(len(refused)) + ' ~ ' + ' '.join(accepted))\n",
             ), body = body.lines().map(|line| format!("    {line}")).collect::<Vec<_>>().join("\n"))).unwrap();
-            assert!(process.dispatch(host, &format!("PY_RUN {}", script.display()), &mut |_| {}).unwrap());
+            assert!(process
+                .dispatch(host, &format!("PY_RUN {}", script.display()), &mut |_| {})
+                .unwrap());
             let _ = std::fs::remove_file(&script);
         };
         let report = |document: &CadDocument| -> (usize, Vec<String>) {
-            let name = document.layers.iter().map(|l| l.name.clone()).filter(|n| n.starts_with("REPORT")).last()
+            let name = document
+                .layers
+                .iter()
+                .map(|l| l.name.clone())
+                .filter(|n| n.starts_with("REPORT"))
+                .last()
                 .expect("script report layer");
             let (refused, accepted) = name["REPORT".len()..].split_once('~').unwrap();
-            (refused.trim().parse().unwrap(), accepted.split_whitespace().map(str::to_owned).collect())
+            (
+                refused.trim().parse().unwrap(),
+                accepted.split_whitespace().map(str::to_owned).collect(),
+            )
         };
 
-        run(&mut host, "build", r#"
+        run(
+            &mut host,
+            "build",
+            r#"
 line = doc.create_entity('Line', start=P(0, 0, 0), end=P(4, 0, 0))
 circle = doc.create_entity('Circle', center=P(2, 2, 0), radius=1)
 B.create('Widget', [line, circle], base_point=(1, 1, 0), description='a widget')
@@ -7896,59 +10550,165 @@ check('delete_inserted', lambda: B.delete('Gadget'))
 check('delete_layout', lambda: B.delete('*Model_Space'))
 check('modify_none', lambda: B.modify('Gadget'))
 check('modify_missing', lambda: B.modify('Nope', description='x'))
-"#);
+"#,
+        );
         let (refused, accepted) = report(host.document());
-        assert!(accepted.is_empty(), "accepted invalid requests: {accepted:?}");
+        assert!(
+            accepted.is_empty(),
+            "accepted invalid requests: {accepted:?}"
+        );
         assert_eq!(refused, 18);
 
         let check_state = |label: &str, document: &CadDocument| {
-            assert!(document.block_records.get("Widget").is_none(), "{label}: old block name gone");
+            assert!(
+                document.block_records.get("Widget").is_none(),
+                "{label}: old block name gone"
+            );
             let members = |name: &str| -> Vec<EntityType> {
-                let record = document.block_records.get(name).unwrap_or_else(|| panic!("{label}: block {name} missing"));
-                document.entities().filter(|e| e.common().owner_handle == record.handle
-                    && !matches!(e, EntityType::Block(_) | EntityType::BlockEnd(_))).cloned().collect()
+                let record = document
+                    .block_records
+                    .get(name)
+                    .unwrap_or_else(|| panic!("{label}: block {name} missing"));
+                document
+                    .entities()
+                    .filter(|e| {
+                        e.common().owner_handle == record.handle
+                            && !matches!(e, EntityType::Block(_) | EntityType::BlockEnd(_))
+                    })
+                    .cloned()
+                    .collect()
             };
             let gadget = members("Gadget");
             assert_eq!(gadget.len(), 2, "{label}: Gadget members");
-            let line = gadget.iter().find_map(|e| match e { EntityType::Line(l) => Some(l.clone()), _ => None }).unwrap_or_else(|| panic!("{label}: line"));
-            assert_eq!((line.start.x, line.start.y, line.end.x, line.end.y), (-1.0, -1.0, 3.0, -1.0), "{label}: shifted by -base");
-            let circle = gadget.iter().find_map(|e| match e { EntityType::Circle(c) => Some(c.clone()), _ => None }).unwrap_or_else(|| panic!("{label}: circle"));
-            assert_eq!((circle.center.x, circle.center.y, circle.radius), (1.0, 1.0, 1.0), "{label}");
+            let line = gadget
+                .iter()
+                .find_map(|e| match e {
+                    EntityType::Line(l) => Some(l.clone()),
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("{label}: line"));
+            assert_eq!(
+                (line.start.x, line.start.y, line.end.x, line.end.y),
+                (-1.0, -1.0, 3.0, -1.0),
+                "{label}: shifted by -base"
+            );
+            let circle = gadget
+                .iter()
+                .find_map(|e| match e {
+                    EntityType::Circle(c) => Some(c.clone()),
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("{label}: circle"));
+            assert_eq!(
+                (circle.center.x, circle.center.y, circle.radius),
+                (1.0, 1.0, 1.0),
+                "{label}"
+            );
             let record = document.block_records.get("Gadget").unwrap();
-            assert_eq!((record.base_point.x, record.base_point.y), (1.0, 1.0), "{label}: base point");
+            assert_eq!(
+                (record.base_point.x, record.base_point.y),
+                (1.0, 1.0),
+                "{label}: base point"
+            );
             assert!(!record.explodable, "{label}: explodable");
             assert_eq!(record.description, "a gadget", "{label}: description");
             assert_eq!(members("Widget2").len(), 1, "{label}: Widget2 members");
-            let inserts: Vec<_> = document.entities().filter_map(|e| match e { EntityType::Insert(i) => Some(i.block_name.clone()), _ => None }).collect();
-            assert_eq!(inserts.iter().filter(|n| n.as_str() == "Gadget").count(), 2, "{label}: inserts follow the rename: {inserts:?}");
+            let inserts: Vec<_> = document
+                .entities()
+                .filter_map(|e| match e {
+                    EntityType::Insert(i) => Some(i.block_name.clone()),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(
+                inserts.iter().filter(|n| n.as_str() == "Gadget").count(),
+                2,
+                "{label}: inserts follow the rename: {inserts:?}"
+            );
             // originals: Widget kept the circle and line in model space, Widget2 erased its line copy's source
-            let canvas_kinds: Vec<_> = document.entities().filter(|e| {
-                document.block_records.iter().any(|r| r.handle == e.common().owner_handle && r.is_layout())
-            }).map(|e| format!("{:?}", e).chars().take(6).collect::<String>()).collect();
-            assert_eq!(canvas_kinds.iter().filter(|k| k.starts_with("Circle")).count(), 1, "{label}: circle original kept: {canvas_kinds:?}");
-            assert_eq!(canvas_kinds.iter().filter(|k| k.starts_with("Line(")).count(), 0, "{label}: line original erased: {canvas_kinds:?}");
+            let canvas_kinds: Vec<_> = document
+                .entities()
+                .filter(|e| {
+                    document
+                        .block_records
+                        .iter()
+                        .any(|r| r.handle == e.common().owner_handle && r.is_layout())
+                })
+                .map(|e| format!("{:?}", e).chars().take(6).collect::<String>())
+                .collect();
+            assert_eq!(
+                canvas_kinds
+                    .iter()
+                    .filter(|k| k.starts_with("Circle"))
+                    .count(),
+                1,
+                "{label}: circle original kept: {canvas_kinds:?}"
+            );
+            assert_eq!(
+                canvas_kinds
+                    .iter()
+                    .filter(|k| k.starts_with("Line("))
+                    .count(),
+                0,
+                "{label}: line original erased: {canvas_kinds:?}"
+            );
         };
         check_state("live", host.document());
-        assert_eq!(host.document().block_records.get("Gadget").unwrap().description, "a gadget");
-        let dwg = crate::io::load_bytes("blocks.dwg", codec::DwgWriter::write_to_vec(host.document()).unwrap()).unwrap();
-        let dxf = crate::io::load_bytes("blocks.dxf", codec::DxfWriter::new(host.document()).write_to_vec().unwrap()).unwrap();
+        assert_eq!(
+            host.document()
+                .block_records
+                .get("Gadget")
+                .unwrap()
+                .description,
+            "a gadget"
+        );
+        let dwg = crate::io::load_bytes(
+            "blocks.dwg",
+            codec::DwgWriter::write_to_vec(host.document()).unwrap(),
+        )
+        .unwrap();
+        let dxf = crate::io::load_bytes(
+            "blocks.dxf",
+            codec::DxfWriter::new(host.document())
+                .write_to_vec()
+                .unwrap(),
+        )
+        .unwrap();
         check_state("DWG", &dwg);
         check_state("DXF", &dxf);
 
-        run(&mut host, "destroy", r#"
+        run(
+            &mut host,
+            "destroy",
+            r#"
 for entity in list(doc.entities):
     if entity.kind == 'Insert':
         doc.delete_entity(entity)
 B.delete('Gadget')
 B.delete('Widget2')
-"#);
+"#,
+        );
         let (refused, accepted) = report(host.document());
         assert!(accepted.is_empty(), "{accepted:?}");
         assert_eq!(refused, 0);
         let document = host.document();
-        assert!(document.block_records.get("Gadget").is_none() && document.block_records.get("Widget2").is_none());
-        assert!(!document.entities().any(|e| matches!(e, EntityType::Line(_))), "block members were removed with their definitions");
-        assert_eq!(document.entities().filter(|e| matches!(e, EntityType::Block(_) | EntityType::BlockEnd(_))).count(), 0);
+        assert!(
+            document.block_records.get("Gadget").is_none()
+                && document.block_records.get("Widget2").is_none()
+        );
+        assert!(
+            !document
+                .entities()
+                .any(|e| matches!(e, EntityType::Line(_))),
+            "block members were removed with their definitions"
+        );
+        assert_eq!(
+            document
+                .entities()
+                .filter(|e| matches!(e, EntityType::Block(_) | EntityType::BlockEnd(_)))
+                .count(),
+            0
+        );
 
         // U: the report layer and both block deletes; undoing them restores the definitions.
         drop(process);
@@ -7956,8 +10716,17 @@ B.delete('Widget2')
         app.finish_pending_history(0);
         app.undo_steps(3);
         let document = &app.tabs[0].scene.document;
-        let members = |name: &str| document.block_records.get(name).map(|r| r.entity_handles.len());
-        assert_eq!(members("Gadget"), Some(2), "undo restored Gadget with its members");
+        let members = |name: &str| {
+            document
+                .block_records
+                .get(name)
+                .map(|r| r.entity_handles.len())
+        };
+        assert_eq!(
+            members("Gadget"),
+            Some(2),
+            "undo restored Gadget with its members"
+        );
         assert_eq!(members("Widget2"), Some(1), "undo restored Widget2");
     }
 
@@ -7974,8 +10743,11 @@ B.delete('Widget2')
         app.tabs[0].is_start = false;
         let mut host = HostSession::new(&mut app, 0);
         let process = ocs_plugin_api::process::PluginProcess::spawn(
-            std::path::Path::new(&plugin_path), &mut host, crate::plugin::v4_support::notification_handler(),
-        ).unwrap();
+            std::path::Path::new(&plugin_path),
+            &mut host,
+            crate::plugin::v4_support::notification_handler(),
+        )
+        .unwrap();
         let dir = std::env::temp_dir();
         let run = |host: &mut HostSession<'_>, tag: &str, body: &str| {
             let script = dir.join(format!("ocs_bcontents_{tag}_{}.py", std::process::id()));
@@ -7991,17 +10763,30 @@ B.delete('Widget2')
                 "    accepted.append('SCRIPTERROR_' + ''.join(c if c.isalnum() else '_' for c in str(error))[:120])\n",
                 "L.create('REPORT ' + str(len(refused)) + ' ~ ' + ' '.join(accepted))\n",
             ), body = body.lines().map(|line| format!("    {line}")).collect::<Vec<_>>().join("\n"))).unwrap();
-            assert!(process.dispatch(host, &format!("PY_RUN {}", script.display()), &mut |_| {}).unwrap());
+            assert!(process
+                .dispatch(host, &format!("PY_RUN {}", script.display()), &mut |_| {})
+                .unwrap());
             let _ = std::fs::remove_file(&script);
         };
         let report = |document: &CadDocument| -> (usize, Vec<String>) {
-            let name = document.layers.iter().map(|l| l.name.clone()).filter(|n| n.starts_with("REPORT")).last()
+            let name = document
+                .layers
+                .iter()
+                .map(|l| l.name.clone())
+                .filter(|n| n.starts_with("REPORT"))
+                .last()
                 .expect("script report layer");
             let (refused, accepted) = name["REPORT".len()..].split_once('~').unwrap();
-            (refused.trim().parse().unwrap(), accepted.split_whitespace().map(str::to_owned).collect())
+            (
+                refused.trim().parse().unwrap(),
+                accepted.split_whitespace().map(str::to_owned).collect(),
+            )
         };
 
-        run(&mut host, "build", r#"
+        run(
+            &mut host,
+            "build",
+            r#"
 seed = doc.create_entity('Circle', center=P(0, 0, 0), radius=1)
 B.create('Part', [seed], erase_originals=True)
 line = doc.create_entity('Line', start=P(0, 0, 0), end=P(5, 0, 0), block='Part')
@@ -8021,42 +10806,116 @@ check('bad_height', lambda: doc.create_entity('AttributeDefinition', block='Part
 check('self_insert', lambda: doc.create_entity('Insert', block_name='Part', insert_point=P(0, 0, 0), block='Part'))
 check('cycle', lambda: doc.create_entity('Insert', block_name='Outer', insert_point=P(0, 0, 0), block='Part'))
 check('unknown_insert_block', lambda: doc.create_entity('Insert', block_name='Ghost', insert_point=P(0, 0, 0), block='Part'))
-"#);
+"#,
+        );
         let (refused, accepted) = report(host.document());
-        assert!(accepted.is_empty(), "accepted invalid requests: {accepted:?}");
+        assert!(
+            accepted.is_empty(),
+            "accepted invalid requests: {accepted:?}"
+        );
         assert_eq!(refused, 9);
 
         let check_state = |label: &str, document: &CadDocument| {
-            let record = document.block_records.get("Part").unwrap_or_else(|| panic!("{label}: Part missing"));
-            let members: Vec<EntityType> = document.entities()
-                .filter(|e| e.common().owner_handle == record.handle && !matches!(e, EntityType::Block(_) | EntityType::BlockEnd(_)))
-                .cloned().collect();
-            assert_eq!(members.len(), 3, "{label}: circle, line, attribute definition (the arc was deleted): {:?}",
-                members.iter().map(|e| format!("{e:?}").chars().take(10).collect::<String>()).collect::<Vec<_>>());
-            let line = members.iter().find_map(|e| match e { EntityType::Line(l) => Some(l.clone()), _ => None }).unwrap_or_else(|| panic!("{label}: line"));
-            assert_eq!((line.end.x, line.end.y), (8.0, 0.0), "{label}: edited inside the block");
-            assert!(members.iter().any(|e| matches!(e, EntityType::Circle(_))), "{label}: circle from the seed");
-            let attdef = members.iter().find_map(|e| match e { EntityType::AttributeDefinition(a) => Some(a.clone()), _ => None }).unwrap_or_else(|| panic!("{label}: attdef"));
-            assert_eq!((attdef.tag.as_str(), attdef.prompt.as_str(), attdef.default_value.as_str()), ("PART_NO", "Part number", "PN-001"), "{label}");
-            assert!(!members.iter().any(|e| matches!(e, EntityType::Arc(_))), "{label}: arc deleted");
-            let outer = document.block_records.get("Outer").unwrap_or_else(|| panic!("{label}: Outer missing"));
+            let record = document
+                .block_records
+                .get("Part")
+                .unwrap_or_else(|| panic!("{label}: Part missing"));
+            let members: Vec<EntityType> = document
+                .entities()
+                .filter(|e| {
+                    e.common().owner_handle == record.handle
+                        && !matches!(e, EntityType::Block(_) | EntityType::BlockEnd(_))
+                })
+                .cloned()
+                .collect();
+            assert_eq!(
+                members.len(),
+                3,
+                "{label}: circle, line, attribute definition (the arc was deleted): {:?}",
+                members
+                    .iter()
+                    .map(|e| format!("{e:?}").chars().take(10).collect::<String>())
+                    .collect::<Vec<_>>()
+            );
+            let line = members
+                .iter()
+                .find_map(|e| match e {
+                    EntityType::Line(l) => Some(l.clone()),
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("{label}: line"));
+            assert_eq!(
+                (line.end.x, line.end.y),
+                (8.0, 0.0),
+                "{label}: edited inside the block"
+            );
+            assert!(
+                members.iter().any(|e| matches!(e, EntityType::Circle(_))),
+                "{label}: circle from the seed"
+            );
+            let attdef = members
+                .iter()
+                .find_map(|e| match e {
+                    EntityType::AttributeDefinition(a) => Some(a.clone()),
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("{label}: attdef"));
+            assert_eq!(
+                (
+                    attdef.tag.as_str(),
+                    attdef.prompt.as_str(),
+                    attdef.default_value.as_str()
+                ),
+                ("PART_NO", "Part number", "PN-001"),
+                "{label}"
+            );
+            assert!(
+                !members.iter().any(|e| matches!(e, EntityType::Arc(_))),
+                "{label}: arc deleted"
+            );
+            let outer = document
+                .block_records
+                .get("Outer")
+                .unwrap_or_else(|| panic!("{label}: Outer missing"));
             let nested = document.entities().any(|e| matches!(e, EntityType::Insert(i) if i.block_name == "Part" && i.common.owner_handle == outer.handle));
             assert!(nested, "{label}: Part is inserted inside Outer");
         };
         check_state("live", host.document());
-        let dwg = crate::io::load_bytes("bc.dwg", codec::DwgWriter::write_to_vec(host.document()).unwrap()).unwrap();
-        let dxf = crate::io::load_bytes("bc.dxf", codec::DxfWriter::new(host.document()).write_to_vec().unwrap()).unwrap();
+        let dwg = crate::io::load_bytes(
+            "bc.dwg",
+            codec::DwgWriter::write_to_vec(host.document()).unwrap(),
+        )
+        .unwrap();
+        let dxf = crate::io::load_bytes(
+            "bc.dxf",
+            codec::DxfWriter::new(host.document())
+                .write_to_vec()
+                .unwrap(),
+        )
+        .unwrap();
         check_state("DWG", &dwg);
         check_state("DXF", &dxf);
 
         // U: one more add, then the report layer; undoing both leaves the block as before.
-        run(&mut host, "extra", "doc.create_entity('Circle', center=P(9, 9, 0), radius=2, block='Part')");
+        run(
+            &mut host,
+            "extra",
+            "doc.create_entity('Circle', center=P(9, 9, 0), radius=2, block='Part')",
+        );
         assert_eq!(report(host.document()).1.len(), 0);
         {
             let document = host.document();
             let record = document.block_records.get("Part").unwrap();
-            let live: Vec<_> = record.entity_handles.iter().map(|h| (h.value(), document.get_entity(*h).is_some())).collect();
-            assert_eq!(record.entity_handles.len(), 4, "record entity_handles (handle, exists): {live:?}");
+            let live: Vec<_> = record
+                .entity_handles
+                .iter()
+                .map(|h| (h.value(), document.get_entity(*h).is_some()))
+                .collect();
+            assert_eq!(
+                record.entity_handles.len(),
+                4,
+                "record entity_handles (handle, exists): {live:?}"
+            );
         }
         drop(process);
         drop(host);
@@ -8066,7 +10925,11 @@ check('unknown_insert_block', lambda: doc.create_entity('Insert', block_name='Gh
         // undo (see `Scene::add_entity_internal`), so count the entities that really exist.
         let document = &app.tabs[0].scene.document;
         let part = document.block_records.get("Part").unwrap();
-        let existing = part.entity_handles.iter().filter(|h| document.get_entity(**h).is_some()).count();
+        let existing = part
+            .entity_handles
+            .iter()
+            .filter(|h| document.get_entity(**h).is_some())
+            .count();
         assert_eq!(existing, 3, "undo removed the added member");
     }
 
@@ -8082,8 +10945,11 @@ check('unknown_insert_block', lambda: doc.create_entity('Insert', block_name='Gh
         app.tabs[0].is_start = false;
         let mut host = HostSession::new(&mut app, 0);
         let process = ocs_plugin_api::process::PluginProcess::spawn(
-            std::path::Path::new(&plugin_path), &mut host, crate::plugin::v4_support::notification_handler(),
-        ).unwrap();
+            std::path::Path::new(&plugin_path),
+            &mut host,
+            crate::plugin::v4_support::notification_handler(),
+        )
+        .unwrap();
         let dir = std::env::temp_dir();
         let run = |host: &mut HostSession<'_>, tag: &str, body: &str| {
             let script = dir.join(format!("ocs_ltlay_{tag}_{}.py", std::process::id()));
@@ -8099,17 +10965,30 @@ check('unknown_insert_block', lambda: doc.create_entity('Insert', block_name='Gh
                 "    accepted.append('SCRIPTERROR_' + ''.join(c if c.isalnum() else '_' for c in str(error))[:120])\n",
                 "L.create('REPORT ' + str(len(refused)) + ' ~ ' + ' '.join(accepted))\n",
             ), body = body.lines().map(|line| format!("    {line}")).collect::<Vec<_>>().join("\n"))).unwrap();
-            assert!(process.dispatch(host, &format!("PY_RUN {}", script.display()), &mut |_| {}).unwrap());
+            assert!(process
+                .dispatch(host, &format!("PY_RUN {}", script.display()), &mut |_| {})
+                .unwrap());
             let _ = std::fs::remove_file(&script);
         };
         let report = |document: &CadDocument| -> (usize, Vec<String>) {
-            let name = document.layers.iter().map(|l| l.name.clone()).filter(|n| n.starts_with("REPORT")).last()
+            let name = document
+                .layers
+                .iter()
+                .map(|l| l.name.clone())
+                .filter(|n| n.starts_with("REPORT"))
+                .last()
                 .expect("script report layer");
             let (refused, accepted) = name["REPORT".len()..].split_once('~').unwrap();
-            (refused.trim().parse().unwrap(), accepted.split_whitespace().map(str::to_owned).collect())
+            (
+                refused.trim().parse().unwrap(),
+                accepted.split_whitespace().map(str::to_owned).collect(),
+            )
         };
 
-        run(&mut host, "build", r#"
+        run(
+            &mut host,
+            "build",
+            r#"
 LT.create('Bracket', [12, -3, 2, -3], 'Phantom test')
 LT.create('Dots', [0, -2], 'dots')
 LT.modify('Dots', pattern=[0, -4], description='sparse dots')
@@ -8158,57 +11037,134 @@ check('ly_pagenone', lambda: LY.set_page('Sheet1'))
 check('ly_badsize', lambda: LY.set_page('Sheet1', paper_size=(0, 10)))
 check('ly_badrotation', lambda: LY.set_page('Sheet1', rotation=45))
 check('ly_badscale', lambda: LY.set_page('Sheet1', scale=(0, 1)))
-"#);
+"#,
+        );
         let (refused, accepted) = report(host.document());
-        assert!(accepted.is_empty(), "accepted invalid requests: {accepted:?}");
+        assert!(
+            accepted.is_empty(),
+            "accepted invalid requests: {accepted:?}"
+        );
         assert_eq!(refused, 34);
 
         let check_state = |label: &str, document: &CadDocument| {
-            assert!(document.line_types.get("Dots").is_none(), "{label}: old linetype name gone");
-            let phantom = document.line_types.get("Bracket").unwrap_or_else(|| panic!("{label}: Bracket missing"));
+            assert!(
+                document.line_types.get("Dots").is_none(),
+                "{label}: old linetype name gone"
+            );
+            let phantom = document
+                .line_types
+                .get("Bracket")
+                .unwrap_or_else(|| panic!("{label}: Bracket missing"));
             let lengths: Vec<f64> = phantom.elements.iter().map(|e| e.length).collect();
             assert_eq!(lengths, vec![12.0, -3.0, 2.0, -3.0], "{label}: pattern");
             assert_eq!(phantom.pattern_length, 20.0, "{label}");
-            let sparse = document.line_types.get("Sparse").unwrap_or_else(|| panic!("{label}: Sparse missing"));
-            assert_eq!(sparse.elements.iter().map(|e| e.length).collect::<Vec<_>>(), vec![0.0, -4.0], "{label}: modified pattern");
-            assert_eq!(document.layers.get("Dotted2").unwrap().line_type, "Sparse", "{label}: layer followed the rename");
-            assert_eq!(document.layers.get("Hidden2").unwrap().line_type, "Bracket", "{label}");
-            let layouts = |name: &str| document.objects.values().find_map(|o| match o {
-                codec::objects::ObjectType::Layout(l) if l.name == name && !l.block_record.is_null() => Some(l.clone()),
-                _ => None,
-            });
+            let sparse = document
+                .line_types
+                .get("Sparse")
+                .unwrap_or_else(|| panic!("{label}: Sparse missing"));
+            assert_eq!(
+                sparse.elements.iter().map(|e| e.length).collect::<Vec<_>>(),
+                vec![0.0, -4.0],
+                "{label}: modified pattern"
+            );
+            assert_eq!(
+                document.layers.get("Dotted2").unwrap().line_type,
+                "Sparse",
+                "{label}: layer followed the rename"
+            );
+            assert_eq!(
+                document.layers.get("Hidden2").unwrap().line_type,
+                "Bracket",
+                "{label}"
+            );
+            let layouts = |name: &str| {
+                document.objects.values().find_map(|o| match o {
+                    codec::objects::ObjectType::Layout(l)
+                        if l.name == name && !l.block_record.is_null() =>
+                    {
+                        Some(l.clone())
+                    }
+                    _ => None,
+                })
+            };
             assert!(layouts("Sheet2").is_none(), "{label}: old layout name gone");
             let sheet = layouts("Sheet1").unwrap_or_else(|| panic!("{label}: Sheet1 missing"));
-            assert_eq!((sheet.paper_width, sheet.paper_height), (420.0, 297.0), "{label}: paper size");
+            assert_eq!(
+                (sheet.paper_width, sheet.paper_height),
+                (420.0, 297.0),
+                "{label}: paper size"
+            );
             assert_eq!(sheet.plot_rotation, 0, "{label}: rotation");
-            assert_eq!((sheet.plot_scale_numerator, sheet.plot_scale_denominator), (1.0, 50.0), "{label}: scale");
+            assert_eq!(
+                (sheet.plot_scale_numerator, sheet.plot_scale_denominator),
+                (1.0, 50.0),
+                "{label}: scale"
+            );
             assert!(layouts("Details").is_some(), "{label}: Details missing");
-            let on_sheet = document.entities().filter(|e| e.common().owner_handle == sheet.block_record && matches!(e, EntityType::Circle(_))).count();
+            let on_sheet = document
+                .entities()
+                .filter(|e| {
+                    e.common().owner_handle == sheet.block_record
+                        && matches!(e, EntityType::Circle(_))
+                })
+                .count();
             assert_eq!(on_sheet, 1, "{label}: the circle was created on the sheet");
-            assert!(!document.entities().any(|e| matches!(e, EntityType::Circle(_)) && document.block_records.iter().any(|r| r.name == "*Model_Space" && r.handle == e.common().owner_handle)),
-                "{label}: no circle in model space");
+            assert!(
+                !document
+                    .entities()
+                    .any(|e| matches!(e, EntityType::Circle(_))
+                        && document.block_records.iter().any(
+                            |r| r.name == "*Model_Space" && r.handle == e.common().owner_handle
+                        )),
+                "{label}: no circle in model space"
+            );
         };
         check_state("live", host.document());
-        assert_eq!(host.app.tabs[0].scene.current_layout, "Model", "the script switched back to Model");
-        let dwg = crate::io::load_bytes("ltl.dwg", codec::DwgWriter::write_to_vec(host.document()).unwrap()).unwrap();
-        let dxf = crate::io::load_bytes("ltl.dxf", codec::DxfWriter::new(host.document()).write_to_vec().unwrap()).unwrap();
+        assert_eq!(
+            host.app.tabs[0].scene.current_layout, "Model",
+            "the script switched back to Model"
+        );
+        let dwg = crate::io::load_bytes(
+            "ltl.dwg",
+            codec::DwgWriter::write_to_vec(host.document()).unwrap(),
+        )
+        .unwrap();
+        let dxf = crate::io::load_bytes(
+            "ltl.dxf",
+            codec::DxfWriter::new(host.document())
+                .write_to_vec()
+                .unwrap(),
+        )
+        .unwrap();
         check_state("DWG", &dwg);
         check_state("DXF", &dxf);
 
-        run(&mut host, "destroy", r#"
+        run(
+            &mut host,
+            "destroy",
+            r#"
 LY.set_current('Details')
 LY.delete('Details')
 LY.delete('Sheet1')
 LT.delete('Temp')
-"#);
+"#,
+        );
         let (refused, accepted) = report(host.document());
         assert!(accepted.is_empty(), "{accepted:?}");
         assert_eq!(refused, 0);
         let document = host.document();
         assert!(document.line_types.get("Temp").is_none());
         assert!(!document.objects.values().any(|o| matches!(o, codec::objects::ObjectType::Layout(l) if l.name == "Sheet1" || l.name == "Details")));
-        assert!(!document.entities().any(|e| matches!(e, EntityType::Circle(_))), "the sheet's circle went with its layout");
-        assert_eq!(host.app.tabs[0].scene.current_layout, "Model", "deleting the current layout fell back to Model");
+        assert!(
+            !document
+                .entities()
+                .any(|e| matches!(e, EntityType::Circle(_))),
+            "the sheet's circle went with its layout"
+        );
+        assert_eq!(
+            host.app.tabs[0].scene.current_layout, "Model",
+            "deleting the current layout fell back to Model"
+        );
 
         // U: the report layer and the three deletes; undoing them restores the layouts and the linetype.
         drop(process);
@@ -8216,10 +11172,21 @@ LT.delete('Temp')
         app.finish_pending_history(0);
         app.undo_steps(4);
         let document = &app.tabs[0].scene.document;
-        assert!(document.line_types.get("Temp").is_some(), "undo restored the linetype");
+        assert!(
+            document.line_types.get("Temp").is_some(),
+            "undo restored the linetype"
+        );
         let names = app.tabs[0].scene.layout_names();
-        assert!(names.contains(&"Sheet1".to_owned()) && names.contains(&"Details".to_owned()), "undo restored the layouts: {names:?}");
-        assert!(document.entities().any(|e| matches!(e, EntityType::Circle(_))), "undo restored the sheet's circle");
+        assert!(
+            names.contains(&"Sheet1".to_owned()) && names.contains(&"Details".to_owned()),
+            "undo restored the layouts: {names:?}"
+        );
+        assert!(
+            document
+                .entities()
+                .any(|e| matches!(e, EntityType::Circle(_))),
+            "undo restored the sheet's circle"
+        );
     }
 
     /// The modify wrappers through Python over the real runner: each drives
@@ -8244,8 +11211,11 @@ LT.delete('Temp')
         app.tabs[0].is_start = false;
         let mut host = HostSession::new(&mut app, 0);
         let process = ocs_plugin_api::process::PluginProcess::spawn(
-            std::path::Path::new(&plugin_path), &mut host, crate::plugin::v4_support::notification_handler(),
-        ).unwrap();
+            std::path::Path::new(&plugin_path),
+            &mut host,
+            crate::plugin::v4_support::notification_handler(),
+        )
+        .unwrap();
         let dir = std::env::temp_dir();
         let run = |host: &mut HostSession<'_>, tag: &str, body: &str| {
             let script = dir.join(format!("ocs_modify_{tag}_{}.py", std::process::id()));
@@ -8262,17 +11232,30 @@ LT.delete('Temp')
                 "{body}\n",
                 "L.create(('REPORT ' + str(len(refused)) + ' ~ ' + ' '.join(failed))[:250])\n",
             ), body = body)).unwrap();
-            assert!(process.dispatch(host, &format!("PY_RUN {}", script.display()), &mut |_| {}).unwrap());
+            assert!(process
+                .dispatch(host, &format!("PY_RUN {}", script.display()), &mut |_| {})
+                .unwrap());
             let _ = std::fs::remove_file(&script);
         };
         let report = |document: &CadDocument| -> (usize, Vec<String>) {
-            let name = document.layers.iter().map(|l| l.name.clone()).filter(|n| n.starts_with("REPORT")).last()
+            let name = document
+                .layers
+                .iter()
+                .map(|l| l.name.clone())
+                .filter(|n| n.starts_with("REPORT"))
+                .last()
                 .expect("script report layer");
             let (refused, failed) = name["REPORT".len()..].split_once('~').unwrap();
-            (refused.trim().parse().unwrap(), failed.split_whitespace().map(str::to_owned).collect())
+            (
+                refused.trim().parse().unwrap(),
+                failed.split_whitespace().map(str::to_owned).collect(),
+            )
         };
 
-        run(&mut host, "build", r#"
+        run(
+            &mut host,
+            "build",
+            r#"
 def line(a, b): return doc.create_entity('Line', start=P(*a), end=P(*b))
 def circle(c, r): return doc.create_entity('Circle', center=P(*c), radius=r)
 a = line((0, 0), (10, 0))
@@ -8347,83 +11330,277 @@ check('second_command', lambda: doc.start_command('CIRCLE'))
 check('run_while_active', lambda: doc.command('POINT 1,1'))
 open_command.cancel()
 check('bad_point', lambda: ocs.command_step('point', {'point': [0, 0, 0]}))
-"#);
+"#,
+        );
         let (refused, failed) = report(host.document());
         assert!(failed.is_empty(), "wrapper failures: {failed:?}");
         assert_eq!(refused, 9);
 
-        let lines: Vec<codec::entities::Line> = host.document().entities().filter_map(|e| match e { EntityType::Line(l) => Some(l.clone()), _ => None }).collect();
-        let circles: Vec<codec::entities::Circle> = host.document().entities().filter_map(|e| match e { EntityType::Circle(c) => Some(c.clone()), _ => None }).collect();
-        let arcs: Vec<codec::entities::Arc> = host.document().entities().filter_map(|e| match e { EntityType::Arc(a) => Some(a.clone()), _ => None }).collect();
+        let lines: Vec<codec::entities::Line> = host
+            .document()
+            .entities()
+            .filter_map(|e| match e {
+                EntityType::Line(l) => Some(l.clone()),
+                _ => None,
+            })
+            .collect();
+        let circles: Vec<codec::entities::Circle> = host
+            .document()
+            .entities()
+            .filter_map(|e| match e {
+                EntityType::Circle(c) => Some(c.clone()),
+                _ => None,
+            })
+            .collect();
+        let arcs: Vec<codec::entities::Arc> = host
+            .document()
+            .entities()
+            .filter_map(|e| match e {
+                EntityType::Arc(a) => Some(a.clone()),
+                _ => None,
+            })
+            .collect();
         let near = |a: f64, b: f64| (a - b).abs() < 1e-6;
-        let has_line = |x1: f64, y1: f64, x2: f64, y2: f64| lines.iter().any(|l| {
-            (near(l.start.x, x1) && near(l.start.y, y1) && near(l.end.x, x2) && near(l.end.y, y2))
-                || (near(l.start.x, x2) && near(l.start.y, y2) && near(l.end.x, x1) && near(l.end.y, y1))
-        });
-        let describe = || lines.iter().map(|l| format!("({},{})-({},{})", l.start.x, l.start.y, l.end.x, l.end.y)).collect::<Vec<_>>();
-        assert!(has_line(0.0, 0.0, 10.0, 0.0) && has_line(0.0, 2.0, 10.0, 2.0), "offset: {:?}", describe());
+        let has_line = |x1: f64, y1: f64, x2: f64, y2: f64| {
+            lines.iter().any(|l| {
+                (near(l.start.x, x1)
+                    && near(l.start.y, y1)
+                    && near(l.end.x, x2)
+                    && near(l.end.y, y2))
+                    || (near(l.start.x, x2)
+                        && near(l.start.y, y2)
+                        && near(l.end.x, x1)
+                        && near(l.end.y, y1))
+            })
+        };
+        let describe = || {
+            lines
+                .iter()
+                .map(|l| format!("({},{})-({},{})", l.start.x, l.start.y, l.end.x, l.end.y))
+                .collect::<Vec<_>>()
+        };
+        assert!(
+            has_line(0.0, 0.0, 10.0, 0.0) && has_line(0.0, 2.0, 10.0, 2.0),
+            "offset: {:?}",
+            describe()
+        );
         assert!(has_line(100.0, 0.0, 105.0, 0.0), "trim: {:?}", describe());
         assert!(has_line(200.0, 0.0, 215.0, 0.0), "extend: {:?}", describe());
-        assert!(arcs.iter().any(|a| near(a.radius, 2.0) && near(a.center.x, 302.0) && near(a.center.y, 2.0)), "fillet arc: {arcs:?}");
-        assert!(circles.iter().any(|c| near(c.center.x, 405.0) && near(c.center.y, 5.0)), "move: {circles:?}");
-        assert!(!circles.iter().any(|c| near(c.center.x, 400.0)), "move left the original: {circles:?}");
-        assert!(circles.iter().any(|c| near(c.center.x, 500.0) && near(c.center.y, 0.0)) && circles.iter().any(|c| near(c.center.x, 500.0) && near(c.center.y, 10.0)), "copy: {circles:?}");
-        assert!(has_line(600.0, 0.0, 600.0, 10.0), "rotate: {:?}", describe());
+        assert!(
+            arcs.iter()
+                .any(|a| near(a.radius, 2.0) && near(a.center.x, 302.0) && near(a.center.y, 2.0)),
+            "fillet arc: {arcs:?}"
+        );
+        assert!(
+            circles
+                .iter()
+                .any(|c| near(c.center.x, 405.0) && near(c.center.y, 5.0)),
+            "move: {circles:?}"
+        );
+        assert!(
+            !circles.iter().any(|c| near(c.center.x, 400.0)),
+            "move left the original: {circles:?}"
+        );
+        assert!(
+            circles
+                .iter()
+                .any(|c| near(c.center.x, 500.0) && near(c.center.y, 0.0))
+                && circles
+                    .iter()
+                    .any(|c| near(c.center.x, 500.0) && near(c.center.y, 10.0)),
+            "copy: {circles:?}"
+        );
+        assert!(
+            has_line(600.0, 0.0, 600.0, 10.0),
+            "rotate: {:?}",
+            describe()
+        );
         assert!(has_line(700.0, 0.0, 720.0, 0.0), "scale: {:?}", describe());
-        assert!(has_line(800.0, 0.0, 810.0, 0.0) && has_line(800.0, 10.0, 810.0, 10.0), "mirror keeps the source and adds the reflection: {:?}", describe());
+        assert!(
+            has_line(800.0, 0.0, 810.0, 0.0) && has_line(800.0, 10.0, 810.0, 10.0),
+            "mirror keeps the source and adds the reflection: {:?}",
+            describe()
+        );
         assert!(!has_line(900.0, 0.0, 910.0, 0.0), "erase: {:?}", describe());
-        assert!(has_line(1100.0, 0.0, 1110.0, 10.0), "doc.command run: {:?}", describe());
-        assert!(has_line(1302.0, 0.0, 1300.0, 3.0), "chamfer: {:?}", describe());
-        for (x, y) in [(1400.0, 0.0), (1420.0, 0.0), (1440.0, 0.0), (1400.0, 10.0), (1420.0, 10.0), (1440.0, 10.0)] {
-            assert!(has_line(x, y, x + 1.0, y), "rectangular array member at ({x}, {y}): {:?}", describe());
+        assert!(
+            has_line(1100.0, 0.0, 1110.0, 10.0),
+            "doc.command run: {:?}",
+            describe()
+        );
+        assert!(
+            has_line(1302.0, 0.0, 1300.0, 3.0),
+            "chamfer: {:?}",
+            describe()
+        );
+        for (x, y) in [
+            (1400.0, 0.0),
+            (1420.0, 0.0),
+            (1440.0, 0.0),
+            (1400.0, 10.0),
+            (1420.0, 10.0),
+            (1440.0, 10.0),
+        ] {
+            assert!(
+                has_line(x, y, x + 1.0, y),
+                "rectangular array member at ({x}, {y}): {:?}",
+                describe()
+            );
         }
-        assert!(has_line(1500.0, 0.0, 1501.0, 0.0) && has_line(1500.0, 20.0, 1499.0, 20.0), "polar array (start and half turn): {:?}", describe());
-        assert_eq!(lines.iter().filter(|l| l.start.x > 1450.0 && l.start.x < 1520.0 || l.end.x > 1450.0 && l.end.x < 1520.0).count(), 4, "polar array has four members");
-        assert!(has_line(1600.0, 0.0, 1610.0, 0.0) && has_line(1610.0, 0.0, 1610.0, 10.0), "explode: {:?}", describe());
+        assert!(
+            has_line(1500.0, 0.0, 1501.0, 0.0) && has_line(1500.0, 20.0, 1499.0, 20.0),
+            "polar array (start and half turn): {:?}",
+            describe()
+        );
+        assert_eq!(
+            lines
+                .iter()
+                .filter(|l| l.start.x > 1450.0 && l.start.x < 1520.0
+                    || l.end.x > 1450.0 && l.end.x < 1520.0)
+                .count(),
+            4,
+            "polar array has four members"
+        );
+        assert!(
+            has_line(1600.0, 0.0, 1610.0, 0.0) && has_line(1610.0, 0.0, 1610.0, 10.0),
+            "explode: {:?}",
+            describe()
+        );
         assert!(!host.document().entities().any(|e| matches!(e, EntityType::LwPolyline(p) if p.vertices.first().is_some_and(|v| near(v.location.x, 1600.0)))), "explode removed the polyline");
-        assert!(has_line(1700.0, 0.0, 1710.0, 0.0) && !has_line(1700.0, 0.0, 1705.0, 0.0), "join: {:?}", describe());
-        assert!(has_line(1800.0, 0.0, 1802.0, 0.0) && has_line(1805.0, 0.0, 1810.0, 0.0) && !has_line(1800.0, 0.0, 1810.0, 0.0), "break: {:?}", describe());
-        assert!(has_line(1900.0, 0.0, 1915.0, 0.0), "stretch: {:?}", describe());
-        assert!(has_line(2000.0, 0.0, 2015.0, 0.0), "lengthen: {:?}", describe());
-        let polylines: Vec<codec::entities::LwPolyline> = host.document().entities().filter_map(|e| match e { EntityType::LwPolyline(p) => Some(p.clone()), _ => None }).collect();
-        let at = |x: f64| polylines.iter().find(|p| p.vertices.iter().any(|v| near(v.location.x, x)));
+        assert!(
+            has_line(1700.0, 0.0, 1710.0, 0.0) && !has_line(1700.0, 0.0, 1705.0, 0.0),
+            "join: {:?}",
+            describe()
+        );
+        assert!(
+            has_line(1800.0, 0.0, 1802.0, 0.0)
+                && has_line(1805.0, 0.0, 1810.0, 0.0)
+                && !has_line(1800.0, 0.0, 1810.0, 0.0),
+            "break: {:?}",
+            describe()
+        );
+        assert!(
+            has_line(1900.0, 0.0, 1915.0, 0.0),
+            "stretch: {:?}",
+            describe()
+        );
+        assert!(
+            has_line(2000.0, 0.0, 2015.0, 0.0),
+            "lengthen: {:?}",
+            describe()
+        );
+        let polylines: Vec<codec::entities::LwPolyline> = host
+            .document()
+            .entities()
+            .filter_map(|e| match e {
+                EntityType::LwPolyline(p) => Some(p.clone()),
+                _ => None,
+            })
+            .collect();
+        let at = |x: f64| {
+            polylines
+                .iter()
+                .find(|p| p.vertices.iter().any(|v| near(v.location.x, x)))
+        };
         let pc = at(2100.0).expect("closed polyline");
         assert!(pc.is_closed, "polyline_close");
-        assert!(!at(2150.0).expect("opened polyline").is_closed, "polyline_open");
+        assert!(
+            !at(2150.0).expect("opened polyline").is_closed,
+            "polyline_open"
+        );
         let pw = at(2200.0).expect("widened polyline");
-        assert!(pw.constant_width == 0.5 || pw.vertices.iter().all(|v| v.start_width == 0.5 && v.end_width == 0.5), "polyline_width: {pw:?}");
+        assert!(
+            pw.constant_width == 0.5
+                || pw
+                    .vertices
+                    .iter()
+                    .all(|v| v.start_width == 0.5 && v.end_width == 0.5),
+            "polyline_width: {pw:?}"
+        );
         let pr = at(2300.0).expect("reversed polyline");
-        assert_eq!((pr.vertices[0].location.x, pr.vertices[0].location.y), (2310.0, 10.0), "polyline_reverse: {pr:?}");
-        let pj = polylines.iter().find(|p| p.vertices.iter().any(|v| near(v.location.x, 2420.0))).expect("joined polyline");
+        assert_eq!(
+            (pr.vertices[0].location.x, pr.vertices[0].location.y),
+            (2310.0, 10.0),
+            "polyline_reverse: {pr:?}"
+        );
+        let pj = polylines
+            .iter()
+            .find(|p| p.vertices.iter().any(|v| near(v.location.x, 2420.0)))
+            .expect("joined polyline");
         assert_eq!(pj.vertices.len(), 3, "polyline_join: {pj:?}");
-        assert!(!has_line(2410.0, 0.0, 2420.0, 0.0), "polyline_join consumed the line: {:?}", describe());
+        assert!(
+            !has_line(2410.0, 0.0, 2420.0, 0.0),
+            "polyline_join consumed the line: {:?}",
+            describe()
+        );
         let from_line = at(2500.0).expect("a line turned into a polyline");
-        assert!(from_line.constant_width == 1.0 || from_line.vertices.iter().all(|v| v.start_width == 1.0), "polyline_from_line: {from_line:?}");
-        assert!(!has_line(2500.0, 0.0, 2510.0, 0.0), "the line became the polyline: {:?}", describe());
-        let path_copies: Vec<(f64, f64)> = lines.iter().filter(|l| l.start.x > 2599.0 && l.start.x < 2660.0).map(|l| (l.start.x, l.start.y)).collect();
+        assert!(
+            from_line.constant_width == 1.0
+                || from_line.vertices.iter().all(|v| v.start_width == 1.0),
+            "polyline_from_line: {from_line:?}"
+        );
+        assert!(
+            !has_line(2500.0, 0.0, 2510.0, 0.0),
+            "the line became the polyline: {:?}",
+            describe()
+        );
+        let path_copies: Vec<(f64, f64)> = lines
+            .iter()
+            .filter(|l| l.start.x > 2599.0 && l.start.x < 2660.0)
+            .map(|l| (l.start.x, l.start.y))
+            .collect();
         for x in [2600.0, 2612.5, 2625.0, 2637.5, 2650.0] {
             assert!(path_copies.iter().any(|p| near(p.0, x) && near(p.1, 0.0)), "array_path item at x={x} (five evenly spaced along the 50-long path): {path_copies:?}");
         }
-        let three_d: Vec<(f64, f64, f64)> = lines.iter().filter(|l| l.start.x > 2699.0 && l.start.x < 2725.0).map(|l| (l.start.x, l.start.y, l.start.z)).collect();
-        for x in [2700.0, 2720.0] { for y in [0.0, 10.0] { for z in [0.0, 30.0] {
-            assert!(three_d.iter().any(|p| near(p.0, x) && near(p.1, y) && near(p.2, z)), "array_3d member ({x},{y},{z}): {three_d:?}");
-        } } }
-        assert!(circles.iter().any(|c| near(c.center.x, 1200.0) && near(c.radius, 3.0)), "start_command session: {circles:?}");
-        assert!(host.app.tabs[0].active_cmd.is_none(), "no command is left running");
+        let three_d: Vec<(f64, f64, f64)> = lines
+            .iter()
+            .filter(|l| l.start.x > 2699.0 && l.start.x < 2725.0)
+            .map(|l| (l.start.x, l.start.y, l.start.z))
+            .collect();
+        for x in [2700.0, 2720.0] {
+            for y in [0.0, 10.0] {
+                for z in [0.0, 30.0] {
+                    assert!(
+                        three_d
+                            .iter()
+                            .any(|p| near(p.0, x) && near(p.1, y) && near(p.2, z)),
+                        "array_3d member ({x},{y},{z}): {three_d:?}"
+                    );
+                }
+            }
+        }
+        assert!(
+            circles
+                .iter()
+                .any(|c| near(c.center.x, 1200.0) && near(c.radius, 3.0)),
+            "start_command session: {circles:?}"
+        );
+        assert!(
+            host.app.tabs[0].active_cmd.is_none(),
+            "no command is left running"
+        );
 
         // U: a wrapper's change is one undoable step (the report layer is the other).
-        run(&mut host, "undo", r#"
+        run(
+            &mut host,
+            "undo",
+            r#"
 u = doc.create_entity('Circle', center=P(1000, 0), radius=1)
 step('undo_move', lambda: M.move([u], (0, 0, 0), (7, 0, 0)))
-"#);
+"#,
+        );
         assert!(report(host.document()).1.is_empty());
-        let moved = |document: &CadDocument, x: f64| document.entities().any(|e| matches!(e, EntityType::Circle(c) if near(c.center.x, x) && near(c.center.y, 0.0)));
+        let moved = |document: &CadDocument, x: f64| {
+            document.entities().any(|e| matches!(e, EntityType::Circle(c) if near(c.center.x, x) && near(c.center.y, 0.0)))
+        };
         assert!(moved(host.document(), 1007.0));
         drop(process);
         drop(host);
         app.finish_pending_history(0);
         app.undo_steps(2);
-        assert!(moved(&app.tabs[0].scene.document, 1000.0), "undo put the circle back");
+        assert!(
+            moved(&app.tabs[0].scene.document, 1000.0),
+            "undo put the circle back"
+        );
         assert!(!moved(&app.tabs[0].scene.document, 1007.0));
     }
 
@@ -8439,8 +11616,11 @@ step('undo_move', lambda: M.move([u], (0, 0, 0), (7, 0, 0)))
         app.tabs[0].is_start = false;
         let mut host = HostSession::new(&mut app, 0);
         let process = ocs_plugin_api::process::PluginProcess::spawn(
-            std::path::Path::new(&plugin_path), &mut host, crate::plugin::v4_support::notification_handler(),
-        ).unwrap();
+            std::path::Path::new(&plugin_path),
+            &mut host,
+            crate::plugin::v4_support::notification_handler(),
+        )
+        .unwrap();
         let script = std::env::temp_dir().join(format!("ocs_nested_{}.py", std::process::id()));
         std::fs::write(&script, concat!(
             "def P(x, y, z=0.0): return {'x': x, 'y': y, 'z': z}\n",
@@ -8465,20 +11645,47 @@ step('undo_move', lambda: M.move([u], (0, 0, 0), (7, 0, 0)))
             "good2 = doc.create_entity('Polyline2D', vertices=[{'location': P(0, 0)}, {'location': P(5, 5)}])\n",
             "L.create('REPORT ' + str(len(refused)) + ' ~ ' + ' '.join(problems))\n",
         )).unwrap();
-        assert!(process.dispatch(&mut host, &format!("PY_RUN {}", script.display()), &mut |_| {}).unwrap());
+        assert!(process
+            .dispatch(
+                &mut host,
+                &format!("PY_RUN {}", script.display()),
+                &mut |_| {}
+            )
+            .unwrap());
         let _ = std::fs::remove_file(&script);
-        let name = host.document().layers.iter().map(|l| l.name.clone()).filter(|n| n.starts_with("REPORT")).last().expect("script report layer");
+        let name = host
+            .document()
+            .layers
+            .iter()
+            .map(|l| l.name.clone())
+            .filter(|n| n.starts_with("REPORT"))
+            .last()
+            .expect("script report layer");
         let (refused, problems) = name["REPORT".len()..].split_once('~').unwrap();
         assert_eq!(problems.trim(), "", "problems: {problems}");
         assert_eq!(refused.trim(), "8");
         // Nothing invalid reached the drawing; the two valid polylines did.
         let document = host.document();
-        let lw: Vec<_> = document.entities().filter_map(|e| match e { EntityType::LwPolyline(p) => Some(p.clone()), _ => None }).collect();
+        let lw: Vec<_> = document
+            .entities()
+            .filter_map(|e| match e {
+                EntityType::LwPolyline(p) => Some(p.clone()),
+                _ => None,
+            })
+            .collect();
         assert_eq!(lw.len(), 1, "only the valid LwPolyline was created");
         assert_eq!(lw[0].vertices.len(), 3);
         assert_eq!(lw[0].vertices[1].bulge, 0.5);
-        assert_eq!(document.entities().filter(|e| matches!(e, EntityType::Polyline2D(_))).count(), 1);
-        assert!(!document.entities().any(|e| matches!(e, EntityType::PolygonMesh(_))));
+        assert_eq!(
+            document
+                .entities()
+                .filter(|e| matches!(e, EntityType::Polyline2D(_)))
+                .count(),
+            1
+        );
+        assert!(!document
+            .entities()
+            .any(|e| matches!(e, EntityType::PolygonMesh(_))));
         drop(process);
     }
 
@@ -8489,7 +11696,9 @@ step('undo_move', lambda: M.move([u], (0, 0, 0), (7, 0, 0)))
         let mut app = OpenCADStudio::new_for_test();
         app.tabs[0].is_start = false;
         assert!(app.script_commands, "scripts may run commands by default");
-        let run = |app: &mut OpenCADStudio, line: &str| HostSession::new(app, 0).run_command(R::Run { line: line.into() });
+        let run = |app: &mut OpenCADStudio, line: &str| {
+            HostSession::new(app, 0).run_command(R::Run { line: line.into() })
+        };
         assert!(run(&mut app, "LINE 0,0 10,0").is_ok());
 
         // A script cannot touch the setting, on or off.
@@ -8503,10 +11712,21 @@ step('undo_move', lambda: M.move([u], (0, 0, 0), (7, 0, 0)))
         assert!(!app.script_commands);
         let refused = run(&mut app, "LINE 0,0 20,0").unwrap_err();
         assert!(refused.contains("turned off"), "{refused}");
-        let refused = HostSession::new(&mut app, 0).run_command(R::Start { name: "LINE".into() }).unwrap_err();
+        let refused = HostSession::new(&mut app, 0)
+            .run_command(R::Start {
+                name: "LINE".into(),
+            })
+            .unwrap_err();
         assert!(refused.contains("turned off"), "{refused}");
-        assert_eq!(app.tabs[0].scene.document.entities().count(), 1, "nothing ran while it was off");
-        assert!(HostSession::new(&mut app, 0).run_command(R::Cancel).is_ok(), "Cancel is still allowed while it is off");
+        assert_eq!(
+            app.tabs[0].scene.document.entities().count(),
+            1,
+            "nothing ran while it was off"
+        );
+        assert!(
+            HostSession::new(&mut app, 0).run_command(R::Cancel).is_ok(),
+            "Cancel is still allowed while it is off"
+        );
 
         // And back on.
         app.automation_op(r#"{"op":"run","cmd":"SCRIPTCOMMANDS 1"}"#);
@@ -8526,29 +11746,52 @@ step('undo_move', lambda: M.move([u], (0, 0, 0), (7, 0, 0)))
         app.tabs[0].is_start = false;
         let mut host = HostSession::new(&mut app, 0);
         let show = |label: &str, r: &Result<ocs_plugin_api::host::CommandOutcome, String>| match r {
-            Ok(o) => eprintln!("SPIKE {label}: {} prompt={:?} accepts={:?} opts={:?} added={} err={:?}",
-                o.status, o.prompt, o.accepts, o.options, o.added, o.error),
+            Ok(o) => eprintln!(
+                "SPIKE {label}: {} prompt={:?} accepts={:?} opts={:?} added={} err={:?}",
+                o.status, o.prompt, o.accepts, o.options, o.added, o.error
+            ),
             Err(e) => eprintln!("SPIKE {label}: ERR {e}"),
         };
-        let run = |host: &mut HostSession<'_>, label: &str, r: R| { let out = host.run_command(r); show(label, &out); out };
+        let run = |host: &mut HostSession<'_>, label: &str, r: R| {
+            let out = host.run_command(r);
+            show(label, &out);
+            out
+        };
         let mk = |host: &mut HostSession<'_>, lines: &[&str]| -> Vec<Handle> {
-            for l in lines { host.run_command(R::Run { line: (*l).into() }).unwrap(); }
-            host.document().entities().map(|e| e.common().handle).collect()
+            for l in lines {
+                host.run_command(R::Run { line: (*l).into() }).unwrap();
+            }
+            host.document()
+                .entities()
+                .map(|e| e.common().handle)
+                .collect()
         };
         let hs = mk(&mut host, &["PLINE 2400,0 2410,0", "LINE 2410,0 2420,0"]);
-        run(&mut host, "PEDIT start", R::Start { name: "PEDIT".into() });
-        run(&mut host, "pick", R::Entity { handle: hs[0], point: [2400.0, 0.0, 0.0] });
+        run(
+            &mut host,
+            "PEDIT start",
+            R::Start {
+                name: "PEDIT".into(),
+            },
+        );
+        run(
+            &mut host,
+            "pick",
+            R::Entity {
+                handle: hs[0],
+                point: [2400.0, 0.0, 0.0],
+            },
+        );
         run(&mut host, "J", R::Token { text: "J".into() });
         host.app.tabs[0].scene.replace_selection_exact(&[hs[1]]);
         run(&mut host, "selection", R::Selection);
         run(&mut host, "enter", R::Enter);
         run(&mut host, "X", R::Token { text: "X".into() });
-        eprintln!("SPIKE final entity count {}", host.document().entities().count());
+        eprintln!(
+            "SPIKE final entity count {}",
+            host.document().entities().count()
+        );
     }
-
-
-
-
 
     #[test]
     fn audit_python_raster_image_definition_linkage_over_real_ipc() {
@@ -8558,35 +11801,75 @@ step('undo_move', lambda: M.move([u], (0, 0, 0), (7, 0, 0)))
         };
         let dir = std::env::temp_dir();
         let (a, b) = (dir.join("ocs_link_a.png"), dir.join("ocs_link_b.png"));
-        image::RgbaImage::from_pixel(8, 4, image::Rgba([9, 9, 9, 255])).save(&a).unwrap();
-        image::RgbaImage::from_pixel(6, 6, image::Rgba([90, 9, 9, 255])).save(&b).unwrap();
+        image::RgbaImage::from_pixel(8, 4, image::Rgba([9, 9, 9, 255]))
+            .save(&a)
+            .unwrap();
+        image::RgbaImage::from_pixel(6, 6, image::Rgba([90, 9, 9, 255]))
+            .save(&b)
+            .unwrap();
         let mut app = OpenCADStudio::new_for_test();
         app.tabs[0].is_start = false;
         let mut host = HostSession::new(&mut app, 0);
         let process = ocs_plugin_api::process::PluginProcess::spawn(
-            std::path::Path::new(&plugin_path), &mut host, crate::plugin::v4_support::notification_handler(),
-        ).unwrap();
+            std::path::Path::new(&plugin_path),
+            &mut host,
+            crate::plugin::v4_support::notification_handler(),
+        )
+        .unwrap();
         let script = dir.join(format!("ocs_link_{}.py", std::process::id()));
-        std::fs::write(&script, format!(concat!(
+        std::fs::write(
+            &script,
+            format!(
+                concat!(
             "doc = ocs.active_document\n",
             "doc.create_entity('RasterImage', file_path={a:?}, insertion_point=(0, 0, 0))\n",
             "doc.create_entity('RasterImage', file_path={a:?}, insertion_point=(20, 0, 0))\n",
             "doc.create_entity('RasterImage', file_path={b:?}, insertion_point=(40, 0, 0))\n",
-        ), a = a.display().to_string(), b = b.display().to_string())).unwrap();
-        assert!(process.dispatch(&mut host, &format!("PY_RUN {}", script.display()), &mut |_| {}).unwrap());
+        ),
+                a = a.display().to_string(),
+                b = b.display().to_string()
+            ),
+        )
+        .unwrap();
+        assert!(process
+            .dispatch(
+                &mut host,
+                &format!("PY_RUN {}", script.display()),
+                &mut |_| {}
+            )
+            .unwrap());
         let _ = std::fs::remove_file(&script);
 
         // The structure: one definition per file, registered and owned by ACAD_IMAGE_DICT.
         let structure = |document: &CadDocument| {
             let root = document.header.named_objects_dict_handle;
-            let Some(ObjectType::Dictionary(root_dict)) = document.objects.get(&root) else { panic!("no root dictionary") };
+            let Some(ObjectType::Dictionary(root_dict)) = document.objects.get(&root) else {
+                panic!("no root dictionary")
+            };
             let dict_handle = root_dict.get("ACAD_IMAGE_DICT");
-            let entries = dict_handle.and_then(|h| match document.objects.get(&h) {
-                Some(ObjectType::Dictionary(d)) => Some(d.entries.clone()), _ => None }).unwrap_or_default();
-            let defs: Vec<_> = document.objects.iter().filter_map(|(h, o)| match o {
-                ObjectType::ImageDefinition(d) => Some((*h, d.owner, d.file_name.clone())), _ => None }).collect();
-            let mut images: Vec<_> = document.entities().filter_map(|e| match e {
-                EntityType::RasterImage(i) => Some((i.common.handle, i.definition_handle, i.file_path.clone())), _ => None }).collect();
+            let entries = dict_handle
+                .and_then(|h| match document.objects.get(&h) {
+                    Some(ObjectType::Dictionary(d)) => Some(d.entries.clone()),
+                    _ => None,
+                })
+                .unwrap_or_default();
+            let defs: Vec<_> = document
+                .objects
+                .iter()
+                .filter_map(|(h, o)| match o {
+                    ObjectType::ImageDefinition(d) => Some((*h, d.owner, d.file_name.clone())),
+                    _ => None,
+                })
+                .collect();
+            let mut images: Vec<_> = document
+                .entities()
+                .filter_map(|e| match e {
+                    EntityType::RasterImage(i) => {
+                        Some((i.common.handle, i.definition_handle, i.file_path.clone()))
+                    }
+                    _ => None,
+                })
+                .collect();
             images.sort_by_key(|(h, _, _)| h.value());
             (dict_handle, entries, defs, images)
         };
@@ -8598,21 +11881,43 @@ step('undo_move', lambda: M.move([u], (0, 0, 0), (7, 0, 0)))
             keys.sort();
             assert_eq!(keys, vec!["ocs_link_a", "ocs_link_b"], "{label}");
             for (key, handle) in &entries {
-                let (_, owner, file) = defs.iter().find(|(h, _, _)| h == handle).unwrap_or_else(|| panic!("{label}: dangling entry {key}"));
+                let (_, owner, file) = defs
+                    .iter()
+                    .find(|(h, _, _)| h == handle)
+                    .unwrap_or_else(|| panic!("{label}: dangling entry {key}"));
                 assert_eq!(*owner, dict, "{label}: {key} is owned by ACAD_IMAGE_DICT");
                 assert!(file.contains(key.as_str()), "{label}: {key} -> {file}");
             }
             assert_eq!(images.len(), 3, "{label}");
-            assert_eq!(images[0].1, images[1].1, "{label}: images of one file share a definition");
+            assert_eq!(
+                images[0].1, images[1].1,
+                "{label}: images of one file share a definition"
+            );
             assert_ne!(images[0].1, images[2].1, "{label}");
             for (_, definition, path) in &images {
-                assert!(defs.iter().any(|(h, _, _)| Some(*h) == *definition), "{label}: definition resolves");
-                assert!(path.contains("ocs_link_"), "{label}: file path kept: {path}");
+                assert!(
+                    defs.iter().any(|(h, _, _)| Some(*h) == *definition),
+                    "{label}: definition resolves"
+                );
+                assert!(
+                    path.contains("ocs_link_"),
+                    "{label}: file path kept: {path}"
+                );
             }
         };
         check("live", host.document());
-        let dwg = crate::io::load_bytes("link.dwg", codec::DwgWriter::write_to_vec(host.document()).unwrap()).unwrap();
-        let dxf = crate::io::load_bytes("link.dxf", codec::DxfWriter::new(host.document()).write_to_vec().unwrap()).unwrap();
+        let dwg = crate::io::load_bytes(
+            "link.dwg",
+            codec::DwgWriter::write_to_vec(host.document()).unwrap(),
+        )
+        .unwrap();
+        let dxf = crate::io::load_bytes(
+            "link.dxf",
+            codec::DxfWriter::new(host.document())
+                .write_to_vec()
+                .unwrap(),
+        )
+        .unwrap();
         check("DWG", &dwg);
         check("DXF", &dxf);
 
@@ -8624,7 +11929,10 @@ step('undo_move', lambda: M.move([u], (0, 0, 0), (7, 0, 0)))
         let (_, entries, defs, images) = structure(&app.tabs[0].scene.document);
         assert!(images.len() < 3);
         for (key, handle) in &entries {
-            assert!(defs.iter().any(|(h, _, _)| h == handle), "undo left a dangling entry {key}");
+            assert!(
+                defs.iter().any(|(h, _, _)| h == handle),
+                "undo left a dangling entry {key}"
+            );
         }
         for file in [&a, &b] {
             let _ = std::fs::remove_file(file);
@@ -8647,7 +11955,7 @@ step('undo_move', lambda: M.move([u], (0, 0, 0), (7, 0, 0)))
                 ocs_plugin_api::process::PluginProcess::spawn(
                     std::path::Path::new(&plugin_path),
                     &mut host,
-                crate::plugin::v4_support::notification_handler(),
+                    crate::plugin::v4_support::notification_handler(),
                 )
                 .expect("spawn staged Python plugin"),
             )
@@ -8792,7 +12100,7 @@ step('undo_move', lambda: M.move([u], (0, 0, 0), (7, 0, 0)))
                 ocs_plugin_api::process::PluginProcess::spawn(
                     std::path::Path::new(&plugin_path),
                     &mut host,
-                crate::plugin::v4_support::notification_handler(),
+                    crate::plugin::v4_support::notification_handler(),
                 )
                 .expect("spawn staged Python plugin"),
             )
@@ -9035,10 +12343,8 @@ step('undo_move', lambda: M.move([u], (0, 0, 0), (7, 0, 0)))
         let handle;
         {
             let mut host = HostSession::new(&mut app, 0);
-            let insert = codec::entities::Insert::new(
-                "DOOR",
-                codec::types::Vector3::new(1.0, 2.0, 0.0),
-            );
+            let insert =
+                codec::entities::Insert::new("DOOR", codec::types::Vector3::new(1.0, 2.0, 0.0));
             handle = host.add_entity(EntityType::Insert(insert));
             let mut changed = host.document().get_entity(handle).unwrap().clone();
             if let EntityType::Insert(insert) = &mut changed {
@@ -9157,7 +12463,7 @@ step('undo_move', lambda: M.move([u], (0, 0, 0), (7, 0, 0)))
         // Absent before first use.
         assert!(host::plugin_state::<u32>(&*host, "opencad.demo").is_none());
         // Insert via ensure, then mutate.
-        *host::ensure_plugin_state(host, "opencad.demo", || 7u32) += 1;
+        *host::ensure_plugin_state(host, "opencad.demo", || 7u32).unwrap() += 1;
         assert_eq!(
             *host::plugin_state::<u32>(&*host, "opencad.demo").unwrap(),
             8
@@ -9166,6 +12472,31 @@ step('undo_move', lambda: M.move([u], (0, 0, 0), (7, 0, 0)))
         assert_eq!(
             *host::plugin_state::<u32>(&*host, "opencad.demo").unwrap(),
             100
+        );
+    }
+
+    #[test]
+    fn ensure_plugin_state_type_mismatch_does_not_panic() {
+        use ocs_plugin_api::host::{self, HostApi};
+        let mut app = OpenCADStudio::new_for_test();
+        let mut session = HostSession::new(&mut app, 0);
+        let host: &mut dyn HostApi = &mut session;
+        let _ = host::ensure_plugin_state(host, "opencad.demo", || 7u32);
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ =
+                host::ensure_plugin_state::<String>(&mut *host, "opencad.demo", || "x".to_string());
+        }));
+        assert!(
+            outcome.is_ok(),
+            "type mismatch in ensure_plugin_state must degrade, not panic: {:?}",
+            outcome.err()
+        );
+        assert!(
+            host::ensure_plugin_state::<String>(host, "opencad.demo", || "x".to_string()).is_none()
+        );
+        assert_eq!(
+            *host::ensure_plugin_state::<u32>(host, "opencad.demo", || 0).unwrap(),
+            7
         );
     }
 
@@ -9300,9 +12631,7 @@ step('undo_move', lambda: M.move([u], (0, 0, 0), (7, 0, 0)))
         fn on_point(&mut self, pt: [f64; 3]) -> ocs_plugin_api::host::CommandStep {
             use ocs_plugin_api::host::CommandStep;
             if self.got_first {
-                let p = codec::entities::Point::at(codec::types::Vector3::new(
-                    pt[0], pt[1], pt[2],
-                ));
+                let p = codec::entities::Point::at(codec::types::Vector3::new(pt[0], pt[1], pt[2]));
                 CommandStep::CommitAndEnd(codec::EntityType::Point(p))
             } else {
                 self.got_first = true;
@@ -9347,7 +12676,9 @@ step('undo_move', lambda: M.move([u], (0, 0, 0), (7, 0, 0)))
             ocs_plugin_api::host::CommandStep::Done
         }
         fn on_cursor_move(&mut self, pt: [f64; 3]) -> Vec<ocs_plugin_api::host::PreviewWire> {
-            vec![ocs_plugin_api::host::PreviewWire::line(self.start, pt, self.color)]
+            vec![ocs_plugin_api::host::PreviewWire::line(
+                self.start, pt, self.color,
+            )]
         }
     }
 
@@ -9367,7 +12698,11 @@ step('undo_move', lambda: M.move([u], (0, 0, 0), (7, 0, 0)))
             let dx = pt[0] - self.center[0];
             let dy = pt[1] - self.center[1];
             let r = (dx * dx + dy * dy).sqrt();
-            vec![ocs_plugin_api::host::PreviewWire::circle(self.center, r, self.color)]
+            vec![ocs_plugin_api::host::PreviewWire::circle(
+                self.center,
+                r,
+                self.color,
+            )]
         }
     }
 
@@ -9405,19 +12740,28 @@ step('undo_move', lambda: M.move([u], (0, 0, 0), (7, 0, 0)))
         // 1. Polyline default color (None -> CYAN)
         {
             let mut host = HostSession::new(&mut app, 0);
-            host.start_interactive(Box::new(PreviewLine { start: [0.0, 0.0, 0.0], color: None }));
+            host.start_interactive(Box::new(PreviewLine {
+                start: [0.0, 0.0, 0.0],
+                color: None,
+            }));
         }
         assert!(app.tabs[0].active_cmd.is_some());
         let cmd = app.tabs[0].active_cmd.as_mut().unwrap();
         let wires = cmd.on_preview_wires(glam::DVec3::new(10.0, 20.0, 0.0));
         assert_eq!(wires.len(), 1);
         assert_eq!(wires[0].name, "rubber_band");
-        assert_eq!(wires[0].color, crate::scene::model::wire_model::WireModel::CYAN);
+        assert_eq!(
+            wires[0].color,
+            crate::scene::model::wire_model::WireModel::CYAN
+        );
 
         // 2. Polyline custom color ([1.0, 0.0, 0.0, 1.0])
         {
             let mut host = HostSession::new(&mut app, 0);
-            host.start_interactive(Box::new(PreviewLine { start: [0.0, 0.0, 0.0], color: Some([1.0, 0.0, 0.0, 1.0]) }));
+            host.start_interactive(Box::new(PreviewLine {
+                start: [0.0, 0.0, 0.0],
+                color: Some([1.0, 0.0, 0.0, 1.0]),
+            }));
         }
         let cmd2 = app.tabs[0].active_cmd.as_mut().unwrap();
         let wires2 = cmd2.on_preview_wires(glam::DVec3::new(10.0, 20.0, 0.0));
@@ -9442,7 +12786,8 @@ step('undo_move', lambda: M.move([u], (0, 0, 0), (7, 0, 0)))
             circle_wires[0].tangent_geoms[0],
             crate::scene::model::wire_model::TangentGeom::PlanarCircle { radius, .. } if (radius - 10.0).abs() < 1e-6
         ));
-        let instances = crate::scene::pipeline::circle_gpu::extract_circle_instances(&circle_wires[0], 0.0);
+        let instances =
+            crate::scene::pipeline::circle_gpu::extract_circle_instances(&circle_wires[0], 0.0);
         assert!(instances.is_some());
         assert_eq!(instances.unwrap().len(), 1);
 
@@ -9463,7 +12808,8 @@ step('undo_move', lambda: M.move([u], (0, 0, 0), (7, 0, 0)))
             arc_wires[0].tangent_geoms[0],
             crate::scene::model::wire_model::TangentGeom::Arc { radius, .. } if (radius - 10.0).abs() < 1e-6
         ));
-        let arc_instances = crate::scene::pipeline::circle_gpu::extract_circle_instances(&arc_wires[0], 0.0);
+        let arc_instances =
+            crate::scene::pipeline::circle_gpu::extract_circle_instances(&arc_wires[0], 0.0);
         assert!(arc_instances.is_some());
         assert_eq!(arc_instances.unwrap().len(), 1);
     }
@@ -9485,8 +12831,7 @@ step('undo_move', lambda: M.move([u], (0, 0, 0), (7, 0, 0)))
             _handle: codec::Handle,
             pt: [f64; 3],
         ) -> ocs_plugin_api::host::CommandStep {
-            let p =
-                codec::entities::Point::at(codec::types::Vector3::new(pt[0], pt[1], pt[2]));
+            let p = codec::entities::Point::at(codec::types::Vector3::new(pt[0], pt[1], pt[2]));
             ocs_plugin_api::host::CommandStep::CommitAndEnd(codec::EntityType::Point(p))
         }
     }
@@ -9540,7 +12885,7 @@ step('undo_move', lambda: M.move([u], (0, 0, 0), (7, 0, 0)))
         let reader = ocs_plugin_api::shm::SharedDocumentReader::<
             ocs_plugin_api::shm::DocumentViewData,
         >::open(std::path::Path::new(&info.path))
-                .unwrap();
+        .unwrap();
         assert_eq!(reader.entity_count(), 0);
 
         host.add_entity(codec::EntityType::Point(codec::entities::Point::at(
@@ -9592,7 +12937,7 @@ step('undo_move', lambda: M.move([u], (0, 0, 0), (7, 0, 0)))
         let reader = ocs_plugin_api::shm::SharedDocumentReader::<
             ocs_plugin_api::shm::DocumentViewData,
         >::open(std::path::Path::new(&info.path))
-                .unwrap();
+        .unwrap();
 
         let h = host.add_entity(EntityType::Point(Point::at(codec::types::Vector3::new(
             1.0, 2.0, 0.0,
@@ -9631,7 +12976,11 @@ step('undo_move', lambda: M.move([u], (0, 0, 0), (7, 0, 0)))
         assert_ne!(handle, codec::Handle::NULL);
 
         // Verify defaults were applied
-        let layer = host.document().layers.get("ELECTRICAL").expect("layer should exist");
+        let layer = host
+            .document()
+            .layers
+            .get("ELECTRICAL")
+            .expect("layer should exist");
         assert_eq!(layer.color, codec::types::Color::Index(7));
         assert_eq!(layer.line_type, "Continuous");
         assert_eq!(layer.line_weight, codec::types::LineWeight::ByLayer);
@@ -9646,7 +12995,10 @@ step('undo_move', lambda: M.move([u], (0, 0, 0), (7, 0, 0)))
             color: Some(codec::types::Color::Index(1)),
             ..Default::default()
         };
-        assert!(host.add_layer(dup_config).is_none(), "duplicate layer should return None");
+        assert!(
+            host.add_layer(dup_config).is_none(),
+            "duplicate layer should return None"
+        );
 
         // 3. Modify only color and locked; other properties should remain untouched
         let mod_config = LayerConfig {
@@ -9657,12 +13009,16 @@ step('undo_move', lambda: M.move([u], (0, 0, 0), (7, 0, 0)))
         };
         assert!(host.modify_layer(mod_config));
 
-        let updated = host.document().layers.get("ELECTRICAL").expect("layer should exist");
+        let updated = host
+            .document()
+            .layers
+            .get("ELECTRICAL")
+            .expect("layer should exist");
         assert_eq!(updated.color, codec::types::Color::Index(1)); // Modified to red
-        assert!(updated.flags.locked);                               // Modified to locked
-        assert_eq!(updated.line_type, "Continuous");                 // Kept as-is
+        assert!(updated.flags.locked); // Modified to locked
+        assert_eq!(updated.line_type, "Continuous"); // Kept as-is
         assert_eq!(updated.line_weight, codec::types::LineWeight::ByLayer); // Kept as-is
-        assert!(!updated.flags.off);                                 // Kept as-is
+        assert!(!updated.flags.off); // Kept as-is
 
         // 4. Modify nonexistent layer returns false
         let non_existent = LayerConfig {
@@ -9671,6 +13027,74 @@ step('undo_move', lambda: M.move([u], (0, 0, 0), (7, 0, 0)))
             ..Default::default()
         };
         assert!(!host.modify_layer(non_existent));
+    }
+
+    #[test]
+    fn test_entity_creation_with_novel_layer_refreshes_gui() {
+        let mut app = OpenCADStudio::new_for_test();
+        app.tabs[0].is_start = false;
+
+        // Verify COGO_LINES does not exist initially
+        assert!(!app.tabs[0].scene.document.layers.contains("COGO_LINES"));
+        assert!(!app
+            .ribbon
+            .layer_infos
+            .iter()
+            .any(|l| l.name == "COGO_LINES"));
+
+        // 1. Add entity via HostSession (simulating plugin add_entity / add_line)
+        {
+            let mut host = HostSession::new(&mut app, 0);
+            let mut line = codec::entities::Line::from_coords(0.0, 0.0, 0.0, 10.0, 10.0, 0.0);
+            line.common.layer = "COGO_LINES".to_string();
+            let handle = host.add_entity(codec::EntityType::Line(line));
+            assert_ne!(handle, codec::Handle::NULL);
+        }
+
+        // Verify layer is created in document AND refreshed in ribbon + layer panel
+        assert!(app.tabs[0].scene.document.layers.contains("COGO_LINES"));
+        assert!(
+            app.ribbon
+                .layer_infos
+                .iter()
+                .any(|l| l.name == "COGO_LINES"),
+            "Ribbon layers should contain COGO_LINES after add_entity"
+        );
+        assert!(
+            app.tabs[0]
+                .layers
+                .layers
+                .iter()
+                .any(|l| l.name == "COGO_LINES"),
+            "Layer panel should contain COGO_LINES after add_entity"
+        );
+
+        // 2. Commit entity via command driver (simulating interactive tool / palette commit)
+        let mut line2 = codec::entities::Line::from_coords(10.0, 10.0, 0.0, 20.0, 20.0, 0.0);
+        line2.common.layer = "SURVEY_TRAVERSE".to_string();
+        let _ = app.commit_entity_handle_preserve_layer(codec::EntityType::Line(line2));
+
+        // Verify SURVEY_TRAVERSE layer is created and refreshed in ribbon + layer panel
+        assert!(app.tabs[0]
+            .scene
+            .document
+            .layers
+            .contains("SURVEY_TRAVERSE"));
+        assert!(
+            app.ribbon
+                .layer_infos
+                .iter()
+                .any(|l| l.name == "SURVEY_TRAVERSE"),
+            "Ribbon layers should contain SURVEY_TRAVERSE after commit_entity"
+        );
+        assert!(
+            app.tabs[0]
+                .layers
+                .layers
+                .iter()
+                .any(|l| l.name == "SURVEY_TRAVERSE"),
+            "Layer panel should contain SURVEY_TRAVERSE after commit_entity"
+        );
     }
 
     #[test]

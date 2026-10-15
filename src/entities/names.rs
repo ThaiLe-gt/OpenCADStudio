@@ -14,9 +14,17 @@ pub fn ui_name(e: &EntityType) -> &'static str {
     match e {
         EntityType::Point(_) => "Point",
         EntityType::Line(line)
-            if codec::entities::CenterMarkAssociation::read(&line.common.extended_data).is_some() => "Center Mark",
+            if codec::entities::CenterMarkAssociation::read(&line.common.extended_data)
+                .is_some() =>
+        {
+            "Center Mark"
+        }
         EntityType::Line(line)
-            if codec::entities::CenterLineAssociation::read(&line.common.extended_data).is_some() => "Center Line",
+            if codec::entities::CenterLineAssociation::read(&line.common.extended_data)
+                .is_some() =>
+        {
+            "Center Line"
+        }
         EntityType::Line(_) => "Line",
         EntityType::Circle(_) => "Circle",
         EntityType::Arc(_) => "Arc",
@@ -70,7 +78,10 @@ pub fn ui_name(e: &EntityType) -> &'static str {
             if matches!(
                 extended.data,
                 codec::entities::ExtendedEntityData::SectionObject(_)
-            ) => "Section Plane",
+            ) =>
+        {
+            "Section Plane"
+        }
         EntityType::Extended(_) => "Extended Entity",
         EntityType::Seqend(_) => "Seqend",
         EntityType::Unknown(_) => "Unknown",
@@ -89,6 +100,12 @@ pub fn ui_name_or_class(e: &EntityType) -> String {
             codec::entities::ExtendedEntityData::SectionObject(_)
         ) {
             return "Section Plane".to_string();
+        }
+        if matches!(
+            entity.data,
+            codec::entities::ExtendedEntityData::PointCloudEx(_)
+        ) {
+            return "Point Cloud".to_string();
         }
         return entity.class_name().to_string();
     }
@@ -164,7 +181,10 @@ pub fn dxf_name(e: &EntityType) -> &'static str {
             if matches!(
                 extended.data,
                 codec::entities::ExtendedEntityData::SectionObject(_)
-            ) => "SECTIONOBJECT",
+            ) =>
+        {
+            "SECTIONOBJECT"
+        }
         _ => "ENTITY",
     }
 }

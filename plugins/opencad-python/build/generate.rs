@@ -693,6 +693,14 @@ fn gen_struct(name: &str, info: &TypeInfo, registry: &TypeRegistry, required: &[
         .map(|field| format!("\"{field}\""))
         .collect::<Vec<_>>()
         .join(", ");
+    // Fields the codec keeps out of serde (`#[serde(skip)]`) are invisible to
+    // the traced registry; entity records default them through their own
+    // `Default` instead of failing to construct.
+    let rest = if info.fields.iter().any(|f| f.type_id.as_str() == "EntityCommon") {
+        "        ..Default::default()\n"
+    } else {
+        ""
+    };
     for f in &info.fields {
         if f.type_id.as_str() == "EntityCommon" {
             // A sub-record's own common data (layer, XDATA, handles) is not part
@@ -750,14 +758,16 @@ fn dict_to_{snake}(value: PyObjectRef, vm: &VirtualMachine) -> PyResult<{path}> 
             return Err(vm.new_value_error(format!("{name} needs {{required}}")));
         }}
     }}
+    #[allow(clippy::needless_update)]
     Ok({path} {{
-{from_dict_fields}    }})
+{from_dict_fields}{rest}    }})
 }}
 
 #[allow(dead_code)]
 fn default_{snake}() -> {path} {{
+    #[allow(clippy::needless_update)]
     {path} {{
-{default_fields}    }}
+{default_fields}{rest}    }}
 }}
 
 "#
@@ -925,7 +935,7 @@ fn gen_dict_to_entity(manifest: &Manifest, registry: &TypeRegistry) -> String {
         }
         if manifest.manual_kinds.contains(kind) {
             arms.push_str(&format!(
-                "        \"{kind}\" => codec::EntityType::{kind}({}_from_dict(dict, vm)?),\n",
+                "        \"{kind}\" => codec::EntityType::{kind}({}_from_dict(dict, vm)?.into()),\n",
                 snake_case(kind)
             ));
             continue;
@@ -962,7 +972,7 @@ fn gen_dict_to_entity(manifest: &Manifest, registry: &TypeRegistry) -> String {
         for f in &fields {
             body.push_str(&format!("            {}\n", f.setter));
         }
-        body.push_str(&format!("            codec::EntityType::{kind}({var})\n"));
+        body.push_str(&format!("            codec::EntityType::{kind}({var}.into())\n"));
         arms.push_str(&format!("        \"{kind}\" => {{\n{body}        }}\n"));
     }
     format!(
@@ -990,7 +1000,7 @@ fn gen_apply_dict_to_entity(manifest: &Manifest, registry: &TypeRegistry) -> Str
     for kind in &manifest.type_filter {
         if manifest.manual_kinds.contains(kind) {
             arms.push_str(&format!(
-                "        codec::EntityType::{kind}(existing_value) => codec::EntityType::{kind}({}_apply(existing_value, dict, vm)?),\n",
+                "        codec::EntityType::{kind}(existing_value) => codec::EntityType::{kind}({}_apply(existing_value, dict, vm)?.into()),\n",
                 snake_case(kind)
             ));
             continue;
@@ -1032,7 +1042,7 @@ fn gen_apply_dict_to_entity(manifest: &Manifest, registry: &TypeRegistry) -> Str
         for f in &fields {
             body.push_str(&format!("            {}\n", f.setter));
         }
-        body.push_str(&format!("            codec::EntityType::{kind}({var})\n"));
+        body.push_str(&format!("            codec::EntityType::{kind}({var}.into())\n"));
         arms.push_str(&format!(
             "        codec::EntityType::{kind}(existing_value) => {{\n{body}        }}\n"
         ));

@@ -2,13 +2,14 @@ use codec::entities::{AttachmentPoint, DrawingDirection, MText};
 
 use crate::command::EntityTransform;
 use crate::entities::common::{
-    edit_angle_prop as edit_angle, edit_prop as edit, num_prop as num_row, ro_prop as ro, square_grip, triangle_grip,
+    edit_angle_prop as edit_angle, edit_prop as edit, num_prop as num_row, ro_prop as ro,
+    square_grip, triangle_grip,
 };
 use crate::entities::text_support::{
     clamp_mtext_column_count, layout_mtext, resolve_text_style, GlyphBox, MTextColumns,
     MTextRenderOpts, MTextVAnchor,
 };
-use crate::entities::traits::{Grippable, PropertyEditable, Transformable, RenderConvertible};
+use crate::entities::traits::{Grippable, PropertyEditable, RenderConvertible, Transformable};
 use crate::scene::convert::acad_to_render::{RenderEntity, RenderObject};
 use crate::scene::model::object::{GripApply, GripDef, PropSection, PropValue, Property};
 use crate::scene::model::wire_model::SnapHint;
@@ -79,15 +80,39 @@ fn drawing_dir_str(d: &DrawingDirection) -> &'static str {
     }
 }
 
+/// The text MTEXT lays out: its stored value, except that the spaces between
+/// a field's value and a right-to-left word right after it read with that
+/// word — the reference draws `שלום 0 עולם` with no gap after the field
+/// (the spaces end up after the word), while plain text keeps the gap.
+fn display_text(t: &MText, document: &codec::CadDocument) -> String {
+    use crate::entities::text_support::is_rtl_char;
+    let value = &t.value;
+    if !value.chars().any(is_rtl_char) {
+        return value.clone();
+    }
+    let Some(spans) = codec::fields::field_spans(document, t.common.handle, value) else {
+        return value.clone();
+    };
+    let mut out = value.clone();
+    for span in spans.iter().rev() {
+        let rest = &out[span.end..];
+        let gap = rest.len() - rest.trim_start_matches(' ').len();
+        let after = &rest[gap..];
+        if gap == 0 || !after.chars().next().is_some_and(is_rtl_char) {
+            continue;
+        }
+        let word = after
+            .find(|c: char| c == ' ' || c == '\\')
+            .unwrap_or(after.len());
+        let moved = format!("{}{}{}", &after[..word], &rest[..gap], &after[word..]);
+        out.replace_range(span.end.., &moved);
+    }
+    out
+}
+
 /// Per-visible-character world-space boxes for the MText editor's
 /// click-to-select preview. Uses the exact same layout opts as `to_render`
 /// so the boxes line up with the rendered glyphs.
-/// The MTEXT string to render: the live re-evaluated value when the entity
-/// hosts a dynamic field, otherwise its stored (cached) value.
-fn display_value(t: &MText, document: &codec::CadDocument) -> String {
-    crate::entities::field::resolve(document, t.common.handle).unwrap_or_else(|| t.value.clone())
-}
-
 pub fn glyph_boxes(t: &MText, document: &codec::CadDocument) -> Vec<GlyphBox> {
     let resolved_style = resolve_text_style(&t.style, document);
     let attach_h_anchor: f32 = match t.attachment_point {
@@ -115,7 +140,9 @@ pub fn glyph_boxes(t: &MText, document: &codec::CadDocument) -> Vec<GlyphBox> {
     } else {
         t.rotation as f32
     };
-    let display = display_value(t, document);
+    // A field shows its stored value: fields update on their evaluation
+    // events (open, save, plot, regen, UPDATEFIELD), never on a redraw.
+    let display = display_text(t, document);
     let layout = layout_mtext(&MTextRenderOpts {
         value: &display,
         insertion: [
@@ -171,7 +198,9 @@ fn to_render(t: &MText, document: &codec::CadDocument) -> RenderEntity {
     } else {
         t.rotation as f32
     };
-    let display = display_value(t, document);
+    // A field shows its stored value: fields update on their evaluation
+    // events (open, save, plot, regen, UPDATEFIELD), never on a redraw.
+    let display = display_text(t, document);
     let layout = layout_mtext(&MTextRenderOpts {
         value: &display,
         insertion: [
@@ -210,6 +239,46 @@ fn to_render(t: &MText, document: &codec::CadDocument) -> RenderEntity {
         key_vertices: vec![],
         fill_tris: vec![],
     }
+}
+
+/// EXPLODE: one single-line TEXT per laid-out run, at the run's own baseline
+/// origin, height, rotation and width, so the result sits where the MTEXT was
+/// drawn. Inline colours carry over as true colours. (#760)
+// ponytail: one TEXT per run (word), not merged per line; merge same-format runs if users ask.
+pub(crate) fn explode_mtext(t: &MText, document: &codec::CadDocument) -> Vec<codec::EntityType> {
+    let RenderObject::Text(strokes) = to_render(t, document).object else {
+        return Vec::new();
+    };
+    strokes
+        .into_iter()
+        .filter_map(|stroke| {
+            let run = stroke.run?;
+            if run.text.trim().is_empty() {
+                return None;
+            }
+            let mut text = codec::entities::Text::with_value(
+                run.text,
+                codec::types::Vector3::new(stroke.origin[0], stroke.origin[1], t.insertion_point.z),
+            );
+            text.common = t.common.clone();
+            text.common.handle = codec::Handle::NULL;
+            if let Some([r, g, b]) = stroke.color {
+                let byte = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
+                text.common.color = codec::types::Color::Rgb {
+                    r: byte(r),
+                    g: byte(g),
+                    b: byte(b),
+                };
+            }
+            text.style = t.style.clone();
+            text.height = run.height as f64;
+            text.rotation = run.rotation as f64;
+            text.width_factor = run.width_factor as f64;
+            text.oblique_angle = run.oblique as f64;
+            text.normal = t.normal;
+            Some(codec::EntityType::Text(text))
+        })
+        .collect()
 }
 
 /// The MTEXT's attachment anchors in the shared layout vocabulary.
@@ -259,8 +328,7 @@ fn grips(t: &MText) -> Vec<GripDef> {
     let columns_active =
         t.column_data.column_type != 0 && column_count > 1 && t.column_data.width > 0.0;
     let block_width = if columns_active {
-        t.column_data.width * column_count as f64
-            + t.column_data.gutter * (column_count - 1) as f64
+        t.column_data.width * column_count as f64 + t.column_data.gutter * (column_count - 1) as f64
     } else {
         t.rectangle_width.max(0.0)
     };
@@ -276,9 +344,9 @@ fn grips(t: &MText) -> Vec<GripDef> {
         let down = glam::DVec3::new(sin, -cos, 0.0);
         let (_, vertical) = attach_anchors(t);
         let factor = match vertical {
-            MTextVAnchor::Top
-            | MTextVAnchor::MiddleOfTopLine
-            | MTextVAnchor::BottomOfTopLine => 1.0,
+            MTextVAnchor::Top | MTextVAnchor::MiddleOfTopLine | MTextVAnchor::BottomOfTopLine => {
+                1.0
+            }
             MTextVAnchor::Middle => 0.5,
             MTextVAnchor::Bottom | MTextVAnchor::MiddleOfBottomLine => -1.0,
         };
@@ -377,8 +445,16 @@ fn properties(t: &MText, text_style_names: &[String]) -> Vec<PropSection> {
                     crate::entities::common::style_fixed_height(&t.style).is_none(),
                 ),
                 edit_angle(t!("Rotation").as_ref(), "rotation", t.rotation.to_degrees()),
-                edit(t!("Line space factor").as_ref(), "line_spacing", t.line_spacing_factor),
-                edit(t!("Line space distance").as_ref(), "line_space_distance", line_space_distance),
+                edit(
+                    t!("Line space factor").as_ref(),
+                    "line_spacing",
+                    t.line_spacing_factor,
+                ),
+                edit(
+                    t!("Line space distance").as_ref(),
+                    "line_space_distance",
+                    line_space_distance,
+                ),
                 Property {
                     label: t!("Line space style").into_owned(),
                     field: "line_space_style",
@@ -411,7 +487,12 @@ fn properties(t: &MText, text_style_names: &[String]) -> Vec<PropSection> {
                             .collect(),
                     },
                 },
-                num_row(t!("Defined width").as_ref(), "rect_w", t.rectangle_width, false),
+                num_row(
+                    t!("Defined width").as_ref(),
+                    "rect_w",
+                    t.rectangle_width,
+                    false,
+                ),
                 num_row(
                     t!("Defined height").as_ref(),
                     "rect_h",
@@ -590,8 +671,7 @@ fn apply_grip(t: &mut MText, grip_id: usize, apply: GripApply) {
                 t.column_data.column_count = column_count;
                 let gaps = (column_count - 1) as f64;
                 t.column_data.width =
-                    ((width - t.column_data.gutter * gaps) / column_count as f64)
-                        .max(0.01);
+                    ((width - t.column_data.gutter * gaps) / column_count as f64).max(0.01);
             } else {
                 t.rectangle_width = width;
             }
@@ -636,8 +716,7 @@ fn apply_grip(t: &mut MText, grip_id: usize, apply: GripApply) {
                 p.y as f64 - t.insertion_point.y,
                 0.0,
             );
-            t.column_data.gutter =
-                (delta.dot(dir) / k - t.column_data.width).max(0.0);
+            t.column_data.gutter = (delta.dot(dir) / k - t.column_data.width).max(0.0);
         }
         _ => {}
     }
@@ -700,7 +779,11 @@ impl Grippable for MText {
         }
     }
 
-    fn apply_grip_menu(&mut self, _grip_id: usize, _action: crate::scene::model::object::GripMenuAction) {
+    fn apply_grip_menu(
+        &mut self,
+        _grip_id: usize,
+        _action: crate::scene::model::object::GripMenuAction,
+    ) {
         // Rotate needs a follow-up angle handled by
         // `apply_grip_menu_value`; Move-with-Text is the default drag.
     }

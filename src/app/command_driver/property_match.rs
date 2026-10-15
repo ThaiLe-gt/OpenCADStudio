@@ -41,7 +41,6 @@ impl OpenCADStudio {
         }
     }
 
-
     pub(super) fn handle_match_properties(
         &mut self,
         mut dest: Vec<Handle>,
@@ -163,5 +162,4 @@ impl OpenCADStudio {
         }
         None
     }
-
 }

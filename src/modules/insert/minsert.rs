@@ -6,11 +6,11 @@
 //! entity is a single [`Insert`] with its array fields set, which the renderer
 //! replicates over `row_count × column_count` using the row/column spacing.
 
+use crate::t;
 use codec::entities::Insert;
 use codec::types::Vector3;
 use codec::EntityType;
 use glam::DVec3;
-use crate::t;
 
 use crate::command::{CadCommand, CmdResult, WorkingPlane};
 use crate::modules::{IconKind, ModuleEvent, ToolDef};
@@ -147,7 +147,12 @@ impl CadCommand for MinsertCommand {
                     if total <= shown {
                         t!("MINSERT  Enter block name:").into_owned()
                     } else {
-                        t!("MINSERT  Enter block name:  [%{shown} of %{total} — type to search]", shown = shown, total = total).into_owned()
+                        t!(
+                            "MINSERT  Enter block name:  [%{shown} of %{total} — type to search]",
+                            shown = shown,
+                            total = total
+                        )
+                        .into_owned()
                     }
                 } else {
                     t!(
@@ -158,19 +163,15 @@ impl CadCommand for MinsertCommand {
                     .into_owned()
                 }
             }
-            Step::Point { name } => {
-                t!(
-                    "MINSERT  Specify insertion point for \"%{name}\":",
-                    name = name
-                )
-                .into_owned()
-            }
+            Step::Point { name } => t!(
+                "MINSERT  Specify insertion point for \"%{name}\":",
+                name = name
+            )
+            .into_owned(),
             Step::Params { idx, .. } => match idx {
-                ParamIdx::Rows => t!(
-                    "MINSERT  Enter number of rows <%{rows}>:",
-                    rows = self.rows
-                )
-                .into_owned(),
+                ParamIdx::Rows => {
+                    t!("MINSERT  Enter number of rows <%{rows}>:", rows = self.rows).into_owned()
+                }
                 ParamIdx::Columns => t!(
                     "MINSERT  Enter number of columns <%{cols}>:",
                     cols = self.columns

@@ -38,11 +38,17 @@ impl OpenCADStudio {
         action: XclipAction,
     ) {
         if let XclipAction::Depth { rejected: true, .. } = action {
-            self.command_line.push_error(crate::modules::insert::xclip::DEPTH_REJECTED);
+            self.command_line
+                .push_error(crate::modules::insert::xclip::DEPTH_REJECTED);
         }
         self.push_undo_snapshot(i, "XCLIP");
         let extents: Vec<_> = inserts.iter().map(|h| self.insert_extents(i, *h)).collect();
-        let current_layer = self.tabs[i].scene.document.header.current_layer_name.clone();
+        let current_layer = self.tabs[i]
+            .scene
+            .document
+            .header
+            .current_layer_name
+            .clone();
         let scene = &mut self.tabs[i].scene;
         let mut polylines = Vec::new();
         for (n, insert) in inserts.iter().enumerate() {
@@ -64,8 +70,10 @@ impl OpenCADStudio {
                     let Some(spatial) = clip::filter_handle(doc, *insert) else {
                         continue;
                     };
-                    let (Some(codec::objects::ObjectType::SpatialFilter(filter)), Some(codec::EntityType::Insert(ins))) =
-                        (doc.objects.get(&spatial), doc.get_entity(*insert))
+                    let (
+                        Some(codec::objects::ObjectType::SpatialFilter(filter)),
+                        Some(codec::EntityType::Insert(ins)),
+                    ) = (doc.objects.get(&spatial), doc.get_entity(*insert))
                     else {
                         continue;
                     };

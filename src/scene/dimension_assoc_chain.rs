@@ -54,9 +54,15 @@ pub(crate) fn osnap_type_for(snap: crate::snap::SnapType) -> u8 {
         S::Nearest | S::Extension => osnap::NEAR,
         S::ApparentIntersection => osnap::APPARENT_INT,
         S::Parallel => osnap::PARA,
-        S::Grid | S::ObjectPick | S::Vertex | S::EdgeMidpoint | S::FaceCenter | S::Knot | S::FacePerpendicular | S::NearestFace => {
-            osnap::NONE
-        }
+        S::GeometricCenter
+        | S::Grid
+        | S::ObjectPick
+        | S::Vertex
+        | S::EdgeMidpoint
+        | S::FaceCenter
+        | S::Knot
+        | S::FacePerpendicular
+        | S::NearestFace => osnap::NONE,
     }
 }
 
@@ -503,14 +509,11 @@ fn intersection_point(
         y_axis: y.to_array().into(),
     })?;
     let hint_uv = first.plane.project(dpoint(hint))?;
-    let mut points: Vec<_> = kernel::geom2d::intersect(
-        &first.curve,
-        &second,
-        kernel::geom2d::Tolerance::new(1e-9),
-    )
-    .into_iter()
-    .map(|hit| hit.point)
-    .collect();
+    let mut points: Vec<_> =
+        kernel::geom2d::intersect(&first.curve, &second, kernel::geom2d::Tolerance::new(1e-9))
+            .into_iter()
+            .map(|hit| hit.point)
+            .collect();
     if apparent && points.is_empty() {
         // Extended apparent intersections are meaningful for straight lines.
         // Curved geometry must actually cross after projection.

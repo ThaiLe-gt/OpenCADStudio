@@ -43,10 +43,9 @@ impl Scene {
                     }
                 }
                 AreaPreviewSource::Boundary(boundary) => {
-                    if let Some(model) = Self::area_preview_hatch(
-                        std::slice::from_ref(boundary),
-                        region.subtract,
-                    ) {
+                    if let Some(model) =
+                        Self::area_preview_hatch(std::slice::from_ref(boundary), region.subtract)
+                    {
                         models.push(model);
                     }
                 }
@@ -67,11 +66,8 @@ impl Scene {
             return;
         }
 
-        let direct_boundary = crate::scene::project::clip_boundary_polygon_for_document(
-            &self.document,
-            handle,
-            0.0,
-        );
+        let direct_boundary =
+            crate::scene::project::clip_boundary_polygon_for_document(&self.document, handle, 0.0);
         let mut rings = if direct_boundary.len() >= 3 {
             vec![direct_boundary
                 .into_iter()
@@ -110,12 +106,18 @@ impl Scene {
 
     fn push_area_preview_ring(rings: &mut Vec<Vec<[f64; 2]>>, ring: &mut Vec<[f64; 2]>) {
         if ring.len() >= 3 {
-            let min_x = ring.iter().map(|point| point[0]).fold(f64::INFINITY, f64::min);
+            let min_x = ring
+                .iter()
+                .map(|point| point[0])
+                .fold(f64::INFINITY, f64::min);
             let max_x = ring
                 .iter()
                 .map(|point| point[0])
                 .fold(f64::NEG_INFINITY, f64::max);
-            let min_y = ring.iter().map(|point| point[1]).fold(f64::INFINITY, f64::min);
+            let min_y = ring
+                .iter()
+                .map(|point| point[1])
+                .fold(f64::INFINITY, f64::min);
             let max_y = ring
                 .iter()
                 .map(|point| point[1])
@@ -221,8 +223,7 @@ impl Scene {
         if let EntityType::Hatch(hatch) = entity {
             if let Some(background) = crate::entities::hatch::background_color(hatch) {
                 let mut backdrop = model.clone();
-                backdrop.pattern =
-                    crate::scene::model::hatch_model::HatchPattern::Solid;
+                backdrop.pattern = crate::scene::model::hatch_model::HatchPattern::Solid;
                 let (background_color, background_aci) = match background {
                     codec::types::Color::ByLayer => {
                         let layer = self.document.layers.get(&hatch.common.layer);
@@ -243,15 +244,12 @@ impl Scene {
                     }
                     codec::types::Color::ByBlock => (style.0, style.4),
                     codec::types::Color::Index(index) => (
-                        crate::scene::convert::tess_util::aci_to_rgba(
-                            &codec::types::Color::Index(index),
-                        ),
+                        crate::scene::convert::tess_util::aci_to_rgba(&codec::types::Color::Index(
+                            index,
+                        )),
                         index,
                     ),
-                    other => (
-                        crate::scene::convert::tess_util::aci_to_rgba(&other),
-                        0,
-                    ),
+                    other => (crate::scene::convert::tess_util::aci_to_rgba(&other), 0),
                 };
                 backdrop.color = background_color;
                 backdrop.aci = background_aci;
@@ -281,7 +279,7 @@ impl Scene {
         self.interim_wire = None;
         // Drop any point-picked window marquee (STRETCH) so it doesn't linger
         // after the command ends before the next mouse move. (#291)
-        self.selection.borrow_mut().preview_box = None;
+        self.selection.borrow_mut().gesture.preview_box = None;
     }
 
     pub fn wire_models_for(&self, handles: &[codec::Handle]) -> Vec<WireModel> {
@@ -294,9 +292,7 @@ impl Scene {
                     // show the shape following the cursor. Build a live boundary
                     // from the current HatchModel — `apply_grip` keeps it in
                     // step, so the preview tracks a dragged grip in real time.
-                    Some(EntityType::Hatch(_)) => {
-                        self.hatch_outline_wire(*h).into_iter().collect()
-                    }
+                    Some(EntityType::Hatch(_)) => self.hatch_outline_wire(*h).into_iter().collect(),
                     Some(e) => self.tessellate_one(e),
                     None => Vec::new(),
                 }

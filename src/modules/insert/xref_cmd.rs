@@ -139,7 +139,11 @@ impl CadCommand for XrefCommand {
             Step::List => CmdResult::Dispatch(format!("XREFLIST {value}")),
             Step::Names(op) => CmdResult::Dispatch(format!("XREF {op} {value}")),
             Step::File { overlay } => {
-                let verb = if overlay { "XREFOVERLAYFILE" } else { "XREFATTACHFILE" };
+                let verb = if overlay {
+                    "XREFOVERLAYFILE"
+                } else {
+                    "XREFATTACHFILE"
+                };
                 CmdResult::Dispatch(format!("{verb} {value}"))
             }
             Step::PathNames => {
@@ -186,9 +190,7 @@ impl CadCommand for XrefCommand {
         match self.step.clone() {
             Step::Option => self.choose("A"),
             Step::List => CmdResult::Dispatch("XREFLIST *".to_string()),
-            Step::NewPath { .. } => {
-                CmdResult::Measurement("Path unchanged.".to_string())
-            }
+            Step::NewPath { .. } => CmdResult::Measurement("Path unchanged.".to_string()),
             Step::PathTypeKind { .. } => CmdResult::NeedPoint,
             _ => CmdResult::Cancel,
         }

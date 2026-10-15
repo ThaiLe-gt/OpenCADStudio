@@ -152,7 +152,10 @@ fn number_field<'a>(
         field = field.on_input(on_input);
     }
     row![
-        text(label).size(11).style(muted_style).width(Length::Fixed(16.0)),
+        text(label)
+            .size(11)
+            .style(muted_style)
+            .width(Length::Fixed(16.0)),
         field
     ]
     .spacing(6)
@@ -236,18 +239,12 @@ pub fn view_window<'a>(
     let reference_type = group(
         t!("Reference Type").into_owned(),
         column![
-            form_radio(
-                t!("Attachment"),
-                false,
-                Some(state.overlay),
-                |v| msg(XrefAttachMsg::Overlay(v)),
-            ),
-            form_radio(
-                t!("Overlay"),
-                true,
-                Some(state.overlay),
-                |v| msg(XrefAttachMsg::Overlay(v)),
-            ),
+            form_radio(t!("Attachment"), false, Some(state.overlay), |v| msg(
+                XrefAttachMsg::Overlay(v)
+            ),),
+            form_radio(t!("Overlay"), true, Some(state.overlay), |v| msg(
+                XrefAttachMsg::Overlay(v)
+            ),),
         ]
         .spacing(6),
         Length::Shrink,
@@ -313,8 +310,10 @@ pub fn view_window<'a>(
     // ── Path type, rotation, block unit ─────────────────────────────────
     let path_type = group(
         t!("Path type").into_owned(),
-        pick_list(Some(state.path_type), PathTypeChoice::ALL, |choice| choice.to_string())
-            .on_select(|v| msg(XrefAttachMsg::PathType(v)))
+        pick_list(Some(state.path_type), PathTypeChoice::ALL, |choice| {
+            choice.to_string()
+        })
+        .on_select(|v| msg(XrefAttachMsg::PathType(v)))
         .text_size(11)
         .padding([3, 6])
         .width(Fill),

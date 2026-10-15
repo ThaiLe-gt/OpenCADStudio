@@ -9,7 +9,11 @@
 //! the identical handlers with identical validation, undo and idempotency.
 //!
 //! Conventions: one request per connection (`Connection: close`), JSON
-//! bodies, permissive CORS for local browser clients, loopback bind only.
+//! bodies, loopback bind only, and every request carries
+//! `Authorization: Bearer <token>` (see [`api_token`]). Loopback is shared by
+//! every process and user on the machine, and a web page can aim requests at
+//! it too, so the port alone proves nothing; no CORS headers are sent, so a
+//! browser page cannot read an answer either.
 //! Connections are served one thread each: a slow op (plot, open a large
 //! drawing) or a client that connects and stalls must never keep other
 //! callers — `state`, `get_selection`, `cancel`, `operation` — from being
@@ -23,14 +27,27 @@
 //! so both `--http` modes serve the identical surface.
 
 use crate::app::OpenCADStudio;
+use crate::io::line_read::{is_line_too_long, read_line_capped};
 use serde_json::{json, Value};
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::{AtomicU16, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
 const MAX_BODY: usize = 16 * 1024 * 1024;
+
+/// Per-line cap for the request line and each header line. `BufRead::read_line`
+/// grows its `String` by doubling, so a client streaming `X: AAAA…` with no
+/// CRLF could otherwise push a single line to gigabytes until the allocation
+/// aborts the process — which is not a catchable panic. 8 KiB matches the
+/// usual reverse-proxy header-line allowance.
+const MAX_LINE: usize = 8 * 1024;
+
+/// Cap on the whole header block: every individual line may sit under
+/// [`MAX_LINE`] while their count is infinite. 64 KiB matches common
+/// reverse-proxy header-buffer budgets.
+const MAX_HEADER_BYTES: usize = 64 * 1024;
 
 /// Serial for request ids stamped onto `POST /api/v1/{op}` passthroughs that
 /// arrive without one — the protocol-1 envelope requires a unique id, and
@@ -89,11 +106,65 @@ pub fn serve(port: u16) {
     listen(OpenCADStudio::new(), port, Arc::new(AtomicU16::new(0)));
 }
 
+/// The secret every TCP automation client presents: `OCS_API_TOKEN` when the
+/// launcher set one (so a script knows it in advance), otherwise 32 random
+/// bytes printed once on stderr when a listener starts. The GUI's private
+/// channel keeps its own per-session token in the user-only descriptor.
+pub fn api_token() -> &'static str {
+    static TOKEN: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    TOKEN.get_or_init(|| {
+        if let Some(token) = std::env::var("OCS_API_TOKEN")
+            .ok()
+            .filter(|token| !token.trim().is_empty())
+        {
+            return token.trim().to_owned();
+        }
+        let mut secret = [0u8; 32];
+        getrandom::fill(&mut secret).expect("system random source");
+        secret.iter().map(|byte| format!("{byte:02x}")).collect()
+    })
+}
+
+/// Tells a listener's user how to authenticate. A token the launcher chose
+/// is not echoed back.
+pub(crate) fn announce_token() {
+    if std::env::var("OCS_API_TOKEN").map_or(true, |token| token.trim().is_empty()) {
+        eprintln!(
+            "API token (or set OCS_API_TOKEN before launch): {}",
+            api_token()
+        );
+    }
+}
+
+/// Whether `presented` is the session's token, compared in constant time.
+pub(crate) fn token_matches(presented: Option<&str>) -> bool {
+    let expected = api_token().as_bytes();
+    let Some(presented) = presented.map(str::as_bytes) else {
+        return false;
+    };
+    presented.len() == expected.len()
+        && presented
+            .iter()
+            .zip(expected)
+            .fold(0u8, |difference, (a, b)| difference | (a ^ b))
+            == 0
+}
+
+/// The answer to a request without the session's token.
+pub(crate) fn unauthorized() -> Value {
+    json!({
+        "ok": false,
+        "code": "unauthorized",
+        "error": "Send the session token (printed at startup, or OCS_API_TOKEN): Authorization: Bearer <token> over HTTP, \"token\" in each --serve --port request",
+    })
+}
+
 pub(crate) struct HttpRequest {
     pub(crate) method: String,
     pub(crate) path: String,
     query: Vec<(String, String)>,
     body: Vec<u8>,
+    bearer: Option<String>,
 }
 
 impl HttpRequest {
@@ -106,6 +177,10 @@ impl HttpRequest {
 
     pub(crate) fn json(&self) -> Value {
         serde_json::from_slice(&self.body).unwrap_or(Value::Null)
+    }
+
+    pub(crate) fn authorized(&self) -> bool {
+        token_matches(self.bearer.as_deref())
     }
 }
 
@@ -131,6 +206,7 @@ fn listen(mut app: OpenCADStudio, port: u16, bound_port: Arc<AtomicU16>) {
     let bound = listener.local_addr().map(|a| a.port()).unwrap_or(port);
     bound_port.store(bound, Ordering::SeqCst);
     eprintln!("OpenCADStudio REST listening on http://127.0.0.1:{bound}/api/v1");
+    announce_token();
     let (jobs, incoming) = std::sync::mpsc::channel::<Job>();
     // Connections are served one thread each: a slow op (plot, open a large
     // drawing) or a client that connects and stalls must never keep other
@@ -172,18 +248,12 @@ fn serve_connection(mut stream: TcpStream, jobs: std::sync::mpsc::Sender<Job>) {
     let Ok(Some(request)) = read_request(&mut stream) else {
         return;
     };
-    if request.method == "OPTIONS" {
-        let _ = write_response(&mut stream, 204, &Value::Null);
+    if !request.authorized() {
+        let _ = write_response(&mut stream, 401, &unauthorized());
         return;
     }
     let (reply, answer) = std::sync::mpsc::channel();
-    if jobs
-        .send(Job {
-            request,
-            reply,
-        })
-        .is_err()
-    {
+    if jobs.send(Job { request, reply }).is_err() {
         return;
     }
     if let Ok((status, mut body)) = answer.recv() {
@@ -194,12 +264,31 @@ fn serve_connection(mut stream: TcpStream, jobs: std::sync::mpsc::Sender<Job>) {
     }
 }
 
-/// Parse one HTTP/1.1 request. `Ok(None)` = the peer hung up cleanly.
+/// Answer a peer whose request line or header block blew a size cap — RFC
+/// 9110's `431` — then hand the caller `Ok(None)` so it closes without
+/// dispatching. Writing the refusal from here keeps the headless `--http`
+/// server and the GUI-hosted bridge (`app::control::http_bridge`), which both
+/// call `read_request`, answering identically.
+fn refuse_oversized(stream: &mut TcpStream) -> std::io::Result<Option<HttpRequest>> {
+    let body = json!({
+        "ok": false,
+        "code": "header_too_large",
+        "error": "Request line or headers exceed the size limit.",
+    });
+    let _ = write_response(stream, 431, &body);
+    Ok(None)
+}
+
+/// Parse one HTTP/1.1 request. `Ok(None)` = the peer hung up cleanly, or the
+/// request blew a size cap (a `431` has already been written in that case).
 pub(crate) fn read_request(stream: &mut TcpStream) -> std::io::Result<Option<HttpRequest>> {
     let mut reader = BufReader::new(stream.try_clone()?);
     let mut line = String::new();
-    if reader.read_line(&mut line)? == 0 {
-        return Ok(None);
+    match read_line_capped(&mut reader, &mut line, MAX_LINE) {
+        Ok(0) => return Ok(None),
+        Ok(_) => {}
+        Err(error) if is_line_too_long(&error) => return refuse_oversized(stream),
+        Err(error) => return Err(error),
     }
     let mut parts = line.split_whitespace();
     let method = parts.next().unwrap_or("").to_ascii_uppercase();
@@ -210,10 +299,19 @@ pub(crate) fn read_request(stream: &mut TcpStream) -> std::io::Result<Option<Htt
     };
 
     let mut content_length = 0usize;
+    let mut header_bytes = 0usize;
+    let mut bearer = None;
     loop {
         let mut header = String::new();
-        if reader.read_line(&mut header)? == 0 {
-            return Ok(None);
+        match read_line_capped(&mut reader, &mut header, MAX_LINE) {
+            Ok(0) => return Ok(None),
+            Ok(_) => {}
+            Err(error) if is_line_too_long(&error) => return refuse_oversized(stream),
+            Err(error) => return Err(error),
+        }
+        header_bytes += header.len();
+        if header_bytes > MAX_HEADER_BYTES {
+            return refuse_oversized(stream);
         }
         let header = header.trim();
         if header.is_empty() {
@@ -225,6 +323,14 @@ pub(crate) fn read_request(stream: &mut TcpStream) -> std::io::Result<Option<Htt
         {
             content_length = value.trim().parse().unwrap_or(0);
         }
+        if let Some((name, value)) = header.split_once(':') {
+            if name.trim().eq_ignore_ascii_case("authorization") {
+                bearer = value
+                    .trim()
+                    .strip_prefix("Bearer ")
+                    .map(|token| token.trim().to_owned());
+            }
+        }
     }
     if content_length > MAX_BODY {
         return Ok(Some(HttpRequest {
@@ -232,6 +338,7 @@ pub(crate) fn read_request(stream: &mut TcpStream) -> std::io::Result<Option<Htt
             path,
             query,
             body: Vec::new(),
+            bearer,
         }));
     }
     let mut body = vec![0u8; content_length];
@@ -243,6 +350,7 @@ pub(crate) fn read_request(stream: &mut TcpStream) -> std::io::Result<Option<Htt
         path,
         query,
         body,
+        bearer,
     }))
 }
 
@@ -277,7 +385,11 @@ fn percent_decode(raw: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
-pub(crate) fn write_response(stream: &mut TcpStream, status: u16, body: &Value) -> std::io::Result<()> {
+pub(crate) fn write_response(
+    stream: &mut TcpStream,
+    status: u16,
+    body: &Value,
+) -> std::io::Result<()> {
     let body = if body.is_null() {
         Vec::new()
     } else {
@@ -288,15 +400,17 @@ pub(crate) fn write_response(stream: &mut TcpStream, status: u16, body: &Value) 
         201 => "Created",
         204 => "No Content",
         400 => "Bad Request",
+        401 => "Unauthorized",
         403 => "Forbidden",
         404 => "Not Found",
         405 => "Method Not Allowed",
         409 => "Conflict",
+        431 => "Request Header Fields Too Large",
         503 => "Service Unavailable",
         _ => "OK",
     };
     let header = format!(
-        "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: GET, POST, PUT, DELETE, OPTIONS\r\nAccess-Control-Allow-Headers: Content-Type\r\nConnection: close\r\n\r\n",
+        "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
         body.len()
     );
     stream.write_all(header.as_bytes())?;
@@ -323,7 +437,11 @@ pub(crate) enum Plan {
     /// the cached `document_id` when the caller omitted it, one state-refresh
     /// retry after a stale refusal, and the bulky `state` snapshot stripped
     /// from the answer.
-    Mutate { op: String, fields: Value, created: u16 },
+    Mutate {
+        op: String,
+        fields: Value,
+        created: u16,
+    },
 }
 
 impl Plan {
@@ -356,13 +474,24 @@ pub(crate) fn plan(method: &str, rest: &[&str], request: &HttpRequest) -> Plan {
         },
         ("POST", ["documents"]) => {
             if let Some(template) = body["template"].as_str() {
-                Plan::Mutate { op: "new".into(), fields: json!({"template": template}), created: 201 }
+                Plan::Mutate {
+                    op: "new".into(),
+                    fields: json!({"template": template}),
+                    created: 201,
+                }
             } else if let Some(path) = body["path"].as_str() {
-                Plan::Run { request: json!({"op":"open","path":path}), created: 201 }
+                Plan::Run {
+                    request: json!({"op":"open","path":path}),
+                    created: 201,
+                }
             } else {
                 // A fresh untitled document in
                 // its own tab, so cross-document operations have a target.
-                Plan::Mutate { op: "new".into(), fields: json!({}), created: 201 }
+                Plan::Mutate {
+                    op: "new".into(),
+                    fields: json!({}),
+                    created: 201,
+                }
             }
         }
         ("DELETE", ["documents", id]) => {
@@ -370,32 +499,67 @@ pub(crate) fn plan(method: &str, rest: &[&str], request: &HttpRequest) -> Plan {
             if let Some(id) = id.parse::<u64>().ok() {
                 fields["document_id"] = json!(id);
             }
-            if request.param("discard").is_some_and(|v| v == "true" || v == "1") {
+            if request
+                .param("discard")
+                .is_some_and(|v| v == "true" || v == "1")
+            {
                 fields["discard"] = json!(true);
             }
-            Plan::Mutate { op: "close".into(), fields, created: 200 }
+            Plan::Mutate {
+                op: "close".into(),
+                fields,
+                created: 200,
+            }
         }
         ("GET", ["sysvars"]) => {
             let names = request
                 .param("names")
                 .map(|csv| json!(csv.split(',').collect::<Vec<_>>()))
                 .unwrap_or_else(|| json!([]));
-            Plan::Mutate { op: "sysvar".into(), fields: json!({"get": names}), created: 200 }
+            Plan::Mutate {
+                op: "sysvar".into(),
+                fields: json!({"get": names}),
+                created: 200,
+            }
         }
-        ("POST", ["sysvars"]) => Plan::Mutate { op: "sysvar".into(), fields: body, created: 200 },
-        ("POST", ["layouts"]) => Plan::Mutate { op: "layout_create".into(), fields: body, created: 201 },
+        ("POST", ["sysvars"]) => Plan::Mutate {
+            op: "sysvar".into(),
+            fields: body,
+            created: 200,
+        },
+        ("POST", ["layouts"]) => Plan::Mutate {
+            op: "layout_create".into(),
+            fields: body,
+            created: 201,
+        },
         ("PUT", ["layouts", layout, "page-setup"]) => {
             let mut fields = body;
             fields["layout"] = json!(layout);
-            Plan::Mutate { op: "page_setup_set".into(), fields, created: 200 }
+            Plan::Mutate {
+                op: "page_setup_set".into(),
+                fields,
+                created: 200,
+            }
         }
-        ("POST", ["entities", "copy-to"]) =>
-            Plan::Mutate { op: "entities_copy_to".into(), fields: body, created: 201 },
-        ("POST", ["groups"]) => Plan::Mutate { op: "group_create".into(), fields: body, created: 201 },
-        ("POST", ["selection-sets"]) =>
-            Plan::Mutate { op: "selection_set_save".into(), fields: body, created: 201 },
+        ("POST", ["entities", "copy-to"]) => Plan::Mutate {
+            op: "entities_copy_to".into(),
+            fields: body,
+            created: 201,
+        },
+        ("POST", ["groups"]) => Plan::Mutate {
+            op: "group_create".into(),
+            fields: body,
+            created: 201,
+        },
+        ("POST", ["selection-sets"]) => Plan::Mutate {
+            op: "selection_set_save".into(),
+            fields: body,
+            created: 201,
+        },
         ("GET", ["selection-sets", name]) => {
-            let select = request.param("select").is_some_and(|v| v == "true" || v == "1");
+            let select = request
+                .param("select")
+                .is_some_and(|v| v == "true" || v == "1");
             Plan::Mutate {
                 op: "selection_set_load".into(),
                 fields: json!({"name": name, "select": select}),
@@ -404,11 +568,21 @@ pub(crate) fn plan(method: &str, rest: &[&str], request: &HttpRequest) -> Plan {
         }
         ("GET", ["entities"]) => {
             let mut request_json = json!({"op":"query"});
-            if let Some(v) = request.param("type") { request_json["type"] = json!(v); }
-            if let Some(v) = request.param("layer") { request_json["layer"] = json!(v); }
-            if let Some(v) = request.param("detail") { request_json["detail"] = json!(v); }
-            if let Some(v) = request.param("offset") { request_json["offset"] = json!(v); }
-            if let Some(v) = request.param("limit") { request_json["limit"] = json!(v); }
+            if let Some(v) = request.param("type") {
+                request_json["type"] = json!(v);
+            }
+            if let Some(v) = request.param("layer") {
+                request_json["layer"] = json!(v);
+            }
+            if let Some(v) = request.param("detail") {
+                request_json["detail"] = json!(v);
+            }
+            if let Some(v) = request.param("offset") {
+                request_json["offset"] = json!(v);
+            }
+            if let Some(v) = request.param("limit") {
+                request_json["limit"] = json!(v);
+            }
             if let Some(v) = request.param("fields") {
                 request_json["fields"] = json!(v.split(',').collect::<Vec<_>>());
             }
@@ -443,29 +617,45 @@ pub(crate) fn plan(method: &str, rest: &[&str], request: &HttpRequest) -> Plan {
                     }
                 }
             }
-            Plan::Run { request: request_json, created: 200 }
+            Plan::Run {
+                request: request_json,
+                created: 200,
+            }
         }
         ("GET", ["entities", handle]) => Plan::Run {
             request: json!({"op":"query","handles":[handle],"detail":"full"}),
             created: 200,
         },
-        ("POST", ["entities"]) =>
-            Plan::Mutate { op: "entities_create".into(), fields: body, created: 201 },
+        ("POST", ["entities"]) => Plan::Mutate {
+            op: "entities_create".into(),
+            fields: body,
+            created: 201,
+        },
         ("DELETE", ["entities"]) => {
             let handles = match request.param("handles") {
                 Some(csv) => json!(csv.split(',').collect::<Vec<_>>()),
                 None => body["handles"].clone(),
             };
-            Plan::Mutate { op: "entities_delete".into(), fields: json!({"handles": handles}), created: 200 }
+            Plan::Mutate {
+                op: "entities_delete".into(),
+                fields: json!({"handles": handles}),
+                created: 200,
+            }
         }
-        ("POST", ["entities", "transform"]) =>
-            Plan::Mutate { op: "entities_transform".into(), fields: body, created: 200 },
+        ("POST", ["entities", "transform"]) => Plan::Mutate {
+            op: "entities_transform".into(),
+            fields: body,
+            created: 200,
+        },
         ("GET", ["entities", handle, "xdata"]) => {
             let mut request_json = json!({"protocol":1,"op":"xdata_get","handles":[handle]});
             if let Some(app_name) = request.param("app") {
                 request_json["app"] = json!(app_name);
             }
-            Plan::Run { request: request_json, created: 200 }
+            Plan::Run {
+                request: request_json,
+                created: 200,
+            }
         }
         ("PUT", ["entities", handle, "xdata", app_name]) => {
             let data = request.json();
@@ -481,45 +671,93 @@ pub(crate) fn plan(method: &str, rest: &[&str], request: &HttpRequest) -> Plan {
             fields: json!({"handles":[handle], "app": app_name, "data": []}),
             created: 200,
         },
-        ("POST", ["blocks"]) => Plan::Mutate { op: "block_define".into(), fields: body, created: 201 },
-        ("DELETE", ["blocks", name]) =>
-            Plan::Mutate { op: "block_delete".into(), fields: json!({"name": name}), created: 200 },
-        ("POST", ["file-identity"]) =>
-            Plan::Mutate { op: "file_identity".into(), fields: body, created: 200 },
-        ("POST", ["plot"]) => Plan::Mutate { op: "plot".into(), fields: body, created: 200 },
-        ("POST", ["wblock"]) => Plan::Mutate { op: "wblock".into(), fields: body, created: 200 },
-        ("POST", ["images"]) => Plan::Mutate { op: "embed_image".into(), fields: body, created: 201 },
+        ("POST", ["blocks"]) => Plan::Mutate {
+            op: "block_define".into(),
+            fields: body,
+            created: 201,
+        },
+        ("DELETE", ["blocks", name]) => Plan::Mutate {
+            op: "block_delete".into(),
+            fields: json!({"name": name}),
+            created: 200,
+        },
+        ("POST", ["file-identity"]) => Plan::Mutate {
+            op: "file_identity".into(),
+            fields: body,
+            created: 200,
+        },
+        ("POST", ["plot"]) => Plan::Mutate {
+            op: "plot".into(),
+            fields: body,
+            created: 200,
+        },
+        ("POST", ["wblock"]) => Plan::Mutate {
+            op: "wblock".into(),
+            fields: body,
+            created: 200,
+        },
+        ("POST", ["images"]) => Plan::Mutate {
+            op: "embed_image".into(),
+            fields: body,
+            created: 201,
+        },
         ("POST", ["commands"]) => Plan::Run {
             request: json!({"op":"run","cmd":body["cmd"]}),
             created: 200,
         },
         ("POST", ["undo"]) | ("POST", ["redo"]) => {
             let op = if rest == ["undo"] { "undo" } else { "redo" };
-            Plan::Run { request: json!({"op":op}), created: 200 }
+            Plan::Run {
+                request: json!({"op":op}),
+                created: 200,
+            }
         }
         ("POST", ["save"]) => {
             let mut request_json = json!({"op":"save"});
             if let Some(path) = body["path"].as_str() {
                 request_json["path"] = json!(path);
             }
-            Plan::Run { request: request_json, created: 200 }
+            Plan::Run {
+                request: request_json,
+                created: 200,
+            }
         }
-        ("GET", ["layers"]) => Plan::Run { request: json!({"op":"layers"}), created: 200 },
-        ("GET", ["header"]) => Plan::Run { request: json!({"op":"header"}), created: 200 },
+        ("GET", ["layers"]) => Plan::Run {
+            request: json!({"op":"layers"}),
+            created: 200,
+        },
+        ("GET", ["header"]) => Plan::Run {
+            request: json!({"op":"header"}),
+            created: 200,
+        },
         ("GET", ["records"]) => {
             let mut request_json = json!({"op":"records"});
-            if let Some(v) = request.param("collection") { request_json["collection"] = json!(v); }
-            if let Some(v) = request.param("type") { request_json["type"] = json!(v); }
-            if let Some(v) = request.param("offset") { request_json["offset"] = json!(v); }
-            if let Some(v) = request.param("limit") { request_json["limit"] = json!(v); }
-            Plan::Run { request: request_json, created: 200 }
+            if let Some(v) = request.param("collection") {
+                request_json["collection"] = json!(v);
+            }
+            if let Some(v) = request.param("type") {
+                request_json["type"] = json!(v);
+            }
+            if let Some(v) = request.param("offset") {
+                request_json["offset"] = json!(v);
+            }
+            if let Some(v) = request.param("limit") {
+                request_json["limit"] = json!(v);
+            }
+            Plan::Run {
+                request: request_json,
+                created: 200,
+            }
         }
         ("GET", ["openapi"]) => Plan::Local(
             200,
             serde_json::from_str(include_str!("rest_openapi.json")).unwrap_or(json!({})),
         ),
-        ("POST", [op]) if ENVELOPE_OPS.contains(op) =>
-            Plan::Mutate { op: op.to_string(), fields: body, created: 200 },
+        ("POST", [op]) if ENVELOPE_OPS.contains(op) => Plan::Mutate {
+            op: op.to_string(),
+            fields: body,
+            created: 200,
+        },
         ("POST", [op]) => {
             let mut request_json = body;
             request_json["op"] = json!(op);
@@ -529,11 +767,17 @@ pub(crate) fn plan(method: &str, rest: &[&str], request: &HttpRequest) -> Plan {
             // `cancel`), and unstamped they die as "unknown op" on the
             // legacy path instead of answering with their real contract.
             request_json["protocol"] = json!(1);
-            if request_json["request_id"].as_str().is_none_or(str::is_empty) {
+            if request_json["request_id"]
+                .as_str()
+                .is_none_or(str::is_empty)
+            {
                 let serial = PASSTHROUGH_SERIAL.fetch_add(1, Ordering::Relaxed);
                 request_json["request_id"] = json!(format!("rest-{serial}"));
             }
-            Plan::Run { request: request_json, created: 200 }
+            Plan::Run {
+                request: request_json,
+                created: 200,
+            }
         }
         (method, _) if matches!(method, "GET" | "POST" | "PUT" | "DELETE") => {
             let path = request.path.trim_end_matches('/');
@@ -562,29 +806,37 @@ fn route(
     let path = if path.is_empty() { "/" } else { path };
     let segments: Vec<&str> = path.trim_start_matches('/').split('/').collect();
     if segments.first() != Some(&"api") || segments.get(1) != Some(&"v1") {
-        return (404, json!({"ok": false, "code": "unknown_route", "error": "Use /api/v1/…"}));
+        return (
+            404,
+            json!({"ok": false, "code": "unknown_route", "error": "Use /api/v1/…"}),
+        );
     }
     match plan(&request.method, &segments[2..], request) {
         Plan::Local(status, body) => (status, body),
         Plan::Ready => {
             let state = app.automation_op(r#"{"protocol":1,"op":"state"}"#);
             harvest(document_id, &state);
-            (200, json!({
-                "ok": true,
-                "ready": true,
-                "version": state["version"],
-                "session_id": state["session_id"],
-                "document_id": state["document_id"],
-            }))
+            (
+                200,
+                json!({
+                    "ok": true,
+                    "ready": true,
+                    "version": state["version"],
+                    "session_id": state["session_id"],
+                    "document_id": state["document_id"],
+                }),
+            )
         }
         Plan::Run { request, created } => {
             let response = app.automation_op(&request.to_string());
             harvest(document_id, &response);
             (map_status(response.clone(), created == 201), response)
         }
-        Plan::Mutate { op, fields, created } => {
-            run_mutation(app, &op, fields, document_id, counter, created)
-        }
+        Plan::Mutate {
+            op,
+            fields,
+            created,
+        } => run_mutation(app, &op, fields, document_id, counter, created),
     }
 }
 
@@ -684,6 +936,7 @@ pub(crate) fn map_status(response: Value, created: bool) -> u16 {
 mod tests {
     use super::*;
     use crate::app::OpenCADStudio;
+    use std::io::BufRead;
 
     fn request(method: &str, path: &str, body: &str) -> HttpRequest {
         HttpRequest {
@@ -691,6 +944,7 @@ mod tests {
             path: path.to_string(),
             query: Vec::new(),
             body: body.as_bytes().to_vec(),
+            bearer: None,
         }
     }
 
@@ -721,29 +975,49 @@ mod tests {
         }
         assert_ne!(port, 0, "listener never bound a port");
 
+        let status = |authorization: &str| {
+            let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            stream
+                .write_all(
+                    format!("GET /api/v1/ready HTTP/1.1\r\nHost: 127.0.0.1\r\n{authorization}\r\n")
+                        .as_bytes(),
+                )
+                .unwrap();
+            let mut status_line = String::new();
+            BufReader::new(stream)
+                .read_line(&mut status_line)
+                .expect("readiness answered");
+            status_line
+        };
         // Stalls the thread that accepted it: no request line, ever.
         let _stalled = TcpStream::connect(("127.0.0.1", port)).unwrap();
-        let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
-        stream
-            .set_read_timeout(Some(Duration::from_secs(5)))
-            .unwrap();
-        stream
-            .write_all(b"GET /api/v1/ready HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
-            .unwrap();
-        let mut reader = BufReader::new(stream);
-        let mut status_line = String::new();
-        reader.read_line(&mut status_line).expect("readiness answered");
-        assert!(status_line.contains("200"), "{status_line}");
+        let answered = status(&format!("Authorization: Bearer {}\r\n", api_token()));
+        assert!(answered.contains("200"), "{answered}");
+        // Anything else on the machine that finds the port is turned away.
+        assert!(status("").contains("401"));
+        assert!(status("Authorization: Bearer guess\r\n").contains("401"));
     }
 
     #[test]
     fn failure_codes_map_to_http_statuses() {
         assert_eq!(map_status(json!({"ok": true}), false), 200);
         assert_eq!(map_status(json!({"ok": true}), true), 201);
-        assert_eq!(map_status(json!({"ok": false, "code": "entity_absent"}), false), 404);
-        assert_eq!(map_status(json!({"ok": false, "code": "stale_state"}), false), 409);
+        assert_eq!(
+            map_status(json!({"ok": false, "code": "entity_absent"}), false),
+            404
+        );
+        assert_eq!(
+            map_status(json!({"ok": false, "code": "stale_state"}), false),
+            409
+        );
         assert_eq!(map_status(json!({"ok": false, "code": "busy"}), false), 503);
-        assert_eq!(map_status(json!({"ok": false, "code": "invalid_point"}), false), 400);
+        assert_eq!(
+            map_status(json!({"ok": false, "code": "invalid_point"}), false),
+            400
+        );
     }
 
     /// The generic `POST /api/v1/{op}` passthrough must reach the protocol-1
@@ -757,7 +1031,11 @@ mod tests {
         let mut counter: u64 = 0;
         let (status, body) = route(
             &mut app,
-            &request("POST", "/api/v1/user_select", r#"{"request_id":"us-headless"}"#),
+            &request(
+                "POST",
+                "/api/v1/user_select",
+                r#"{"request_id":"us-headless"}"#,
+            ),
             &mut document_id,
             &mut counter,
         );
@@ -842,7 +1120,12 @@ mod tests {
         let mut counter = 0;
 
         // Readiness exposes the version and session.
-        let (status, body) = route(&mut app, &request("GET", "/api/v1/ready", ""), &mut document_id, &mut counter);
+        let (status, body) = route(
+            &mut app,
+            &request("GET", "/api/v1/ready", ""),
+            &mut document_id,
+            &mut counter,
+        );
         assert_eq!(status, 200);
         assert_eq!(body["ok"], true);
         assert!(body["session_id"].as_str().is_some());
@@ -869,7 +1152,10 @@ mod tests {
 
         // Query through plain GET with query parameters.
         let mut get = request("GET", "/api/v1/entities", "");
-        get.query = vec![("type".into(), "Line".into()), ("detail".into(), "full".into())];
+        get.query = vec![
+            ("type".into(), "Line".into()),
+            ("detail".into(), "full".into()),
+        ];
         let (status, body) = route(&mut app, &get, &mut document_id, &mut counter);
         assert_eq!(status, 200);
         assert_eq!(body["entities"][0]["start"], json!([0.0, 0.0, 0.0]));
@@ -877,7 +1163,11 @@ mod tests {
         // One entity by handle.
         let (status, body) = route(
             &mut app,
-            &request("GET", &format!("/api/v1/entities/{}", handles[1].as_str().unwrap()), ""),
+            &request(
+                "GET",
+                &format!("/api/v1/entities/{}", handles[1].as_str().unwrap()),
+                "",
+            ),
             &mut document_id,
             &mut counter,
         );
@@ -901,7 +1191,10 @@ mod tests {
         );
         assert_eq!(status, 200, "{body}");
         let mut get = request("GET", "/api/v1/entities", "");
-        get.query = vec![("type".into(), "Circle".into()), ("detail".into(), "full".into())];
+        get.query = vec![
+            ("type".into(), "Circle".into()),
+            ("detail".into(), "full".into()),
+        ];
         let (_, body) = route(&mut app, &get, &mut document_id, &mut counter);
         assert_eq!(body["entities"][0]["center"], json!([10.0, 5.0, 0.0]));
 
@@ -932,12 +1225,22 @@ mod tests {
         assert_eq!(body["code"], "entity_absent");
 
         // The OpenAPI document is served and parses as JSON.
-        let (status, body) = route(&mut app, &request("GET", "/api/v1/openapi", ""), &mut document_id, &mut counter);
+        let (status, body) = route(
+            &mut app,
+            &request("GET", "/api/v1/openapi", ""),
+            &mut document_id,
+            &mut counter,
+        );
         assert_eq!(status, 200);
         assert_eq!(body["openapi"], "3.0.3");
 
         // Unknown routes are 404, not panics.
-        let (status, _) = route(&mut app, &request("GET", "/api/v1/nope", ""), &mut document_id, &mut counter);
+        let (status, _) = route(
+            &mut app,
+            &request("GET", "/api/v1/nope", ""),
+            &mut document_id,
+            &mut counter,
+        );
         assert_eq!(status, 404);
     }
 
@@ -951,7 +1254,12 @@ mod tests {
         let mut counter = 0;
 
         // GET /state primes the document-id cache the mutations address.
-        let (status, body) = route(&mut app, &request("GET", "/api/v1/state", ""), &mut document_id, &mut counter);
+        let (status, body) = route(
+            &mut app,
+            &request("GET", "/api/v1/state", ""),
+            &mut document_id,
+            &mut counter,
+        );
         assert_eq!(status, 200);
         let doc = document_id.expect("state caches the document id");
         assert_eq!(body["document_id"].as_u64(), Some(doc));
@@ -961,7 +1269,10 @@ mod tests {
         get.query = vec![
             ("type".into(), "Circle".into()),
             ("detail".into(), "geometry".into()),
-            ("where".into(), r#"[{"path":"/radius","op":"gt","value":2}]"#.into()),
+            (
+                "where".into(),
+                r#"[{"path":"/radius","op":"gt","value":2}]"#.into(),
+            ),
         ];
         let (status, body) = route(&mut app, &get, &mut document_id, &mut counter);
         assert_eq!(status, 200, "{body}");
@@ -1003,7 +1314,11 @@ mod tests {
             &mut counter,
         );
         assert_eq!(status, 201, "{body}");
-        assert!(body["result"]["layouts"].as_array().unwrap().iter().any(|n| n == "PLAN"));
+        assert!(body["result"]["layouts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|n| n == "PLAN"));
         let (status, body) = route(
             &mut app,
             &request(
@@ -1031,7 +1346,11 @@ mod tests {
             .join(",");
         let (status, body) = route(
             &mut app,
-            &request("POST", "/api/v1/groups", &format!(r#"{{"name":"FRAME","handles":[{joined}]}}"#)),
+            &request(
+                "POST",
+                "/api/v1/groups",
+                &format!(r#"{{"name":"FRAME","handles":[{joined}]}}"#),
+            ),
             &mut document_id,
             &mut counter,
         );
@@ -1113,7 +1432,9 @@ mod tests {
             &request(
                 "POST",
                 "/api/v1/blocks",
-                &format!(r#"{{"name":"MARK","base":[0,0,0],"handles":["{fresh}"],"replace":true}}"#),
+                &format!(
+                    r#"{{"name":"MARK","base":[0,0,0],"handles":["{fresh}"],"replace":true}}"#
+                ),
             ),
             &mut document_id,
             &mut counter,
@@ -1154,5 +1475,89 @@ mod tests {
         let (status, body) = route(&mut app, &delete, &mut document_id, &mut counter);
         assert_eq!(status, 200, "{body}");
         assert_eq!(body["result"]["closed"], true);
+    }
+
+    /// A connected pair: the test writes the request from `client`,
+    /// `read_request` parses it from `server`.
+    fn loopback_pair() -> (TcpStream, TcpStream) {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let addr = listener.local_addr().unwrap();
+        let client = TcpStream::connect(addr).unwrap();
+        let (server, _) = listener.accept().unwrap();
+        (client, server)
+    }
+
+    /// Stream `payload` from a clone of `client` on its own thread: the
+    /// bytes exceed any socket buffer, so a single thread would deadlock
+    /// writing before `read_request` drains the other end. Write failures
+    /// after a refusal are expected and ignored.
+    fn spawn_writer(client: &TcpStream, payload: Vec<u8>) -> std::thread::JoinHandle<()> {
+        let mut writer = client.try_clone().unwrap();
+        std::thread::spawn(move || {
+            let _ = writer.write_all(&payload);
+            let _ = writer.shutdown(std::net::Shutdown::Write);
+        })
+    }
+
+    /// Read the status line of the answer the server just wrote.
+    fn read_status(client: TcpStream) -> String {
+        client
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let mut reader = BufReader::new(client);
+        let mut status = String::new();
+        reader.read_line(&mut status).expect("server answers");
+        status
+    }
+
+    /// A request line streamed without CRLF must be refused at the cap
+    /// instead of growing one `String` to gigabytes — an allocation failure
+    /// aborts the process and is not catchable.
+    #[test]
+    fn oversize_request_line_is_refused_with_431() {
+        let (client, mut server) = loopback_pair();
+        let mut payload = b"GET /".to_vec();
+        payload.extend(std::iter::repeat(b'A').take(1024 * 1024));
+        payload.extend_from_slice(b" HTTP/1.1\r\n\r\n");
+        let writer = spawn_writer(&client, payload);
+
+        let parsed =
+            read_request(&mut server).expect("an over-cap line is a refusal, not an I/O error");
+        assert!(
+            parsed.is_none(),
+            "over-cap request line must be refused, got a parsed request"
+        );
+
+        let status = read_status(client);
+        assert!(status.contains("431"), "expected 431, got: {status:?}");
+        drop(server);
+        writer.join().unwrap();
+    }
+
+    /// Individually-fine headers must not add up to an unbounded header
+    /// block: a client can send an unlimited number of small lines.
+    #[test]
+    fn oversize_header_block_is_refused_with_431() {
+        let (client, mut server) = loopback_pair();
+        let mut payload = b"GET /api/v1/state HTTP/1.1\r\n".to_vec();
+        for _ in 0..80 {
+            payload.extend_from_slice(b"X-Pad: ");
+            payload.extend(std::iter::repeat(b'a').take(1024));
+            payload.extend_from_slice(b"\r\n");
+        }
+        payload.extend_from_slice(b"\r\n");
+        let writer = spawn_writer(&client, payload);
+
+        let parsed = read_request(&mut server)
+            .expect("an over-cap header block is a refusal, not an I/O error");
+        assert!(
+            parsed.is_none(),
+            "over-cap header block must be refused, got a parsed request"
+        );
+
+        let status = read_status(client);
+        assert!(status.contains("431"), "expected 431, got: {status:?}");
+        drop(server);
+        writer.join().unwrap();
     }
 }

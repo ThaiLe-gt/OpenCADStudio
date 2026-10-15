@@ -27,7 +27,7 @@ pub(super) fn default_bindings() -> BTreeMap<String, String> {
         ("F12".to_string(), "DYNINPUT"),
         (format!("{ACCEL}+0"), "CLEANSCREEN"),
         (format!("{ACCEL}+1"), "PROPERTIES"),
-        (format!("{ACCEL}+N"), "NEW"),
+        (format!("{ACCEL}+N"), "QNEW"),
         (format!("{ACCEL}+O"), "OPEN"),
         (format!("{ACCEL}+P"), "PLOT"),
         (format!("{ACCEL}+Q"), "QUIT"),
@@ -50,6 +50,7 @@ pub(super) fn default_bindings() -> BTreeMap<String, String> {
         ("DELETE".to_string(), "DELETESELECTED"),
         ("BACKSPACE".to_string(), "BACKSPACE"),
         ("TAB".to_string(), "DYNTAB"),
+        ("SHIFT+TAB".to_string(), "DYNTABPREV"),
         ("UP".to_string(), "HISTORYPREV"),
         ("DOWN".to_string(), "HISTORYNEXT"),
         ("LEFT".to_string(), "CARETLEFT"),
@@ -69,7 +70,11 @@ pub(super) fn normalize_key(value: &str) -> String {
     let mut shift = false;
     let mut key = String::new();
 
-    for part in value.split('+').map(str::trim).filter(|part| !part.is_empty()) {
+    for part in value
+        .split('+')
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+    {
         match part.to_uppercase().as_str() {
             "CTRL" | "CONTROL" => ctrl = true,
             "CMD" | "COMMAND" | "META" | "SUPER" => cmd = true,
@@ -108,15 +113,11 @@ pub(super) fn normalize_key(value: &str) -> String {
 /// intentionally stay out so text fields retain their native shortcuts.
 pub(super) fn is_global_key(key: &str) -> bool {
     let base = key.rsplit('+').next().unwrap_or(key);
-    base.strip_prefix('F').is_some_and(|digits| {
-        !digits.is_empty() && digits.chars().all(|ch| ch.is_ascii_digit())
-    })
+    base.strip_prefix('F')
+        .is_some_and(|digits| !digits.is_empty() && digits.chars().all(|ch| ch.is_ascii_digit()))
         || matches!(base, "ESCAPE")
         || (key.starts_with(ACCEL)
-            && !matches!(
-                key.rsplit('+').next(),
-                Some("A" | "C" | "V" | "X")
-            ))
+            && !matches!(key.rsplit('+').next(), Some("A" | "C" | "V" | "X")))
 }
 
 fn is_named_key(key: &str) -> bool {
@@ -137,9 +138,9 @@ fn is_named_key(key: &str) -> bool {
             | "PAGEUP"
             | "PAGEDOWN"
             | "INSERT"
-    ) || key.strip_prefix('F').is_some_and(|digits| {
-        !digits.is_empty() && digits.chars().all(|ch| ch.is_ascii_digit())
-    })
+    ) || key
+        .strip_prefix('F')
+        .is_some_and(|digits| !digits.is_empty() && digits.chars().all(|ch| ch.is_ascii_digit()))
 }
 
 /// Input actions `run_shortcut` resolves directly instead of routing through
@@ -154,6 +155,7 @@ pub(super) const INPUT_ACTIONS: &[&str] = &[
     "DELETESELECTED",
     "BACKSPACE",
     "DYNTAB",
+    "DYNTABPREV",
     "HISTORYPREV",
     "HISTORYNEXT",
     "CARETLEFT",
@@ -267,7 +269,9 @@ impl OpenCADStudio {
     pub(super) fn run_shortcut(&mut self, key: &str) -> Task<Message> {
         let action = self.shortcut_bindings.get(key).or_else(|| {
             let base = key.rsplit('+').next()?;
-            is_named_key(base).then(|| self.shortcut_bindings.get(base)).flatten()
+            is_named_key(base)
+                .then(|| self.shortcut_bindings.get(base))
+                .flatten()
         });
         let Some(action) = action.cloned() else {
             return Task::none();
@@ -308,6 +312,7 @@ impl OpenCADStudio {
             "DELETESELECTED" => Message::DeleteSelected,
             "BACKSPACE" => Message::CommandBackspace,
             "DYNTAB" => Message::DynTabNext,
+            "DYNTABPREV" => Message::DynTabPrev,
             "HISTORYPREV" => Message::CommandHistoryPrev,
             "HISTORYNEXT" => Message::CommandHistoryNext,
             "CARETLEFT" => Message::MTextCaretMove(-1),
@@ -341,8 +346,8 @@ impl OpenCADStudio {
             "REDO" => Message::Redo,
 
             other => Message::Command(other.to_string()),
-            };
+        };
 
-            self.update(message)
+        self.update(message)
     }
 }

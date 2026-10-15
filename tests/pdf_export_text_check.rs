@@ -88,6 +88,7 @@ fn text_and_dim_reach_pdf_export() {
         .cloned()
         .map(|mut w| {
             w.wire.text_verts.clear();
+            w.wire.searchable_text.clear();
             w
         })
         .collect();

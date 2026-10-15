@@ -97,11 +97,7 @@ impl PluginManager {
 
     /// Fan out a host notification to every alive V4 plugin. Per-process errors
     /// are logged; this is best-effort.
-    pub fn broadcast_notification(
-        &self,
-        command_id: Option<u64>,
-        notification: HostNotification,
-    ) {
+    pub fn broadcast_notification(&self, command_id: Option<u64>, notification: HostNotification) {
         for p in &self.plugins {
             if !p.process.is_alive() {
                 continue;
@@ -351,8 +347,8 @@ mod tests {
                 &mut self,
                 _plugin_id: &'static str,
                 _init: &mut dyn FnMut() -> Box<dyn std::any::Any + Send + Sync>,
-            ) -> &mut (dyn std::any::Any + Send + Sync) {
-                panic!("not used")
+            ) -> Option<&mut (dyn std::any::Any + Send + Sync)> {
+                None
             }
         }
 

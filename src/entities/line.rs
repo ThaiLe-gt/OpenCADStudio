@@ -1,5 +1,5 @@
-use codec::{entities::Line, Entity};
 use crate::t;
+use codec::{entities::Line, Entity};
 
 use crate::command::EntityTransform;
 use crate::entities::common::{
@@ -209,8 +209,11 @@ fn properties(line: &Line) -> Vec<PropSection> {
                     "centerline_end_extension",
                     association.end_extension,
                 ),
-
-                ro(t!("Length").as_ref(), "length", format_length(line.length())),
+                ro(
+                    t!("Length").as_ref(),
+                    "length",
+                    format_length(line.length()),
+                ),
                 ro(
                     "Associative",
                     "centerline_associative",
@@ -235,7 +238,11 @@ fn properties(line: &Line) -> Vec<PropSection> {
             ro(t!("Delta X").as_ref(), "delta_x", format_length(dx)),
             ro(t!("Delta Y").as_ref(), "delta_y", format_length(dy)),
             ro(t!("Delta Z").as_ref(), "delta_z", format_length(dz)),
-            ro(t!("Length").as_ref(), "length", format_length(line.length())),
+            ro(
+                t!("Length").as_ref(),
+                "length",
+                format_length(line.length()),
+            ),
             ro(t!("Angle").as_ref(), "angle", format_direction(angle)),
             edit(t!("Normal X").as_ref(), "normal_x", line.normal.x),
             edit(t!("Normal Y").as_ref(), "normal_y", line.normal.y),
@@ -440,13 +447,23 @@ fn apply_plain_transform(line: &mut Line, t: &EntityTransform) {
         EntityTransform::Translate(d) => {
             line.translate(codec::types::Vector3::new(d.x, d.y, d.z));
         }
-        EntityTransform::Rotate { center, axis, angle_rad } => {
-            crate::scene::view::transform::apply_standard_transform(line, *center, *axis, *angle_rad);
+        EntityTransform::Rotate {
+            center,
+            axis,
+            angle_rad,
+        } => {
+            crate::scene::view::transform::apply_standard_transform(
+                line, *center, *axis, *angle_rad,
+            );
         }
         EntityTransform::Scale { center, factor } => {
             crate::scene::view::transform::apply_standard_scale(line, *center, *factor);
         }
-        EntityTransform::Mirror { p1, p2, working_normal } => {
+        EntityTransform::Mirror {
+            p1,
+            p2,
+            working_normal,
+        } => {
             codec::Entity::apply_transform(
                 line,
                 &crate::scene::view::transform::reflection_about_working_line(
@@ -569,7 +586,11 @@ impl crate::entities::traits::Grippable for Line {
             ]
         }
     }
-    fn apply_grip_menu(&mut self, _grip_id: usize, _action: crate::scene::model::object::GripMenuAction) {
+    fn apply_grip_menu(
+        &mut self,
+        _grip_id: usize,
+        _action: crate::scene::model::object::GripMenuAction,
+    ) {
         // Lengthen needs a follow-up distance — handled by
         // `apply_grip_menu_value`.
     }

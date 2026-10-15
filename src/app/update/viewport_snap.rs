@@ -233,8 +233,7 @@ impl OpenCADStudio {
             let saved_grid = self.snapper.grid_snap_on;
             let saved_from = self.snapper.from_point;
             self.snapper.grid_snap_on = false;
-            self.snapper.from_point =
-                saved_from.map(|p| frame.paper_to_model(p.as_dvec3()).as_vec3());
+            self.snapper.from_point = saved_from.map(|p| frame.paper_to_model(p));
             let hit = self.snapper.snap(
                 model_cursor,
                 local,

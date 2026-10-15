@@ -19,9 +19,9 @@ impl OpenCADStudio {
         let Some(entity) = tab.scene.document.get_entity(handle) else {
             return Vec::new();
         };
-        crate::entities::common::set_unit_context(crate::entities::common::UnitContext::from_header(
-            &tab.scene.document.header,
-        ));
+        crate::entities::common::set_unit_context(
+            crate::entities::common::UnitContext::from_header(&tab.scene.document.header),
+        );
         crate::entities::common::set_fixed_text_heights(&tab.scene.document);
         let text_style_names: Vec<String> = tab
             .scene
@@ -79,8 +79,12 @@ impl OpenCADStudio {
             output: true,
             widget: RowWidget::Field,
         };
-        std::iter::once(NodeSection { title: String::new(), rows: vec![object] })
-            .chain(panel.into_iter().map(|section| NodeSection {
+        std::iter::once(NodeSection {
+            title: String::new(),
+            rows: vec![object],
+        })
+        .chain(panel.into_iter().map(|section| {
+            NodeSection {
                 title: section.title,
                 rows: section
                     .props
@@ -100,8 +104,9 @@ impl OpenCADStudio {
                         }
                     })
                     .collect(),
-            }))
-            .collect()
+            }
+        }))
+        .collect()
     }
 
     /// Every node's rows, parallel to the graph's node list.
@@ -118,7 +123,13 @@ impl OpenCADStudio {
     }
 
     /// Write one Properties row of `handle` through the panel's handlers.
-    fn graph_write(&mut self, i: usize, handle: Handle, field: &str, value: &Value) -> Task<Message> {
+    fn graph_write(
+        &mut self,
+        i: usize,
+        handle: Handle,
+        field: &str,
+        value: &Value,
+    ) -> Task<Message> {
         // An empty target falls back to the drawing defaults in some handlers.
         if self.tabs[i].scene.is_layer_locked(handle) {
             return Task::none();
@@ -151,7 +162,11 @@ impl OpenCADStudio {
         self.graph_undo_open = true;
         let mut tasks = edit(self);
         let mut engine = std::mem::take(&mut self.tabs[i].graph.engine);
-        let mut host = AppHost { app: self, i, tasks: Vec::new() };
+        let mut host = AppHost {
+            app: self,
+            i,
+            tasks: Vec::new(),
+        };
         engine.evaluate(&mut host);
         tasks.append(&mut host.tasks);
         self.tabs[i].graph.engine = engine;
@@ -210,7 +225,11 @@ impl OpenCADStudio {
                 let graph = &mut self.tabs[i].graph;
                 graph.engine.remove(id);
                 graph.drafts.retain(|port, _| port.node != id);
-                let handles = graph.ui.remove(&id).map(|ui| ui.handles).unwrap_or_default();
+                let handles = graph
+                    .ui
+                    .remove(&id)
+                    .map(|ui| ui.handles)
+                    .unwrap_or_default();
                 return self.graph_step(i, |app| {
                     let live: Vec<Handle> = handles
                         .into_iter()
@@ -246,7 +265,9 @@ impl OpenCADStudio {
                         format!("{{{}}}", crate::app::control::new_guid_v4().to_uppercase());
                     tab.dirty = true;
                 }
-                let bytes = tab.graph.to_file(&tab.scene.document.header.fingerprint_guid);
+                let bytes = tab
+                    .graph
+                    .to_file(&tab.scene.document.header.fingerprint_guid);
                 return Task::perform(
                     async move {
                         let handle = crate::sys::file_dialog()
@@ -255,8 +276,16 @@ impl OpenCADStudio {
                             .set_file_name("graph.ocg")
                             .save_file()
                             .await?;
-                        let name = crate::sys::handle_path(&handle).to_string_lossy().into_owned();
-                        Some(handle.write(&bytes).await.map(|()| name).map_err(|e| e.to_string()))
+                        let name = crate::sys::handle_path(&handle)
+                            .to_string_lossy()
+                            .into_owned();
+                        Some(
+                            handle
+                                .write(&bytes)
+                                .await
+                                .map(|()| name)
+                                .map_err(|e| e.to_string()),
+                        )
                     },
                     |result| Message::Graph(GraphMsg::Saved(result)),
                 );
@@ -302,9 +331,9 @@ impl OpenCADStudio {
                     if let Some(ui) = graph.ui.get_mut(&node.id) {
                         ui.handles.retain(|handle| {
                             same_drawing
-                                && kind.zip(document.get_entity(*handle)).is_some_and(
-                                    |(kind, entity)| kind.matches(entity),
-                                )
+                                && kind
+                                    .zip(document.get_entity(*handle))
+                                    .is_some_and(|(kind, entity)| kind.matches(entity))
                         });
                     }
                 }
@@ -327,7 +356,11 @@ impl OpenCADStudio {
             node.params.insert(port.field, value);
             return self.graph_run(i);
         }
-        let handles = graph.ui.get(&port.node).map(|ui| ui.handles.clone()).unwrap_or_default();
+        let handles = graph
+            .ui
+            .get(&port.node)
+            .map(|ui| ui.handles.clone())
+            .unwrap_or_default();
         self.graph_step(i, |app| {
             handles
                 .into_iter()

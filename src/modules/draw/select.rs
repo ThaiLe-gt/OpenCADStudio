@@ -8,9 +8,9 @@
 // Single-object commands (e.g. LAYMCUR) use `instant()` instead: the first
 // completed selection action fires straight away, no Enter required.
 
+use crate::t;
 use codec::Handle;
 use glam::DVec3;
-use crate::t;
 
 use crate::command::{CadCommand, CmdOption, CmdResult};
 use crate::modules::draw::fence::FencePick;
@@ -124,6 +124,13 @@ impl SelectObjectsCommand {
         command
     }
 
+    /// The standard gather with the command's own wording.
+    pub fn with_prompt(prompt_cmd: &str, pending_cmd: &str, prompt_text: &'static str) -> Self {
+        let mut command = Self::plain(prompt_cmd, pending_cmd);
+        command.prompt_text = Some(prompt_text);
+        command
+    }
+
     pub fn auto_constrain(pending_cmd: &str) -> Self {
         let mut command = Self::new(pending_cmd);
         command.auto_constrain_settings = true;
@@ -194,6 +201,13 @@ impl CadCommand for SelectObjectsCommand {
 
     fn selection_keeps_associative_dimensions(&self) -> bool {
         self.associative_dimensions_only
+    }
+
+    fn selection_drops_locked_point_clouds(&self) -> bool {
+        matches!(
+            self.pending_cmd.as_str(),
+            "MOVE" | "3DMOVE" | "ROTATE" | "3DROTATE" | "SCALE" | "MIRROR" | "MIRROR3D" | "STRETCH"
+        )
     }
 
     // Clickable selection keywords (#426, #596). Window and Crossing fix the
@@ -323,6 +337,29 @@ impl CadCommand for SelectObjectsCommand {
     }
 }
 
-
 // ── Autocomplete registry ─────────────────────────────────
-inventory::submit!(crate::command::CommandRegistration { names: &["ARRAY", "ARRAYPATH", "ARRAYPOLAR", "ARRAYRECT", "BLOCK", "COPY", "COPYCLIP", "CUTCLIP", "ERASE", "EXPLODE", "GROUP", "LAYFRZ", "LAYLCK", "LAYMCUR", "LAYOFF", "LAYULK", "MIRROR", "MOVE", "ROTATE", "SCALE", "STRETCH"] });  // SelectObjectsCommand
+inventory::submit!(crate::command::CommandRegistration {
+    names: &[
+        "ARRAY",
+        "ARRAYPATH",
+        "ARRAYPOLAR",
+        "ARRAYRECT",
+        "BLOCK",
+        "COPY",
+        "COPYCLIP",
+        "CUTCLIP",
+        "ERASE",
+        "EXPLODE",
+        "GROUP",
+        "LAYFRZ",
+        "LAYLCK",
+        "LAYMCUR",
+        "LAYOFF",
+        "LAYULK",
+        "MIRROR",
+        "MOVE",
+        "ROTATE",
+        "SCALE",
+        "STRETCH"
+    ]
+}); // SelectObjectsCommand

@@ -45,8 +45,7 @@ impl OpenCADStudio {
         let mut consumed = Vec::new();
         let mut failed = 0usize;
         for handle in &handles {
-            let Some(entity) = self.tabs[i].scene.document.get_entity(*handle).cloned()
-            else {
+            let Some(entity) = self.tabs[i].scene.document.get_entity(*handle).cloned() else {
                 failed += 1;
                 continue;
             };
@@ -56,11 +55,7 @@ impl OpenCADStudio {
             };
             let direction = match extent {
                 ExtrudeExtent::Height(height) => profile.plane.normal().map(|normal| {
-                    glam::DVec3::new(
-                        normal[0] * height,
-                        normal[1] * height,
-                        normal[2] * height,
-                    )
+                    glam::DVec3::new(normal[0] * height, normal[1] * height, normal[2] * height)
                 }),
                 ExtrudeExtent::Direction(direction) => Some(direction),
                 ExtrudeExtent::Path(_) => None,
@@ -76,22 +71,14 @@ impl OpenCADStudio {
                 (false, Some((_, path)), _) => {
                     sweep_model::extruded_along_path(&entity, path, taper_angle)
                 }
-                (false, None, Some(direction)) => sweep_model::extruded_direction(
-                    &entity,
-                    direction.to_array(),
-                    taper_angle,
-                ),
-                (true, None, Some(direction)) => sweep_model::extruded_surface(
-                    &entity,
-                    direction.to_array(),
-                    taper_angle,
-                ),
+                (false, None, Some(direction)) => {
+                    sweep_model::extruded_direction(&entity, direction.to_array(), taper_angle)
+                }
+                (true, None, Some(direction)) => {
+                    sweep_model::extruded_surface(&entity, direction.to_array(), taper_angle)
+                }
                 (true, Some(_), _) => path_direction.and_then(|direction| {
-                    sweep_model::extruded_surface(
-                        &entity,
-                        direction.to_array(),
-                        taper_angle,
-                    )
+                    sweep_model::extruded_surface(&entity, direction.to_array(), taper_angle)
                 }),
                 _ => None,
             };
@@ -126,9 +113,7 @@ impl OpenCADStudio {
                     }
                 }
                 match history {
-                    Some(history) => {
-                        self.add_surface_model_with_history(surface, body, history)
-                    }
+                    Some(history) => self.add_surface_model_with_history(surface, body, history),
                     None => self.add_surface_model(surface, body),
                 }
             } else {
@@ -136,12 +121,7 @@ impl OpenCADStudio {
                 let history = path
                     .as_ref()
                     .and_then(|(_, path)| {
-                        sweep_model::sweep_history(
-                            &entity,
-                            path,
-                            taper_angle,
-                            profile.plane.origin,
-                        )
+                        sweep_model::sweep_history(&entity, path, taper_angle, profile.plane.origin)
                     })
                     .or_else(|| {
                         sweep_model::extrusion_history(
@@ -176,7 +156,7 @@ impl OpenCADStudio {
             }
             self.tabs[i].dirty = true;
             self.command_line.push_output(
-                crate::tf!(
+                crate::t!(
                     "EXTRUDE: created %{created} object(s); %{failed} source(s) could not be extruded.",
                     created = created_handles.len(),
                     failed = failed
@@ -187,7 +167,12 @@ impl OpenCADStudio {
                 self.commit_undo_delta(i, pending);
             }
         } else {
-            self.command_line.push_error(crate::t!("EXTRUDE: no selected object could be extruded with the requested options.").as_ref());
+            self.command_line.push_error(
+                crate::t!(
+                    "EXTRUDE: no selected object could be extruded with the requested options."
+                )
+                .as_ref(),
+            );
             if let Some(pending) = pending {
                 self.commit_undo_delta(i, pending);
             }
@@ -200,7 +185,11 @@ impl OpenCADStudio {
         None
     }
 
-    pub(super) fn handle_thicken_entities(&mut self, handles: Vec<Handle>, distance: f64) -> Option<Task<Message>> {
+    pub(super) fn handle_thicken_entities(
+        &mut self,
+        handles: Vec<Handle>,
+        distance: f64,
+    ) -> Option<Task<Message>> {
         let i = self.active_tab;
         self.tabs[i].active_cmd = None;
         self.tabs[i].snap_result = None;
@@ -233,20 +222,17 @@ impl OpenCADStudio {
                 failed += 1;
                 continue;
             };
-            let kernel_distance =
-                if surface.kind == codec::entities::SurfaceKind::Revolved {
-                    -distance
-                } else {
-                    distance
-                };
+            let kernel_distance = if surface.kind == codec::entities::SurfaceKind::Revolved {
+                -distance
+            } else {
+                distance
+            };
             let body = self.tabs[i]
                 .scene
                 .solid_models
                 .get(&handle)
                 .cloned()
-                .or_else(|| {
-                    crate::scene::convert::solid3d_tess::kernel_surface_body(surface)
-                });
+                .or_else(|| crate::scene::convert::solid3d_tess::kernel_surface_body(surface));
             let Some(body) = body else {
                 failed += 1;
                 continue;
@@ -286,7 +272,8 @@ impl OpenCADStudio {
         if failed > 0 {
             self.command_line.push_output(&crate::tf!(
                 "THICKEN: created {} solid(s); {} surface(s) could not be thickened exactly.",
-                created, failed
+                created,
+                failed
             ));
         }
         if let Some(pending) = pending {
@@ -309,7 +296,11 @@ impl OpenCADStudio {
         self.presspull_pick(handle, point, offset);
     }
 
-    pub(super) fn handle_presspull_apply(&mut self, targets: Vec<crate::scene::model::presspull_model::PresspullTarget>, distance: f64) {
+    pub(super) fn handle_presspull_apply(
+        &mut self,
+        targets: Vec<crate::scene::model::presspull_model::PresspullTarget>,
+        distance: f64,
+    ) {
         self.presspull_apply(targets, distance);
     }
 
@@ -357,8 +348,7 @@ impl OpenCADStudio {
         let mut created_handles = Vec::new();
         let mut consumed = Vec::new();
         for handle in &editable_handles {
-            let Some(entity) = self.tabs[i].scene.document.get_entity(*handle).cloned()
-            else {
+            let Some(entity) = self.tabs[i].scene.document.get_entity(*handle).cloned() else {
                 failed += 1;
                 continue;
             };
@@ -375,31 +365,22 @@ impl OpenCADStudio {
                     continue;
                 };
                 self.add_surface_model(
-                    empty_revolved_surface(
-                        &entity,
-                        axis_start,
-                        axis_end,
-                        angle,
-                        start_angle,
-                    ),
+                    empty_revolved_surface(&entity, axis_start, axis_end, angle, start_angle),
                     body,
                 )
             } else {
-                let result =
-                    sweep_model::revolve_history(&entity, from, to, angle, start_angle)
-                        .and_then(|history| {
-                            kernel::acis::rebuild_body(&history)
-                                .ok()
-                                .map(|solid| (solid, history))
+                let result = sweep_model::revolve_history(&entity, from, to, angle, start_angle)
+                    .and_then(|history| {
+                        kernel::acis::rebuild_body(&history)
+                            .ok()
+                            .map(|solid| (solid, history))
+                    })
+                    .or_else(|| {
+                        sweep_model::revolved(&entity, from, to, angle, start_angle).map(|solid| {
+                            let history = crate::scene::model::solid_history::brep_op(&solid);
+                            (solid, history)
                         })
-                        .or_else(|| {
-                            sweep_model::revolved(&entity, from, to, angle, start_angle)
-                                .map(|solid| {
-                                    let history =
-                                        crate::scene::model::solid_history::brep_op(&solid);
-                                    (solid, history)
-                                })
-                        });
+                    });
                 let Some((solid, history)) = result else {
                     failed += 1;
                     continue;
@@ -427,7 +408,7 @@ impl OpenCADStudio {
             }
             self.tabs[i].dirty = true;
             self.command_line.push_output(
-                crate::tf!(
+                crate::t!(
                     "REVOLVE: created %{created} object(s); %{failed} source(s) could not be revolved.",
                     created = created_handles.len(),
                     failed = failed
@@ -436,8 +417,10 @@ impl OpenCADStudio {
             );
         } else {
             self.command_line.push_error(
-                crate::t!("REVOLVE: no selected object could be revolved with the requested options.")
-                    .as_ref(),
+                crate::t!(
+                    "REVOLVE: no selected object could be revolved with the requested options."
+                )
+                .as_ref(),
             );
         }
         if let Some(pending) = pending {
@@ -459,6 +442,7 @@ impl OpenCADStudio {
             mode,
             options,
             color: _,
+            expressions,
         } = result
         else {
             unreachable!("router only routes the matching variant");
@@ -486,6 +470,10 @@ impl OpenCADStudio {
             .iter()
             .map(|(_, entity)| entity.clone())
             .collect::<Vec<_>>();
+        // Group 294: a base point the user picked.
+        let picked_base = options.base_point.is_some();
+        let several = profiles.len() > 1;
+        let picked = options;
         let options = sweep_model::sweep_selection_options(&selection, options);
         let pending = if profiles.is_empty() {
             None
@@ -495,30 +483,84 @@ impl OpenCADStudio {
         let mut created_handles = Vec::new();
         let mut consumed = Vec::new();
         for (handle, profile) in profiles {
-            let result = path.as_ref().zip(options).and_then(|(path, options)| {
-                let record = sweep_model::sweep_record(&profile, path, options)?;
+            // A refused sweep reports the modeler error code, as the
+            // reference does.
+            let result = (|| -> Result<_, Option<u32>> {
+                let (path, options) = path.as_ref().zip(options).ok_or(None)?;
+                if sweep_model::spatial_profile(&profile).is_some() {
+                    let record = sweep_model::spatial_sweep_record(&profile, path, options)?;
+                    let body =
+                        kernel::acis::rebuild_sweep_with_mode(&record, true).map_err(|_| None)?;
+                    return Ok((body, record, true));
+                }
+                let mut record = sweep_model::sweep_record(&profile, path, options).ok_or(None)?;
+                record.flags_294_296[0] |= picked_base;
                 let (_, _, closed) = kernel::acis::sweep_profile_geometry(
-                    record.sweep_entity.as_ref()?,
+                    record.sweep_entity.as_ref().ok_or(None)?,
                     record.sweep_entity_transform,
                 )
-                .ok()?;
+                .map_err(|_| None)?;
                 let surface = mode == ExtrudeMode::Surface || !closed;
                 let body =
-                    kernel::acis::rebuild_sweep_with_mode(&record, surface).ok()?;
-                Some((body, record, surface))
-            });
-            let Some((body, record, surface)) = result else {
-                failed += 1;
-                continue;
+                    kernel::acis::rebuild_sweep_with_mode(&record, surface).map_err(|error| {
+                        match error {
+                            kernel::acis::HistoryRebuildError::Refused(why) => {
+                                Some(sweep_model::sweep_refusal_code(why))
+                            }
+                            _ => None,
+                        }
+                    })?;
+                Ok((body, record, surface))
+            })();
+            let (body, record, surface) = match result {
+                Ok(value) => value,
+                Err(code) => {
+                    if let Some(code) = code {
+                        self.command_line
+                            .push_output(crate::t!("Modeling Operation Error:").as_ref());
+                        self.command_line.push_output(
+                            crate::tf!("Error Code Number is {code}", code = code).as_ref(),
+                        );
+                    }
+                    failed += 1;
+                    continue;
+                }
             };
+            // An associative surface keeps the profile and path it reads.
+            let associative = surface && sweep_model::surface_associativity();
             let deletes_path =
-                crate::app::delobj_deletes_auxiliary(delete_objects, surface);
+                !associative && crate::app::delobj_deletes_auxiliary(delete_objects, surface);
             if deletes_path && self.tabs[i].scene.is_layer_locked(path_handle) {
                 failed += 1;
                 continue;
             }
             let created = if surface {
-                self.add_surface_model(sweep_model::swept_surface_entity(&record), body)
+                let created =
+                    self.add_surface_model(sweep_model::swept_surface_entity(&record), body);
+                sweep_model::link_sweep_expressions(
+                    &mut self.tabs[i].scene.document,
+                    created,
+                    &expressions,
+                );
+                if associative {
+                    // A picked base point, or the one several profiles share.
+                    let linked = crate::command::SweepOptions {
+                        base_point: if picked_base || several {
+                            options.and_then(|o| o.base_point)
+                        } else {
+                            None
+                        },
+                        ..picked
+                    };
+                    sweep_model::link_sweep_sources(
+                        &mut self.tabs[i].scene.document,
+                        created,
+                        handle,
+                        path_handle,
+                        &linked,
+                    );
+                }
+                created
             } else {
                 self.add_solid_model(
                     empty_solid3d(),
@@ -530,7 +572,7 @@ impl OpenCADStudio {
                 failed += 1;
             } else {
                 created_handles.push(created);
-                if delete_profiles {
+                if delete_profiles && !associative {
                     consumed.push(handle);
                 }
                 if deletes_path {
@@ -547,13 +589,14 @@ impl OpenCADStudio {
                 self.tabs[i].scene.select_entity(*handle, true);
             }
             self.tabs[i].dirty = true;
-            self.command_line.push_output(crate::tf!(
-                "SWEEP: created {created} object(s); {failed} source(s) could not be swept.",
-                created = created_handles.len(), failed = failed
-            ).as_ref());
-        } else {
-            self.command_line.push_error(
-                crate::t!("SWEEP: could not sweep the profile along the path.").as_ref(),
+        }
+        if failed > 0 {
+            self.command_line.push_output(
+                crate::tf!(
+                    "Unable to sweep {failed} selected objects.",
+                    failed = failed
+                )
+                .as_ref(),
             );
         }
         if let Some(pending) = pending {
@@ -613,12 +656,14 @@ impl OpenCADStudio {
             })
             .collect::<Vec<_>>();
         let result = if section_locked {
-            Err("LOFT: a source is on a locked layer; disable source deletion or unlock it.".to_string())
+            Err(
+                "LOFT: a source is on a locked layer; disable source deletion or unlock it."
+                    .to_string(),
+            )
         } else {
             loft_command_model::record(&sections, &guides, path, &available, mode, options)
                 .and_then(|record| {
-                    kernel::acis::rebuild_loft_with_options(&record)
-                        .map(|body| (body, record))
+                    kernel::acis::rebuild_loft_with_options(&record).map(|body| (body, record))
                 })
         };
         match result {
@@ -644,10 +689,8 @@ impl OpenCADStudio {
                 let dirty_before = self.tabs[i].dirty;
                 let pending = self.begin_undo(i, "LOFT", 1, true);
                 let created = if surface {
-                    let handle = self.add_surface_model(
-                        loft_command_model::surface_entity(&record),
-                        body,
-                    );
+                    let handle =
+                        self.add_surface_model(loft_command_model::surface_entity(&record), body);
                     if !handle.is_null() {
                         self.tabs[i].scene.create_solid_history(
                             handle,
@@ -722,8 +765,7 @@ impl OpenCADStudio {
         else {
             unreachable!("router only routes the matching variant");
         };
-        let task =
-            self.solid_edge_blend(handle, &edges, base_face, value, other_value, fillet);
+        let task = self.solid_edge_blend(handle, &edges, base_face, value, other_value, fillet);
         self.tabs[i].active_cmd = None;
         self.tabs[i].snap_result = None;
         self.tabs[i].scene.clear_preview_wire();
@@ -731,7 +773,12 @@ impl OpenCADStudio {
         task
     }
 
-    pub(super) fn handle_solid_shell(&mut self, handle: Handle, actions: Vec<crate::command::ShellFaceAction>, distance: f64) -> Task<Message> {
+    pub(super) fn handle_solid_shell(
+        &mut self,
+        handle: Handle,
+        actions: Vec<crate::command::ShellFaceAction>,
+        distance: f64,
+    ) -> Task<Message> {
         let i = self.active_tab;
         let task = self.solid_shell(handle, &actions, distance);
         self.tabs[i].active_cmd = None;
@@ -741,7 +788,12 @@ impl OpenCADStudio {
         task
     }
 
-    pub(super) fn handle_solid_subtract(&mut self, bases: Vec<Handle>, cutters: Vec<Handle>, convert_meshes: bool) -> Task<Message> {
+    pub(super) fn handle_solid_subtract(
+        &mut self,
+        bases: Vec<Handle>,
+        cutters: Vec<Handle>,
+        convert_meshes: bool,
+    ) -> Task<Message> {
         let i = self.active_tab;
         let task = self.solid_subtract(&bases, &cutters, convert_meshes);
         self.tabs[i].active_cmd = None;
@@ -751,7 +803,12 @@ impl OpenCADStudio {
         task
     }
 
-    pub(super) fn handle_slice_entities(&mut self, targets: Vec<Handle>, plane: kernel::space::Plane, keep_point: Option<glam::DVec3>) -> Task<Message> {
+    pub(super) fn handle_slice_entities(
+        &mut self,
+        targets: Vec<Handle>,
+        plane: kernel::space::Plane,
+        keep_point: Option<glam::DVec3>,
+    ) -> Task<Message> {
         let i = self.active_tab;
         let task = self.solid_slice(&targets, plane, keep_point);
         self.tabs[i].active_cmd = None;
@@ -761,7 +818,12 @@ impl OpenCADStudio {
         task
     }
 
-    pub(super) fn handle_slice_surface_entities(&mut self, targets: Vec<Handle>, cutter: Box<kernel::brep::Body>, keep_point: Option<glam::DVec3>) -> Task<Message> {
+    pub(super) fn handle_slice_surface_entities(
+        &mut self,
+        targets: Vec<Handle>,
+        cutter: Box<kernel::brep::Body>,
+        keep_point: Option<glam::DVec3>,
+    ) -> Task<Message> {
         let i = self.active_tab;
         let task = self.solid_slice_surface(&targets, *cutter, keep_point);
         self.tabs[i].active_cmd = None;

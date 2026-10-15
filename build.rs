@@ -6,17 +6,16 @@ use std::path::Path;
 fn main() {
     let version = std::env::var("CARGO_PKG_VERSION").expect("Cargo package version");
     let parts: Vec<&str> = version.split('.').collect();
-    let app_version =
-        if parts.len() == 3 && parts[0].len() == 4 && parts[0].starts_with("20") && parts[2] == "0"
-        {
-            format!(
-                "{}.{:02}",
-                parts[0],
-                parts[1].parse::<u32>().expect("week number")
-            )
+    let app_version = if parts.len() == 3 && parts[0].len() == 4 && parts[0].starts_with("20") {
+        let week = parts[1].parse::<u32>().expect("week number");
+        if parts[2] == "0" {
+            format!("{}.{week:02}", parts[0])
         } else {
-            version.clone()
-        };
+            format!("{}.{week:02}.{}", parts[0], parts[2])
+        }
+    } else {
+        version.clone()
+    };
     println!("cargo:rustc-env=OCS_APP_VERSION={app_version}");
     // Rerun on commit and branch switch only. Watching `.git/index` as well
     // would keep the dirty flag fresh, but Cargo recompiles the crate every
@@ -27,8 +26,8 @@ fn main() {
             println!("cargo:rerun-if-changed=.git/{reference}");
         }
     }
-    let revision = git_output(&["rev-parse", "--short=12", "HEAD"])
-        .unwrap_or_else(|| "unknown".to_string());
+    let revision =
+        git_output(&["rev-parse", "--short=12", "HEAD"]).unwrap_or_else(|| "unknown".to_string());
     // diff-index exits 1 for differences and 128 when there is no repository,
     // so only a real difference marks the build dirty.
     let dirty = std::process::Command::new("git")
@@ -60,8 +59,8 @@ fn main() {
         "cargo:rustc-env=OCS_TAG_DISTANCE={}",
         tag_distance.map_or_else(|| "unknown".to_string(), |n| n.to_string())
     );
-    let commit_date = git_output(&["log", "-1", "--format=%cs", "HEAD"])
-        .unwrap_or_else(|| "unknown".to_string());
+    let commit_date =
+        git_output(&["log", "-1", "--format=%cs", "HEAD"]).unwrap_or_else(|| "unknown".to_string());
     println!("cargo:rustc-env=OCS_COMMIT_DATE={commit_date}");
 
     // Semver-style build metadata: empty for a clean build on the release

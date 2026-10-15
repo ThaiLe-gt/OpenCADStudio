@@ -313,7 +313,8 @@ impl OpenCADStudio {
         let selected_after: Vec<Handle> = self.tabs[i].scene.selected.iter().copied().collect();
         let dirty_after = self.tabs[i].dirty;
         let active_layer_after = self.tabs[i].active_layer.clone();
-        if entities.is_empty()
+        if !pending.keep_empty
+            && entities.is_empty()
             && !structure_changed
             && pending.selected_before == selected_after
             && pending.dirty_before == dirty_after
@@ -338,6 +339,15 @@ impl OpenCADStudio {
             label: pending.label,
         };
         self.push_undo_entry(i, HistorySnapshot::Delta(Box::new(delta)));
+    }
+
+    /// Finish the pending history step, dropping it when it changed nothing
+    /// even if it was opened as a mark ([`Self::push_undo_mark`]).
+    pub(super) fn drop_unchanged_pending_history(&mut self, i: usize) {
+        if let Some(pending) = self.tabs[i].history.pending.as_mut() {
+            pending.keep_empty = false;
+        }
+        self.finish_pending_history(i);
     }
 
     pub(super) fn finish_all_pending_history(&mut self) {
@@ -394,7 +404,17 @@ impl OpenCADStudio {
             dirty_before,
             structure_before,
             recorder,
+            keep_empty: false,
         });
+    }
+
+    /// [`Self::push_undo_snapshot`] for a command that is an undo step even
+    /// when it changes nothing (UNDO and U then name it and undo nothing).
+    pub(super) fn push_undo_mark(&mut self, i: usize, label: impl Into<String>) {
+        self.push_undo_snapshot(i, label);
+        if let Some(pending) = self.tabs[i].history.pending.as_mut() {
+            pending.keep_empty = true;
+        }
     }
 
     /// Begin undo capture for an entity edit that will touch `touched` entities.
@@ -714,15 +734,15 @@ impl OpenCADStudio {
     /// Add is delta-safe when its layer and XData application IDs already exist
     /// and it creates no block records.
     pub(super) fn delta_add_safe(&self, i: usize, entity: &EntityType) -> bool {
-        if matches!(
-            entity,
-            EntityType::Block(_)
-                | EntityType::BlockEnd(_)
-                | EntityType::Extended(codec::entities::ExtendedEntity {
-                    data: codec::entities::ExtendedEntityData::SectionObject(_),
-                    ..
-                })
-        ) {
+        if matches!(entity, EntityType::Block(_) | EntityType::BlockEnd(_))
+            || matches!(
+                entity,
+                EntityType::Extended(extended) if matches!(
+                    extended.data,
+                    codec::entities::ExtendedEntityData::SectionObject(_)
+                )
+            )
+        {
             return false;
         }
         let layer = entity.common().layer.clone();
@@ -884,6 +904,7 @@ impl OpenCADStudio {
                     self.tabs[i].scene.invalidate_dependency_index();
                     self.tabs[i].scene.bump_layout_epoch();
                     self.tabs[i].scene.bump_scale_epoch();
+                    self.tabs[i].scene.bump_ucs_epoch();
                 }
                 StructureSnapshot::Layers(entries) => {
                     let names: Vec<String> =
@@ -956,20 +977,18 @@ impl OpenCADStudio {
                         // Either direction can add/remove a layout: undoing
                         // an insert removes it (`before` is `None`), redoing
                         // re-inserts it — so both sides must be inspected.
-                        layout_touched |= matches!(
-                            entry.before,
-                            Some(codec::objects::ObjectType::Layout(_))
-                        ) || matches!(
-                            entry.after,
-                            Some(codec::objects::ObjectType::Layout(_))
-                        );
-                        scale_touched |= matches!(
-                            entry.before,
-                            Some(codec::objects::ObjectType::Scale(_))
-                        ) || matches!(
-                            entry.after,
-                            Some(codec::objects::ObjectType::Scale(_))
-                        );
+                        layout_touched |=
+                            matches!(entry.before, Some(codec::objects::ObjectType::Layout(_)))
+                                || matches!(
+                                    entry.after,
+                                    Some(codec::objects::ObjectType::Layout(_))
+                                );
+                        scale_touched |=
+                            matches!(entry.before, Some(codec::objects::ObjectType::Scale(_)))
+                                || matches!(
+                                    entry.after,
+                                    Some(codec::objects::ObjectType::Scale(_))
+                                );
                         if let Some(object) = value {
                             self.tabs[i]
                                 .scene

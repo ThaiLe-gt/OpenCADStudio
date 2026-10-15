@@ -7,13 +7,13 @@
 //         a PDF underlay. Rows that need the definition (name, page, path,
 //         width, height) are filled in by the Properties panel.
 
-use codec::entities::{Underlay, UnderlayDisplayFlags};
 use crate::t;
+use codec::entities::{Underlay, UnderlayDisplayFlags};
 use glam::DVec3;
 
 use crate::command::EntityTransform;
 use crate::entities::common::{center_grip, ro_prop as ro, square_grip};
-use crate::entities::traits::{Grippable, PropertyEditable, Transformable, RenderConvertible};
+use crate::entities::traits::{Grippable, PropertyEditable, RenderConvertible, Transformable};
 use crate::scene::convert::acad_to_render::{RenderEntity, RenderObject};
 use crate::scene::model::object::{GripApply, GripDef, PropSection, PropValue, Property};
 use crate::scene::model::wire_model::SnapHint;
@@ -47,23 +47,35 @@ pub(crate) fn definition<'a>(
     }
 }
 
-/// Page number of a definition ("1" when unset).
+/// Page number of a PDF definition ("1" when unset), or the sheet (DWF) or
+/// model (DGN) name (empty: the file's first).
 pub(crate) fn page_of(def: &codec::entities::UnderlayDefinition) -> &str {
-    if def.page_name.trim().is_empty() {
+    if def.page_name.trim().is_empty()
+        && matches!(def.underlay_type, codec::entities::UnderlayType::Pdf)
+    {
         "1"
     } else {
         def.page_name.trim()
     }
 }
 
-/// Size of the referenced page in underlay units (page inches), when the
-/// definition resolves and its PDF page can be read.
-pub(crate) fn page_size(u: &Underlay, document: &codec::CadDocument) -> Option<(f64, f64)> {
-    let def = definition(u, document)?;
-    if !matches!(def.underlay_type, codec::entities::UnderlayType::Pdf) {
-        return None;
+/// The referenced page (PDF, page inches from its lower-left corner) or
+/// sheet / model (DWF, DGN, in its own units about its origin) as min x,
+/// min y, max x, max y in underlay units, when it can be read.
+pub(crate) fn definition_rect(def: &codec::entities::UnderlayDefinition) -> Option<[f64; 4]> {
+    match def.underlay_type {
+        codec::entities::UnderlayType::Pdf => {
+            crate::scene::model::pdf_raster::page_size_inches(&def.file_path, page_of(def))
+                .map(|(w, h)| [0.0, 0.0, w, h])
+        }
+        kind => crate::scene::model::underlay_vector::sheet(kind, &def.file_path, page_of(def))
+            .map(|sheet| sheet.rect),
     }
-    crate::scene::model::pdf_raster::page_size_inches(&def.file_path, page_of(def))
+}
+
+/// The underlay's page rectangle (see [`definition_rect`]).
+pub(crate) fn page_rect(u: &Underlay, document: &codec::CadDocument) -> Option<[f64; 4]> {
+    definition_rect(definition(u, document)?)
 }
 
 /// The name a definition shows: its own name, or "<file> - <page>" as the
@@ -115,12 +127,12 @@ pub(crate) fn is_clipped(u: &Underlay) -> bool {
 
 /// Page frame in world space (CCW from the insertion).
 fn page_quad(u: &Underlay, document: &codec::CadDocument) -> Option<[[f64; 3]; 4]> {
-    let (w, h) = page_size(u, document)?;
+    let [x0, y0, x1, y1] = page_rect(u, document)?;
     Some([
-        local_to_world(u, [0.0, 0.0]),
-        local_to_world(u, [w, 0.0]),
-        local_to_world(u, [w, h]),
-        local_to_world(u, [0.0, h]),
+        local_to_world(u, [x0, y0]),
+        local_to_world(u, [x1, y0]),
+        local_to_world(u, [x1, y1]),
+        local_to_world(u, [x0, y1]),
     ])
 }
 
@@ -136,7 +148,7 @@ fn shown_local_extent(u: &Underlay, document: &codec::CadDocument) -> Option<(f6
         }
         return Some((hi[0] - lo[0], hi[1] - lo[1]));
     }
-    page_size(u, document)
+    page_rect(u, document).map(|r| (r[2] - r[0], r[3] - r[1]))
 }
 
 /// Width and height the Properties panel shows: the shown extent times the
@@ -152,7 +164,10 @@ pub(crate) fn world_bounds(
     document: &codec::CadDocument,
 ) -> Option<([f64; 3], [f64; 3])> {
     let outline: Vec<[f64; 3]> = if is_clipped(u) && !u.clip_inverted {
-        clip_polygon_local(u).into_iter().map(|p| local_to_world(u, p)).collect()
+        clip_polygon_local(u)
+            .into_iter()
+            .map(|p| local_to_world(u, p))
+            .collect()
     } else {
         page_quad(u, document)?.to_vec()
     };
@@ -172,7 +187,11 @@ pub(crate) fn world_bounds(
 pub(crate) fn plain_number(value: f64) -> String {
     let text = format!("{value:.4}");
     let text = text.trim_end_matches('0').trim_end_matches('.').to_string();
-    if text == "-0" { "0".to_string() } else { text }
+    if text == "-0" {
+        "0".to_string()
+    } else {
+        text
+    }
 }
 
 fn number_row(label: &str, field: &'static str, value: f64) -> Property {
@@ -244,7 +263,11 @@ impl RenderConvertible for Underlay {
     fn to_render(&self, document: &codec::CadDocument) -> Option<RenderEntity> {
         let origin = v3(&self.insertion_point);
         let insertion_snap = (
-            DVec3::new(self.insertion_point.x, self.insertion_point.y, self.insertion_point.z),
+            DVec3::new(
+                self.insertion_point.x,
+                self.insertion_point.y,
+                self.insertion_point.z,
+            ),
             SnapHint::Insertion,
         );
         let quad = page_quad(self, document);
@@ -288,21 +311,22 @@ impl RenderConvertible for Underlay {
             });
         }
 
-        // Pick surface over the shown area so a click inside selects it.
-        let pick_ring: Vec<[f64; 3]> = if !clip.is_empty() && !self.clip_inverted {
+        // Picked on its frame only; the page itself selects nothing.
+        let key_ring: Vec<[f64; 3]> = if !clip.is_empty() && !self.clip_inverted {
             clip.clone()
         } else {
             quad.map(|q| q.to_vec()).unwrap_or_default()
         };
-        let pick_tris = crate::entities::mesh::triangulate_planar(&pick_ring);
         let mut snap_pts = vec![insertion_snap];
-        snap_pts.extend(crate::scene::model::pdf_vector::underlay_snap_points(self, document));
+        snap_pts.extend(crate::scene::model::pdf_vector::underlay_snap_points(
+            self, document,
+        ));
         Some(RenderEntity {
-            pick_tris,
+            pick_tris: vec![],
             object: RenderObject::Lines(pts),
             snap_pts,
             tangent_geoms: vec![],
-            key_vertices: pick_ring,
+            key_vertices: key_ring,
             fill_tris: vec![],
         })
     }
@@ -385,7 +409,9 @@ impl PropertyEditable for Underlay {
         let show = self.flags.contains(UnderlayDisplayFlags::ON);
         let clipping = self.flags.contains(UnderlayDisplayFlags::CLIPPING);
         let monochrome = self.flags.contains(UnderlayDisplayFlags::MONOCHROME);
-        let adjust_bg = self.flags.contains(UnderlayDisplayFlags::ADJUST_FOR_BACKGROUND);
+        let adjust_bg = self
+            .flags
+            .contains(UnderlayDisplayFlags::ADJUST_FOR_BACKGROUND);
 
         vec![
             PropSection {
@@ -394,7 +420,11 @@ impl PropertyEditable for Underlay {
                     number_row(t!("Contrast").as_ref(), "ul_contrast", self.contrast as f64),
                     number_row(t!("Fade").as_ref(), "ul_fade", self.fade as f64),
                     yes_no(t!("Monochrome").as_ref(), "ul_mono", monochrome),
-                    yes_no(t!("Adjust colors for background").as_ref(), "ul_adjust_bg", adjust_bg),
+                    yes_no(
+                        t!("Adjust colors for background").as_ref(),
+                        "ul_adjust_bg",
+                        adjust_bg,
+                    ),
                 ],
             },
             PropSection {
@@ -403,7 +433,11 @@ impl PropertyEditable for Underlay {
                     number_row(t!("Position X").as_ref(), "ul_ix", self.insertion_point.x),
                     number_row(t!("Position Y").as_ref(), "ul_iy", self.insertion_point.y),
                     number_row(t!("Position Z").as_ref(), "ul_iz", self.insertion_point.z),
-                    number_row(t!("Rotation").as_ref(), "ul_rot", self.rotation.to_degrees()),
+                    number_row(
+                        t!("Rotation").as_ref(),
+                        "ul_rot",
+                        self.rotation.to_degrees(),
+                    ),
                     // Filled from the page size by the Properties panel.
                     number_row(t!("Width").as_ref(), "ul_width", 0.0),
                     number_row(t!("Height").as_ref(), "ul_height", 0.0),
@@ -444,9 +478,11 @@ impl PropertyEditable for Underlay {
             "ul_adjust_bg" => {
                 let on = parse_flag(
                     value,
-                    self.flags.contains(UnderlayDisplayFlags::ADJUST_FOR_BACKGROUND),
+                    self.flags
+                        .contains(UnderlayDisplayFlags::ADJUST_FOR_BACKGROUND),
                 );
-                self.flags.set(UnderlayDisplayFlags::ADJUST_FOR_BACKGROUND, on);
+                self.flags
+                    .set(UnderlayDisplayFlags::ADJUST_FOR_BACKGROUND, on);
                 return;
             }
             "ul_on" => {
@@ -491,8 +527,15 @@ impl Transformable for Underlay {
                 self.insertion_point.y += d.y as f64;
                 self.insertion_point.z += d.z as f64;
             }
-            EntityTransform::Mirror { p1, p2, working_normal } => {
-                if !working_normal.normalize_or(DVec3::Z).abs_diff_eq(DVec3::Z, 1e-10) {
+            EntityTransform::Mirror {
+                p1,
+                p2,
+                working_normal,
+            } => {
+                if !working_normal
+                    .normalize_or(DVec3::Z)
+                    .abs_diff_eq(DVec3::Z, 1e-10)
+                {
                     codec::Entity::apply_transform(
                         self,
                         &crate::scene::view::transform::reflection_about_working_line(
@@ -527,13 +570,14 @@ impl Transformable for Underlay {
                 self.y_scale *= f;
                 self.z_scale *= f;
             }
-            EntityTransform::Rotate { center, axis, angle_rad } => {
+            EntityTransform::Rotate {
+                center,
+                axis,
+                angle_rad,
+            } => {
                 if !axis.normalize_or(DVec3::Z).abs_diff_eq(DVec3::Z, 1e-10) {
                     crate::scene::view::transform::apply_standard_transform(
-                        self,
-                        *center,
-                        *axis,
-                        *angle_rad,
+                        self, *center, *axis, *angle_rad,
                     );
                     return;
                 }

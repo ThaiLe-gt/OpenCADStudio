@@ -7,9 +7,7 @@ use iced::{Background, Border, Element, Fill, Theme};
 use std::borrow::Cow;
 
 /// Active tab in the Drafting Settings dialog.
-#[derive(
-    Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize,
-)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum DraftingSettingsTab {
     #[default]
@@ -116,12 +114,17 @@ pub fn parse_grid_major(s: &str) -> Option<u32> {
 }
 
 /// Helper for grouped sub-panels with a light border and header title.
-fn group<'a>(title: impl Into<String>, body: impl Into<Element<'a, Message>>) -> Element<'a, Message> {
+fn group<'a>(
+    title: impl Into<String>,
+    body: impl Into<Element<'a, Message>>,
+) -> Element<'a, Message> {
     container(
         column![
-            text(title.into()).size(11).style(|theme: &Theme| text::Style {
-                color: Some(theme.palette().background.strongest.text.scale_alpha(0.75)),
-            }),
+            text(title.into())
+                .size(11)
+                .style(|theme: &Theme| text::Style {
+                    color: Some(theme.palette().background.strongest.text.scale_alpha(0.75)),
+                }),
             body.into(),
         ]
         .spacing(6),
@@ -167,10 +170,9 @@ pub fn view_window<'a>(
                 let palette = theme.palette();
                 let pair = match (is_active, status) {
                     (true, _) => palette.primary.strong,
-                    (
-                        false,
-                        button::Status::Hovered | button::Status::Pressed,
-                    ) => palette.background.strong,
+                    (false, button::Status::Hovered | button::Status::Pressed) => {
+                        palette.background.strong
+                    }
                     _ => palette.background.weak,
                 };
                 button::Style {
@@ -194,12 +196,27 @@ pub fn view_window<'a>(
 
     let tab_row = row![
         tab_button(DraftingSettingsTab::SnapAndGrid, crate::t!("Snap and Grid")),
-        tab_button(DraftingSettingsTab::PolarTracking, crate::t!("Polar Tracking")),
+        tab_button(
+            DraftingSettingsTab::PolarTracking,
+            crate::t!("Polar Tracking")
+        ),
         tab_button(DraftingSettingsTab::ObjectSnap, crate::t!("Object Snap")),
-        tab_button(DraftingSettingsTab::ObjectSnap3D, crate::t!("3D Object Snap")),
-        tab_button(DraftingSettingsTab::DynamicInput, crate::t!("Dynamic Input")),
-        tab_button(DraftingSettingsTab::QuickProperties, crate::t!("Quick Properties")),
-        tab_button(DraftingSettingsTab::SelectionCycling, crate::t!("Selection Cycling")),
+        tab_button(
+            DraftingSettingsTab::ObjectSnap3D,
+            crate::t!("3D Object Snap")
+        ),
+        tab_button(
+            DraftingSettingsTab::DynamicInput,
+            crate::t!("Dynamic Input")
+        ),
+        tab_button(
+            DraftingSettingsTab::QuickProperties,
+            crate::t!("Quick Properties")
+        ),
+        tab_button(
+            DraftingSettingsTab::SelectionCycling,
+            crate::t!("Selection Cycling")
+        ),
     ]
     .spacing(2)
     .width(Fill)
@@ -209,9 +226,7 @@ pub fn view_window<'a>(
         .width(Fill)
         .height(1)
         .style(|theme: &Theme| container::Style {
-            background: Some(Background::Color(
-                theme.palette().background.neutral.color,
-            )),
+            background: Some(Background::Color(theme.palette().background.neutral.color)),
             ..Default::default()
         });
 
@@ -287,7 +302,11 @@ pub fn view_window<'a>(
                 text(crate::t!("F5 cycles Left, Top, and Right.")).size(10.5),
                 Space::new().height(4),
                 row![
-                    text(crate::t!("Rotation: %{angle}°", angle = state.snap_angle_deg)).size(11),
+                    text(crate::t!(
+                        "Rotation: %{angle}°",
+                        angle = state.snap_angle_deg
+                    ))
+                    .size(11),
                     button(text(crate::t!("Reset rotation")).size(10))
                         .on_press(Message::DraftingSettingsResetRotation)
                         .style(button::secondary)
@@ -488,8 +507,7 @@ pub fn view_window<'a>(
         );
 
         column![
-            row![osnap_on_toggle, Space::new().width(24), otrack_on_toggle]
-                .align_y(iced::Center),
+            row![osnap_on_toggle, Space::new().width(24), otrack_on_toggle].align_y(iced::Center),
             action_buttons,
             Space::new().height(4),
             snap_modes_group,
@@ -559,15 +577,15 @@ pub fn view_window<'a>(
 
         let prompt_group = group(
             crate::t!("Dynamic Prompts"),
-            column![
-                row![
-                    checkbox(true).size(14),
-                    text(crate::t!("Show command prompting and command input near crosshairs"))
-                        .size(11),
-                ]
-                .spacing(7)
-                .align_y(iced::Center),
+            column![row![
+                checkbox(true).size(14),
+                text(crate::t!(
+                    "Show command prompting and command input near crosshairs"
+                ))
+                .size(11),
             ]
+            .spacing(7)
+            .align_y(iced::Center),]
             .spacing(6),
         );
 
@@ -608,13 +626,9 @@ pub fn view_window<'a>(
             .spacing(6),
         );
 
-        column![
-            quick_props_toggle,
-            Space::new().height(4),
-            palette_group,
-        ]
-        .spacing(10)
-        .width(Fill)
+        column![quick_props_toggle, Space::new().height(4), palette_group,]
+            .spacing(10)
+            .width(Fill)
     };
 
     // ── Tab 7: Selection Cycling ─────────────────────────────────────────
@@ -644,13 +658,9 @@ pub fn view_window<'a>(
             .spacing(6),
         );
 
-        column![
-            sel_cycling_toggle,
-            Space::new().height(4),
-            cycling_group,
-        ]
-        .spacing(10)
-        .width(Fill)
+        column![sel_cycling_toggle, Space::new().height(4), cycling_group,]
+            .spacing(10)
+            .width(Fill)
     };
 
     // ── Active Tab Content ───────────────────────────────────────────────
@@ -719,4 +729,3 @@ pub fn view_window<'a>(
         Message::DraftingSettingsCloseKeep,
     )
 }
-

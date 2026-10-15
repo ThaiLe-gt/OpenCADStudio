@@ -128,9 +128,9 @@ fn resolve_xrefs_with_filter(
         .map(|(xref_index, (block_name, raw_path, br_handle))| {
             let resolved = resolve_path(&raw_path, base_dir);
             #[cfg(not(target_arch = "wasm32"))]
-            let initial_fingerprint = resolved.as_ref().and_then(|path| {
-                crate::io::edit_lock::FileFingerprint::capture(path).ok()
-            });
+            let initial_fingerprint = resolved
+                .as_ref()
+                .and_then(|path| crate::io::edit_lock::FileFingerprint::capture(path).ok());
             #[cfg(target_arch = "wasm32")]
             let initial_fingerprint = None;
             let units = std::sync::Arc::clone(&parse_units);
@@ -217,8 +217,8 @@ fn resolve_xrefs_with_filter(
                     || outcome.stats.skipped_source_records > 0
                     || !outcome.stats.stream_completed
                     || outcome.document.notifications.iter().any(|item| {
-                    item.notification_type == codec::notification::NotificationType::Error
-                });
+                        item.notification_type == codec::notification::NotificationType::Error
+                    });
                 let mut diagnostics: Vec<String> = outcome
                     .document
                     .notifications
@@ -247,34 +247,29 @@ fn resolve_xrefs_with_filter(
                 if recovered || invalid > 0 {
                     (XrefStatus::Failed, diagnostics, Some(outcome.stats))
                 } else {
-                // Reload is replacement, never append. Keep the prior merge
-                // intact until parsing succeeded, then discard its generated
-                // entities, sortents, and dependent symbols immediately before
-                // importing the replacement content.
-                //
-                // VISRETAIN=1 (`header.retain_xref_visibility`): host-side
-                // layer overrides survive the purge — snapshot them first and
-                // re-apply onto the freshly merged layers below. Without this
-                // every reload silently reset frozen/off/color tweaks the
-                // user made on `name|*` layers back to file defaults.
-                let visretain = doc.header.retain_xref_visibility;
-                let kept_layers = if visretain {
-                    snapshot_dependent_layers(doc, &block_name)
-                } else {
-                    HashMap::default()
-                };
-                let _ = unload_reference(doc, br_handle.value());
-                remove_pipe_symbols(doc, &block_name);
-                ensure_block_entities(doc, &block_name);
-                dropped += merge_xref_into_block(
-                    doc,
-                    &block_name,
-                    br_handle,
-                    outcome.document,
-                );
-                if visretain {
-                    restore_dependent_layers(doc, &block_name, kept_layers);
-                }
+                    // Reload is replacement, never append. Keep the prior merge
+                    // intact until parsing succeeded, then discard its generated
+                    // entities, sortents, and dependent symbols immediately before
+                    // importing the replacement content.
+                    //
+                    // VISRETAIN=1 (`header.retain_xref_visibility`): host-side
+                    // layer overrides survive the purge — snapshot them first and
+                    // re-apply onto the freshly merged layers below. Without this
+                    // every reload silently reset frozen/off/color tweaks the
+                    // user made on `name|*` layers back to file defaults.
+                    let visretain = doc.header.retain_xref_visibility;
+                    let kept_layers = if visretain {
+                        snapshot_dependent_layers(doc, &block_name)
+                    } else {
+                        HashMap::default()
+                    };
+                    let _ = unload_reference(doc, br_handle.value());
+                    remove_pipe_symbols(doc, &block_name);
+                    ensure_block_entities(doc, &block_name);
+                    dropped += merge_xref_into_block(doc, &block_name, br_handle, outcome.document);
+                    if visretain {
+                        restore_dependent_layers(doc, &block_name, kept_layers);
+                    }
                     (XrefStatus::Loaded, diagnostics, Some(outcome.stats))
                 }
             }
@@ -322,6 +317,24 @@ pub fn register_underlay_sources(doc: &CadDocument, base_dir: &Path) {
             crate::scene::model::pdf_raster::register_source(stored, std::sync::Arc::new(bytes));
         }
     }
+    // Point cloud scans are large and read lazily: register where they are.
+    for object in doc.objects.values() {
+        let codec::objects::ObjectType::ClassObject(object) = object else {
+            continue;
+        };
+        let (codec::objects::ClassObjectData::PointCloudDefinitionEx(def)
+        | codec::objects::ClassObjectData::PointCloudDefinition(def)) = &object.data
+        else {
+            continue;
+        };
+        let stored = def.source_filename.trim();
+        if let Some(found) = (!stored.is_empty())
+            .then(|| resolve_path(stored, base_dir))
+            .flatten()
+        {
+            crate::scene::model::point_cloud::register_source(stored, found);
+        }
+    }
 }
 
 /// Layer properties an override can change, as compared for the
@@ -353,7 +366,8 @@ impl LayerLook {
 
 /// The source file's layers by upper-case name, read once per file version.
 fn source_layers(path: &Path) -> Option<HashMap<String, LayerLook>> {
-    type Cache = std::sync::Mutex<HashMap<PathBuf, (std::time::SystemTime, HashMap<String, LayerLook>)>>;
+    type Cache =
+        std::sync::Mutex<HashMap<PathBuf, (std::time::SystemTime, HashMap<String, LayerLook>)>>;
     static CACHE: std::sync::OnceLock<Cache> = std::sync::OnceLock::new();
     let modified = std::fs::metadata(path).and_then(|m| m.modified()).ok()?;
     let cache = CACHE.get_or_init(Default::default);
@@ -498,8 +512,8 @@ pub(crate) fn ensure_block_entities(doc: &mut CadDocument, block_name: &str) {
 /// - Kept verbatim (audited, benign): linetype handles (the name carries the
 ///   lookup), Leader `annotation_handle`, Hatch `boundary_handles`,
 ///   `attdef_handle`, reactors, xdata, extension dictionaries, graphic data,
-///   Dimension anonymous-block names (`*D…` — geometry regenerates from the
-///   style), Hatch pattern names (no pattern table exists), Shape style
+///   Dimension anonymous-block names on BIND (`*D…` — geometry regenerates
+///   from the style), Hatch pattern names (no pattern table exists), Shape style
 ///   names, MultiLeader line-type/arrowhead handles, Table cell internals
 ///   (rows/cells keep xref text-style names), Viewport visual-style handles,
 ///   SectionSymbol style handles, `Extended` entities.
@@ -530,16 +544,9 @@ impl BindTaken {
         Self {
             layers: upper_names(doc.layers.names().map(|s| s.to_string()).collect()),
             linetypes: upper_names(doc.line_types.names().map(|s| s.to_string()).collect()),
-            text_styles: upper_names(
-                doc.text_styles.names().map(|s| s.to_string()).collect(),
-            ),
+            text_styles: upper_names(doc.text_styles.names().map(|s| s.to_string()).collect()),
             dim_styles: upper_names(doc.dim_styles.names().map(|s| s.to_string()).collect()),
-            blocks: upper_names(
-                doc.block_records
-                    .iter()
-                    .map(|b| b.name.clone())
-                    .collect(),
-            ),
+            blocks: upper_names(doc.block_records.iter().map(|b| b.name.clone()).collect()),
         }
     }
 
@@ -645,7 +652,9 @@ fn import_xref_symbols(
             let same_file = doc
                 .text_styles
                 .iter()
-                .find(|host| host.is_shape_file && host.font_file.eq_ignore_ascii_case(&ts.font_file))
+                .find(|host| {
+                    host.is_shape_file && host.font_file.eq_ignore_ascii_case(&ts.font_file)
+                })
                 .map(|host| host.handle);
             if let Some(host_handle) = same_file {
                 maps.text_style_handles.insert(ts.handle, host_handle);
@@ -702,8 +711,21 @@ fn import_xref_symbols(
 
     // Nested block records: prefixed clones with cleared membership, detached
     // layout pointer, fresh handles (same shape as the load path always made).
+    // The load path also takes the anonymous pictures (`*D` dimensions, `*U`
+    // block representations): a dimension draws from its block by name, and
+    // without the copy it falls back to a host block of the same name or a
+    // regeneration that misses the file's own overrides. BIND keeps skipping
+    // them, as a `$N$` prefix would make an invalid anonymous name.
+    let take_anonymous = matches!(naming, SymbolNaming::MergePipe { .. });
     for br in xref_doc.block_records.iter() {
-        if br.name.starts_with('*') || br.flags.is_xref || br.flags.is_xref_overlay {
+        let anonymous = br.name.starts_with('*');
+        let layout_block = br.is_layout()
+            || br.name.eq_ignore_ascii_case("*Model_Space")
+            || br.name.to_ascii_lowercase().starts_with("*paper_space");
+        if (anonymous && (!take_anonymous || layout_block))
+            || br.flags.is_xref
+            || br.flags.is_xref_overlay
+        {
             continue;
         }
         let old = br.name.clone();
@@ -770,11 +792,7 @@ fn null_handle(handle: &mut Option<Handle>) -> usize {
 /// Rewrite one entity's symbol references to the imported copies in place.
 /// Returns the count of unremappable foreign handles (see
 /// `bind_limitations` above) — ignored on the load path, reported per BIND.
-fn remap_xref_entity(
-    host: &CadDocument,
-    entity: &mut EntityType,
-    maps: &XrefSymbolMaps,
-) -> usize {
+fn remap_xref_entity(host: &CadDocument, entity: &mut EntityType, maps: &XrefSymbolMaps) -> usize {
     let mut unremapped = 0usize;
     let rename = |map: &HashMap<String, String>, name: &mut String| {
         if let Some(new) = map.get(&name.to_uppercase()) {
@@ -816,8 +834,11 @@ fn remap_xref_entity(
                 remap_mtext_style(m, maps);
             }
         }
-        // ── Dim-style names (+ anonymous-block refs stay verbatim) ──
-        EntityType::Dimension(d) => rename(&maps.dim_styles, &mut d.base_mut().style_name),
+        // ── Dim-style names + the dimension's picture block ──
+        EntityType::Dimension(d) => {
+            rename(&maps.dim_styles, &mut d.base_mut().style_name);
+            rename(&maps.blocks, &mut d.base_mut().block_name);
+        }
         EntityType::Leader(l) => rename(&maps.dim_styles, &mut l.dimension_style),
         EntityType::Tolerance(t) => {
             rename(&maps.dim_styles, &mut t.dimension_style_name);
@@ -919,7 +940,8 @@ fn copy_xref_sortents(
             nt.add_entry(ne, ns);
         }
         if !nt.is_empty() {
-            doc.objects.insert(nt.handle, ObjectType::SortEntitiesTable(nt));
+            doc.objects
+                .insert(nt.handle, ObjectType::SortEntitiesTable(nt));
         }
     }
 }
@@ -976,11 +998,16 @@ fn merge_xref_into_block(
     // ── Entities (shared helper) ────────────────────────────────────────
     // The unremapped-handle count is ignored on the load path (BIND reports
     // it per bind).
-    let (dropped, _, entity_handle_map) =
-        merge_source_entities(doc, &xref_doc, br_handle, &maps);
+    let (dropped, _, entity_handle_map) = merge_source_entities(doc, &xref_doc, br_handle, &maps);
 
     // ── Draw-order overrides (shared helper) ──────────────────────────────
-    copy_xref_sortents(doc, &xref_doc, br_handle, &maps.br_handles, &entity_handle_map);
+    copy_xref_sortents(
+        doc,
+        &xref_doc,
+        br_handle,
+        &maps.br_handles,
+        &entity_handle_map,
+    );
     dropped
 }
 
@@ -1121,12 +1148,11 @@ pub fn collect_entries_with_prev(
     unloaded: &std::collections::HashSet<crate::io::xref_model::UnloadKey>,
     prev: &std::collections::HashMap<u64, std::time::SystemTime>,
 ) -> Vec<crate::io::xref_model::ReferenceEntry> {
-    use codec::entities::UnderlayType;
-    use codec::objects::ObjectType;
     use crate::io::xref_model::{
-        child_key, decide_status, normalize_lexical, RefKind, RefStatus, RefType,
-        ReferenceEntry, UnloadKey,
+        child_key, decide_status, normalize_lexical, RefKind, RefStatus, RefType, ReferenceEntry,
+        UnloadKey,
     };
+    use codec::objects::ObjectType;
 
     /// Resolve `raw` via `base_dir`; on success record `found_at`, stat
     /// size/mtime, and flip the entry to Loaded. Missing/empty stays NotFound.
@@ -1188,12 +1214,8 @@ pub fn collect_entries_with_prev(
             resolve_only(&mut entry, &br.xref_path, base_dir);
         } else {
             stat_into(&mut entry, &br.xref_path, base_dir);
-            entry.status = decide_status(
-                entry.status,
-                entry.modified,
-                prev.get(&key).copied(),
-                false,
-            );
+            entry.status =
+                decide_status(entry.status, entry.modified, prev.get(&key).copied(), false);
         }
         entries.push(entry);
     }
@@ -1223,12 +1245,8 @@ pub fn collect_entries_with_prev(
             resolve_only(&mut entry, &def.file_name, base_dir);
         } else {
             stat_into(&mut entry, &def.file_name, base_dir);
-            entry.status = decide_status(
-                entry.status,
-                entry.modified,
-                prev.get(&key).copied(),
-                false,
-            );
+            entry.status =
+                decide_status(entry.status, entry.modified, prev.get(&key).copied(), false);
             if is_unreferenced {
                 entry.status = RefStatus::Unreferenced;
             }
@@ -1252,29 +1270,77 @@ pub fn collect_entries_with_prev(
         let ObjectType::UnderlayDefinition(def) = obj else {
             continue;
         };
-        if def.underlay_type != UnderlayType::Pdf {
-            continue;
-        }
         let key = handle.value();
         let name = if def.name.trim().is_empty() {
             file_name_only(&def.file_path).to_owned()
         } else {
             def.name.clone()
         };
-        let mut entry = ReferenceEntry::new(key, name, RefKind::Pdf);
+        let mut entry = ReferenceEntry::new(key, name, RefKind::Underlay);
         entry.saved_path = def.file_path.clone();
         if def.unloaded || unloaded.contains(&UnloadKey::Direct(key)) {
             entry.status = RefStatus::Unloaded;
             resolve_only(&mut entry, &def.file_path, base_dir);
         } else {
             stat_into(&mut entry, &def.file_path, base_dir);
-            entry.status = decide_status(
-                entry.status,
-                entry.modified,
-                prev.get(&key).copied(),
-                false,
-            );
+            entry.status =
+                decide_status(entry.status, entry.modified, prev.get(&key).copied(), false);
             if !referenced_underlays.contains(handle) {
+                entry.status = RefStatus::Unreferenced;
+            }
+        }
+        entries.push(entry);
+    }
+
+    // ── Point clouds ──
+    // Listed under their definitions' names; a definition no cloud uses is
+    // Unreferenced, as for images and underlays.
+    let mut referenced_clouds: HashSet<Handle> = HashSet::default();
+    for e in doc.entities() {
+        if let EntityType::Extended(extended) = e {
+            if let codec::entities::ExtendedEntityData::PointCloudEx(data) = &extended.data {
+                referenced_clouds.insert(data.definition_handle);
+            }
+        }
+    }
+    let cloud_names: HashMap<Handle, String> = doc
+        .objects
+        .values()
+        .filter_map(|object| match object {
+            ObjectType::Dictionary(dictionary) => Some(dictionary),
+            _ => None,
+        })
+        .flat_map(|dictionary| {
+            dictionary
+                .entries
+                .iter()
+                .map(|(name, handle)| (*handle, name.clone()))
+        })
+        .collect();
+    for (handle, obj) in doc.objects.iter() {
+        let ObjectType::ClassObject(object) = obj else {
+            continue;
+        };
+        let codec::objects::ClassObjectData::PointCloudDefinitionEx(def) = &object.data else {
+            continue;
+        };
+        let key = handle.value();
+        let name = cloud_names.get(handle).cloned().unwrap_or_else(|| {
+            Path::new(&def.source_filename.replace('\\', "/"))
+                .file_stem()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_default()
+        });
+        let mut entry = ReferenceEntry::new(key, name, RefKind::PointCloud);
+        entry.saved_path = def.source_filename.clone();
+        if !def.is_loaded {
+            entry.status = RefStatus::Unloaded;
+            resolve_only(&mut entry, &def.source_filename, base_dir);
+        } else {
+            stat_into(&mut entry, &def.source_filename, base_dir);
+            entry.status =
+                decide_status(entry.status, entry.modified, prev.get(&key).copied(), false);
+            if !referenced_clouds.contains(handle) {
                 entry.status = RefStatus::Unreferenced;
             }
         }
@@ -1319,7 +1385,11 @@ pub fn collect_entries_with_prev(
             let key = child_key(parent_key, &br.name, &br.xref_path);
             let mut child = ReferenceEntry::new(key, br.name.clone(), RefKind::DwgXref);
             child.parent_key = Some(parent_key);
-            child.ref_type = if br.flags.is_xref_overlay { RefType::Overlay } else { RefType::Attach };
+            child.ref_type = if br.flags.is_xref_overlay {
+                RefType::Overlay
+            } else {
+                RefType::Attach
+            };
             child.saved_path = br.xref_path.clone();
             if unloaded.contains(&UnloadKey::Nested(key)) {
                 child.status = RefStatus::Unloaded;
@@ -1328,7 +1398,8 @@ pub fn collect_entries_with_prev(
                 // Nested baselines live in the same stat cache under the
                 // child's high-bit-tagged key, which can never alias a host
                 // handle (see `child_key`) — so the lookup below is safe.
-                child.status = decide_status(child.status, child.modified, prev.get(&key).copied(), false);
+                child.status =
+                    decide_status(child.status, child.modified, prev.get(&key).copied(), false);
             }
             if let Some(found) = &child.found_at {
                 let resolved_id = normalize_lexical(found);
@@ -1346,8 +1417,11 @@ pub fn collect_entries_with_prev(
     // reaches a parent, the parent already reflects its own subtree.
     // Unloaded/NotFound/Failed rows are never overridden.
     {
-        let index: HashMap<u64, usize> =
-            entries.iter().enumerate().map(|(i, e)| (e.key, i)).collect();
+        let index: HashMap<u64, usize> = entries
+            .iter()
+            .enumerate()
+            .map(|(i, e)| (e.key, i))
+            .collect();
         for rev in (0..entries.len()).rev() {
             if entries[rev].status != RefStatus::Stale {
                 continue;
@@ -1373,6 +1447,7 @@ enum RefTarget {
     DwgXref { handle: Handle, name: String },
     Image { handle: Handle, name: String },
     Pdf { handle: Handle, name: String },
+    PointCloud { handle: Handle, name: String },
 }
 
 fn find_target(doc: &CadDocument, key: u64) -> Option<RefTarget> {
@@ -1392,6 +1467,14 @@ fn find_target(doc: &CadDocument, key: u64) -> Option<RefTarget> {
                     handle: *handle,
                     name: def.file_name.clone(),
                 });
+            }
+            ObjectType::ClassObject(object) if handle.value() == key => {
+                if let codec::objects::ClassObjectData::PointCloudDefinitionEx(def) = &object.data {
+                    return Some(RefTarget::PointCloud {
+                        handle: *handle,
+                        name: def.source_filename.clone(),
+                    });
+                }
             }
             ObjectType::UnderlayDefinition(def) if handle.value() == key => {
                 return Some(RefTarget::Pdf {
@@ -1442,9 +1525,7 @@ pub fn unload_reference(doc: &mut CadDocument, key: u64) -> Result<String, Strin
                     .objects
                     .iter()
                     .filter_map(|(h, o)| match o {
-                        ObjectType::SortEntitiesTable(t)
-                            if t.block_owner_handle == handle =>
-                        {
+                        ObjectType::SortEntitiesTable(t) if t.block_owner_handle == handle => {
                             Some(*h)
                         }
                         _ => None,
@@ -1465,6 +1546,20 @@ pub fn unload_reference(doc: &mut CadDocument, key: u64) -> Result<String, Strin
                 def.unloaded = true;
             }
             Ok(name)
+        }
+        // So does a point cloud (its definition's loaded flag).
+        RefTarget::PointCloud { handle, name } => {
+            set_point_cloud_loaded(doc, handle, false);
+            Ok(name)
+        }
+    }
+}
+
+/// A point cloud definition's loaded flag (Unload / Reload).
+pub fn set_point_cloud_loaded(doc: &mut CadDocument, handle: Handle, loaded: bool) {
+    if let Some(codec::objects::ObjectType::ClassObject(object)) = doc.objects.get_mut(&handle) {
+        if let codec::objects::ClassObjectData::PointCloudDefinitionEx(def) = &mut object.data {
+            def.is_loaded = loaded;
         }
     }
 }
@@ -1489,9 +1584,7 @@ pub fn detach_reference(doc: &mut CadDocument, key: u64) -> Result<String, Strin
             let inserts: Vec<Handle> = doc
                 .entities()
                 .filter_map(|e| match e {
-                    EntityType::Insert(ins)
-                        if ins.block_name.eq_ignore_ascii_case(&name) =>
-                    {
+                    EntityType::Insert(ins) if ins.block_name.eq_ignore_ascii_case(&name) => {
                         Some(e.common().handle)
                     }
                     _ => None,
@@ -1518,9 +1611,7 @@ pub fn detach_reference(doc: &mut CadDocument, key: u64) -> Result<String, Strin
                     .objects
                     .iter()
                     .filter_map(|(h, o)| match o {
-                        ObjectType::SortEntitiesTable(t)
-                            if t.block_owner_handle == handle =>
-                        {
+                        ObjectType::SortEntitiesTable(t) if t.block_owner_handle == handle => {
                             Some(*h)
                         }
                         _ => None,
@@ -1537,9 +1628,7 @@ pub fn detach_reference(doc: &mut CadDocument, key: u64) -> Result<String, Strin
             let refs: Vec<Handle> = doc
                 .entities()
                 .filter_map(|e| match e {
-                    EntityType::RasterImage(img)
-                        if img.definition_handle == Some(handle) =>
-                    {
+                    EntityType::RasterImage(img) if img.definition_handle == Some(handle) => {
                         Some(e.common().handle)
                     }
                     _ => None,
@@ -1563,6 +1652,36 @@ pub fn detach_reference(doc: &mut CadDocument, key: u64) -> Result<String, Strin
                 .collect();
             for h in refs {
                 doc.remove_entity(h);
+            }
+            doc.objects.remove(&handle);
+            Ok(name)
+        }
+        // The clouds, their reactors, the definition and its dictionary
+        // entry.
+        RefTarget::PointCloud { handle, name } => {
+            use codec::entities::ExtendedEntityData;
+            let clouds: Vec<(Handle, Handle)> = doc
+                .entities()
+                .filter_map(|e| match e {
+                    EntityType::Extended(extended) => match &extended.data {
+                        ExtendedEntityData::PointCloudEx(data)
+                            if data.definition_handle == handle =>
+                        {
+                            Some((e.common().handle, data.reactor_handle))
+                        }
+                        _ => None,
+                    },
+                    _ => None,
+                })
+                .collect();
+            for (cloud, reactor) in clouds {
+                doc.remove_entity(cloud);
+                doc.objects.remove(&reactor);
+            }
+            for object in doc.objects.values_mut() {
+                if let codec::objects::ObjectType::Dictionary(dictionary) = object {
+                    dictionary.entries.retain(|(_, h)| *h != handle);
+                }
             }
             doc.objects.remove(&handle);
             Ok(name)
@@ -1609,12 +1728,18 @@ pub fn bind_reference(
         RefTarget::DwgXref { handle, name } => bind_dwg(doc, handle, &name, base_dir, host_dir),
         RefTarget::Image { handle, name } => {
             collect_bind_images(doc, &name, base_dir, host_dir, Some(handle))?;
-            Ok(BindOutcome { name, unremapped: 0 })
+            Ok(BindOutcome {
+                name,
+                unremapped: 0,
+            })
         }
         RefTarget::Pdf { .. } => Err(crate::t!(
             "XREF: PDF bind (vector import) is not available in this version."
         )
         .to_string()),
+        RefTarget::PointCloud { .. } => {
+            Err(crate::t!("XREF: bind applies to drawing references only.").to_string())
+        }
     }
 }
 
@@ -1684,14 +1809,14 @@ fn load_bind_source(ref_name: &str, found: &Path) -> Result<CadDocument, String>
 fn check_no_pdf_underlays(source: &CadDocument) -> Result<(), String> {
     use codec::entities::UnderlayType;
     use codec::objects::ObjectType;
-    let has_pdf = source.objects.values().any(|o| {
-        matches!(o, ObjectType::UnderlayDefinition(d) if d.underlay_type == UnderlayType::Pdf)
-    });
+    let has_pdf = source.objects.values().any(
+        |o| matches!(o, ObjectType::UnderlayDefinition(d) if d.underlay_type == UnderlayType::Pdf),
+    );
     if has_pdf {
-        return Err(crate::t!(
-            "XREF: PDF bind (vector import) is not available in this version."
-        )
-        .to_string());
+        return Err(
+            crate::t!("XREF: PDF bind (vector import) is not available in this version.")
+                .to_string(),
+        );
     }
     Ok(())
 }
@@ -1718,8 +1843,7 @@ fn bind_nested_closure(
         let Some(child_found) = resolve_path(&child_saved, source_dir) else {
             return Err(bind_failed(&child_name, "file not found"));
         };
-        let norm =
-            crate::io::xref_model::normalize_lexical(&child_found.to_string_lossy());
+        let norm = crate::io::xref_model::normalize_lexical(&child_found.to_string_lossy());
         if stack.contains(&norm) {
             continue;
         }
@@ -1799,9 +1923,7 @@ fn collect_bind_images(
         .objects
         .iter()
         .filter_map(|(h, o)| match o {
-            ObjectType::ImageDefinition(d)
-                if only.is_none_or(|want| want == *h) =>
-            {
+            ObjectType::ImageDefinition(d) if only.is_none_or(|want| want == *h) => {
                 Some((*h, d.file_name.clone()))
             }
             _ => None,
@@ -1885,14 +2007,20 @@ fn same_file(a: &Path, b: &Path) -> bool {
     }
 }
 
+/// Marks a point cloud definition (by handle) among the references made
+/// relative on the drawing's first save.
+pub const POINT_CLOUD_KEY: &str = "pointcloud:";
+
 /// Make the named references' paths relative to `host` (their drawing's
 /// first save); a reference that cannot be relative keeps its full path.
-pub fn make_relative(
-    doc: &mut CadDocument,
-    names: &rustc_hash::FxHashSet<String>,
-    host: &Path,
-) {
+pub fn make_relative(doc: &mut CadDocument, names: &rustc_hash::FxHashSet<String>, host: &Path) {
     for name in names {
+        if let Some(handle) = name.strip_prefix(POINT_CLOUD_KEY) {
+            if let Ok(handle) = u64::from_str_radix(handle, 16) {
+                relative_point_cloud_path(doc, Handle::new(handle), host);
+            }
+            continue;
+        }
         let Some(key) = doc.block_records.get(name).map(|br| br.handle.value()) else {
             continue;
         };
@@ -2095,10 +2223,7 @@ fn restore_dependent_layers(
         .map(|s| s.to_string())
         .collect();
     for n in targets {
-        let (Some(cur), Some(old)) = (
-            doc.layers.get_mut(&n),
-            kept.get(&n.to_uppercase()),
-        ) else {
+        let (Some(cur), Some(old)) = (doc.layers.get_mut(&n), kept.get(&n.to_uppercase())) else {
             continue;
         };
         cur.flags = old.flags.clone();
@@ -2114,11 +2239,7 @@ fn restore_dependent_layers(
 }
 
 /// Store `new_raw` verbatim on the definition (no synthesis).
-pub fn set_ref_path(
-    doc: &mut CadDocument,
-    key: u64,
-    new_raw: &str,
-) -> Result<String, String> {
+pub fn set_ref_path(doc: &mut CadDocument, key: u64, new_raw: &str) -> Result<String, String> {
     let Some(target) = find_target(doc, key) else {
         return Err(crate::t!("XREF: no loaded reference with that key.").to_string());
     };
@@ -2147,6 +2268,19 @@ pub fn set_ref_path(
                     def.file_path = new_raw.to_string();
                     Ok(name)
                 }
+                _ => Err(crate::t!("XREF: no loaded reference with that key.").to_string()),
+            }
+        }
+        RefTarget::PointCloud { handle, name } => {
+            use codec::objects::{ClassObjectData, ObjectType};
+            match doc.objects.get_mut(&handle) {
+                Some(ObjectType::ClassObject(object)) => match &mut object.data {
+                    ClassObjectData::PointCloudDefinitionEx(def) => {
+                        def.source_filename = new_raw.to_string();
+                        Ok(name)
+                    }
+                    _ => Err(crate::t!("XREF: no loaded reference with that key.").to_string()),
+                },
                 _ => Err(crate::t!("XREF: no loaded reference with that key.").to_string()),
             }
         }
@@ -2181,6 +2315,7 @@ pub fn apply_pathtype(
                 _ => String::new(),
             }
         }
+        Some(RefTarget::PointCloud { name, .. }) => name,
         None => return Err(crate::t!("XREF: no loaded reference with that key.").to_string()),
     };
     // A stored relative path first has to be resolved against its current host
@@ -2208,9 +2343,10 @@ pub fn apply_pathtype(
         Err(crate::io::xref_model::PathtypeError::AcrossDrives) => {
             Err(crate::t!("XREF: cannot make path relative across drives.").to_string())
         }
-        Err(crate::io::xref_model::PathtypeError::UnsavedHost) => Err(
-            crate::t!("XREF  Save the drawing first to resolve relative XREF paths.").to_string(),
-        ),
+        Err(crate::io::xref_model::PathtypeError::UnsavedHost) => Err(crate::t!(
+            "XREF  Save the drawing first to resolve relative XREF paths."
+        )
+        .to_string()),
     }
 }
 
@@ -2309,7 +2445,7 @@ pub fn set_ref_type(
             }
             Err(crate::t!("XREF: no loaded reference with that key.").to_string())
         }
-        RefTarget::Image { .. } | RefTarget::Pdf { .. } => {
+        RefTarget::Image { .. } | RefTarget::Pdf { .. } | RefTarget::PointCloud { .. } => {
             Err(crate::t!("XREF: overlays apply to drawing references only.").to_string())
         }
     }
@@ -2388,9 +2524,9 @@ mod tests {
     use super::collect_entries_with_prev;
     use super::HashSet;
     use super::{
-        apply_pathtype, child_key, detach_reference, replace_path_prefix,
-        resolve_xrefs_for_keys, restore_dependent_layers, set_ref_path,
-        set_ref_type, snapshot_dependent_layers, unload_reference,
+        apply_pathtype, child_key, detach_reference, replace_path_prefix, resolve_xrefs_for_keys,
+        restore_dependent_layers, set_ref_path, set_ref_type, snapshot_dependent_layers,
+        unload_reference,
     };
     use crate::io::xref_model::{Pathtype, RefKind, RefStatus, RefType};
 
@@ -2473,26 +2609,21 @@ mod tests {
         use std::time::UNIX_EPOCH;
         let dir = xref_tmpdir("staleprop");
         let (mid_path, inner_path) = write_nested_fixture(&dir);
-        let (doc, mid_key) = xref_doc_with(
-            "MID",
-            &mid_path.to_string_lossy(),
-        );
-        let inner_key = child_key(
-            mid_key,
-            "INNER",
-            &inner_path.to_string_lossy(),
-        );
+        let (doc, mid_key) = xref_doc_with("MID", &mid_path.to_string_lossy());
+        let inner_key = child_key(mid_key, "INNER", &inner_path.to_string_lossy());
         let mut prev = std::collections::HashMap::new();
         prev.insert(inner_key, UNIX_EPOCH);
-        let entries = collect_entries_with_prev(
-            &doc,
-            &dir,
-            &std::collections::HashSet::new(),
-            &prev,
-        );
-        let inner = entries.iter().find(|e| e.key == inner_key).expect("nested INNER listed");
+        let entries =
+            collect_entries_with_prev(&doc, &dir, &std::collections::HashSet::new(), &prev);
+        let inner = entries
+            .iter()
+            .find(|e| e.key == inner_key)
+            .expect("nested INNER listed");
         assert_eq!(inner.status, RefStatus::Stale);
-        let mid = entries.iter().find(|e| e.key == mid_key).expect("MID listed");
+        let mid = entries
+            .iter()
+            .find(|e| e.key == mid_key)
+            .expect("MID listed");
         assert_eq!(mid.status, RefStatus::Stale, "parent reflects stale child");
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -2507,49 +2638,61 @@ mod tests {
         let dir = xref_tmpdir("e2e");
         let (mid_path, _) = write_nested_fixture(&dir);
         std::fs::write(dir.join("img.png"), b"fake-png").unwrap();
-        let (mut doc, mid_key) =
-            xref_doc_with("MID", &mid_path.to_string_lossy());
+        let (mut doc, mid_key) = xref_doc_with("MID", &mid_path.to_string_lossy());
         // Referenced image → Loaded entry.
         let img_h = doc.allocate_handle();
         let mut img_def = ImageDefinition::with_dimensions("img.png", 8, 8);
         img_def.handle = img_h;
-        doc.objects.insert(img_h, ObjectType::ImageDefinition(img_def));
-        let mut img = codec::entities::RasterImage::new(
-            "img.png",
-            codec::types::Vector3::ZERO,
-            8.0,
-            8.0,
-        );
+        doc.objects
+            .insert(img_h, ObjectType::ImageDefinition(img_def));
+        let mut img =
+            codec::entities::RasterImage::new("img.png", codec::types::Vector3::ZERO, 8.0, 8.0);
         img.definition_handle = Some(img_h);
         doc.add_entity(codec::EntityType::RasterImage(img)).unwrap();
         // Unreferenced PDF definition → listed, never merged.
         let pdf_h = doc.allocate_handle();
         let mut pdf_def = UnderlayDefinition::pdf("doc.pdf", "1");
         pdf_def.handle = pdf_h;
-        doc.objects.insert(pdf_h, ObjectType::UnderlayDefinition(pdf_def));
+        doc.objects
+            .insert(pdf_h, ObjectType::UnderlayDefinition(pdf_def));
 
         let empty = std::collections::HashSet::new();
         let no_prev = std::collections::HashMap::new();
         // 1. List: everything visible with the right statuses.
         let listed = collect_entries_with_prev(&doc, &dir, &empty, &no_prev);
-        assert!(listed.iter().any(|e| e.name == "MID" && e.status == RefStatus::Loaded));
-        assert!(listed.iter().any(|e| e.name == "INNER" && e.parent_key.is_some()));
-        assert!(listed.iter().any(|e| e.name == "img.png" && e.status == RefStatus::Loaded));
-        assert!(listed.iter().any(|e| e.name == "doc.pdf" && e.status == RefStatus::Unreferenced));
+        assert!(listed
+            .iter()
+            .any(|e| e.name == "MID" && e.status == RefStatus::Loaded));
+        assert!(listed
+            .iter()
+            .any(|e| e.name == "INNER" && e.parent_key.is_some()));
+        assert!(listed
+            .iter()
+            .any(|e| e.name == "img.png" && e.status == RefStatus::Loaded));
+        assert!(listed
+            .iter()
+            .any(|e| e.name == "doc.pdf" && e.status == RefStatus::Unreferenced));
         // 2. Unload: definition retained, content marked.
         unload_reference(&mut doc, mid_key).expect("unload");
         let mut unloaded = std::collections::HashSet::new();
         unloaded.insert(crate::io::xref_model::UnloadKey::Direct(mid_key));
         let listed = collect_entries_with_prev(&doc, &dir, &unloaded, &no_prev);
-        assert!(listed.iter().any(|e| e.name == "MID" && e.status == RefStatus::Unloaded));
-        assert!(doc.block_records.get("MID").is_some(), "definition retained");
+        assert!(listed
+            .iter()
+            .any(|e| e.name == "MID" && e.status == RefStatus::Unloaded));
+        assert!(
+            doc.block_records.get("MID").is_some(),
+            "definition retained"
+        );
         // 3. Targeted reload: back to Loaded.
         let mut handles = HashSet::default();
         handles.insert(doc.block_records.get("MID").unwrap().handle);
         let (infos, _) = resolve_xrefs_for_keys(&mut doc, &dir, &handles);
         assert!(infos.iter().any(|i| i.name == "MID"));
         let listed = collect_entries_with_prev(&doc, &dir, &empty, &no_prev);
-        assert!(listed.iter().any(|e| e.name == "MID" && e.status == RefStatus::Loaded));
+        assert!(listed
+            .iter()
+            .any(|e| e.name == "MID" && e.status == RefStatus::Loaded));
         // 4. Detach: instances, definition, and nested rows all gone.
         detach_reference(&mut doc, mid_key).expect("detach");
         let listed = collect_entries_with_prev(&doc, &dir, &empty, &no_prev);
@@ -2625,7 +2768,10 @@ mod tests {
         line.common.handle = codec::types::Handle::NULL;
         line.common.owner_handle = br_h;
         doc.add_entity(codec::EntityType::Line(line)).unwrap();
-        assert_eq!(doc.block_records.get("PLAN").unwrap().entity_handles.len(), 1);
+        assert_eq!(
+            doc.block_records.get("PLAN").unwrap().entity_handles.len(),
+            1
+        );
         unload_reference(&mut doc, key).expect("unload");
         assert!(doc.block_records.get("PLAN").is_some());
         let owned: Vec<_> = doc
@@ -2663,7 +2809,8 @@ mod tests {
         assert!(kept.contains_key("PLAN|WALLS"));
         // Simulate the purge + file-default re-merge.
         doc.layers.remove("PLAN|WALLS");
-        doc.layers.add_or_replace(codec::tables::Layer::new("PLAN|WALLS"));
+        doc.layers
+            .add_or_replace(codec::tables::Layer::new("PLAN|WALLS"));
         assert!(!doc.layers.get("PLAN|WALLS").unwrap().flags.off);
         restore_dependent_layers(&mut doc, "PLAN", kept);
         let back = doc.layers.get("PLAN|WALLS").unwrap();
@@ -2732,10 +2879,7 @@ mod tests {
         let (mut doc, _) = xref_doc_with("PLAN", "aé/x.dwg");
         let n = replace_path_prefix(&mut doc, "a/", "q/");
         assert_eq!(n, 0);
-        assert_eq!(
-            doc.block_records.get("PLAN").unwrap().xref_path,
-            "aé/x.dwg"
-        );
+        assert_eq!(doc.block_records.get("PLAN").unwrap().xref_path, "aé/x.dwg");
         let (mut doc2, _) = xref_doc_with("PLAN", "répértoire/old/plan.dwg");
         let n2 = replace_path_prefix(&mut doc2, "répértoire/old", "répértoire/new");
         assert_eq!(n2, 1);
@@ -2878,7 +3022,10 @@ mod tests {
             assert_eq!(outcome.name, "PLAN");
             assert!(host.layers.get("PLAN$0$DETAIL$0$WALLS").is_some());
             assert!(host.layers.get("PLAN$0$PLANLAYER").is_some());
-            let child = host.block_records.get("PLAN$0$DETAIL").expect("bound child block");
+            let child = host
+                .block_records
+                .get("PLAN$0$DETAIL")
+                .expect("bound child block");
             assert!(!child.flags.is_xref && !child.flags.is_xref_overlay);
             assert!(!host
                 .block_records
@@ -2901,10 +3048,7 @@ mod tests {
                 inner.common.layer = "WALLS".to_string();
                 inner.common.owner_handle = door_h;
                 doc.add_entity(codec::EntityType::Line(inner)).unwrap();
-                let ins = codec::entities::Insert::new(
-                    "DOOR",
-                    codec::types::Vector3::ZERO,
-                );
+                let ins = codec::entities::Insert::new("DOOR", codec::types::Vector3::ZERO);
                 doc.add_entity(codec::EntityType::Insert(ins)).unwrap();
                 // Hatch (pattern names have no table — preserved verbatim).
                 let mut hatch = codec::entities::Hatch::new();
@@ -2940,8 +3084,7 @@ mod tests {
             let hatches: Vec<_> = host
                 .entities()
                 .filter(|e| {
-                    e.common().owner_handle == br.handle
-                        && matches!(e, codec::EntityType::Hatch(_))
+                    e.common().owner_handle == br.handle && matches!(e, codec::EntityType::Hatch(_))
                 })
                 .collect();
             assert_eq!(hatches.len(), 1);
@@ -2995,8 +3138,7 @@ mod tests {
             let lines: Vec<_> = host
                 .entities()
                 .filter(|e| {
-                    e.common().owner_handle == br.handle
-                        && matches!(e, codec::EntityType::Line(_))
+                    e.common().owner_handle == br.handle && matches!(e, codec::EntityType::Line(_))
                 })
                 .collect();
             assert_eq!(lines.len(), 1);
@@ -3087,9 +3229,13 @@ mod tests {
             let mut def = UnderlayDefinition::pdf("doc.pdf", "1");
             def.handle = h;
             host.objects.insert(h, ObjectType::UnderlayDefinition(def));
-            let err =
-                bind_reference(&mut host, h.value(), std::path::Path::new("."), std::path::Path::new("."))
-                    .unwrap_err();
+            let err = bind_reference(
+                &mut host,
+                h.value(),
+                std::path::Path::new("."),
+                std::path::Path::new("."),
+            )
+            .unwrap_err();
             assert_eq!(
                 err,
                 "XREF: PDF bind (vector import) is not available in this version."
@@ -3108,5 +3254,28 @@ mod tests {
             .unwrap_err();
             assert_eq!(err, "XREF: no loaded reference with that key.");
         }
+    }
+}
+
+/// A point cloud definition's full path made relative to the drawing
+/// (".\rcs\scan.rcs", as the reference writes it); on another drive it
+/// stays full.
+fn relative_point_cloud_path(doc: &mut CadDocument, handle: Handle, host: &Path) {
+    use crate::io::xref_model::{to_pathtype_result, Pathtype};
+    let Some(codec::objects::ObjectType::ClassObject(object)) = doc.objects.get_mut(&handle) else {
+        return;
+    };
+    let codec::objects::ClassObjectData::PointCloudDefinitionEx(def) = &mut object.data else {
+        return;
+    };
+    if let Ok(relative) = to_pathtype_result(&def.source_filename, host, Pathtype::Relative) {
+        let relative = relative.replace('/', "\\");
+        if let Some(found) = std::path::Path::new(&def.source_filename)
+            .is_file()
+            .then(|| def.source_filename.clone())
+        {
+            crate::scene::model::point_cloud::register_source(&relative, found.into());
+        }
+        def.source_filename = relative;
     }
 }

@@ -76,8 +76,7 @@ fn walk(doc: &CadDocument, h: Handle, out: &mut Vec<DgnSymbol>, seen: &mut HashS
 /// and gaps negative. Empty when the component has no usable stroke lengths.
 fn stroke_dashes(doc: &CadDocument, h: Handle) -> Vec<f64> {
     use codec::objects::{DgnLineStyleData, DgnLsComponentData, ObjectType};
-    let Some(ObjectType::DgnLineStyle(style)) = doc.objects.get(&h)
-    else {
+    let Some(ObjectType::DgnLineStyle(style)) = doc.objects.get(&h) else {
         return Vec::new();
     };
     let DgnLineStyleData::Component {
@@ -92,8 +91,11 @@ fn stroke_dashes(doc: &CadDocument, h: Handle) -> Vec<f64> {
         .iter()
         .filter_map(|stroke| {
             let length = stroke.length.abs();
-            (length.is_finite() && length > 0.0)
-                .then_some(if stroke.is_dash { length } else { -length })
+            (length.is_finite() && length > 0.0).then_some(if stroke.is_dash {
+                length
+            } else {
+                -length
+            })
         })
         .collect()
 }

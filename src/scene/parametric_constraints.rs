@@ -16,8 +16,8 @@ use std::sync::Arc;
 /// ordered per-entity-type point list when non-negative (0/1 = a line's
 /// start/end, ...), or names a special case when negative (-3 = a
 /// circle/arc's center; -2 = a bounded curve's midpoint). Polyline segment
-    /// segment-midpoint, and curved-segment-center references use private
-    /// negative ranges so they stay distinct from vertex markers.
+/// segment-midpoint, and curved-segment-center references use private
+/// negative ranges so they stay distinct from vertex markers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ParametricRef {
     pub entity: Handle,
@@ -159,9 +159,10 @@ pub(crate) fn directional_axis_endpoints(
                 text.horizontal_alignment,
                 Alignment::Aligned | Alignment::Fit
             ) {
-                if let Some(end) = text.alignment_point.filter(|end| {
-                    (*end - text.insertion_point).length_squared() > 1.0e-18
-                }) {
+                if let Some(end) = text
+                    .alignment_point
+                    .filter(|end| (*end - text.insertion_point).length_squared() > 1.0e-18)
+                {
                     return Some([text.insertion_point, end]);
                 }
             }
@@ -340,8 +341,7 @@ pub(crate) fn equal_size_follower(
                 if !set_polyline_vertex(&mut entity, index as usize + 1, x, y) {
                     return None;
                 }
-            } else if let (codec::EntityType::Line(line), None) = (&mut entity, follower.marker)
-            {
+            } else if let (codec::EntityType::Line(line), None) = (&mut entity, follower.marker) {
                 line.end.x = x;
                 line.end.y = y;
             } else {
@@ -591,7 +591,11 @@ pub(crate) fn two_lines_placement(
     let pick = f0 + f_dir * (first_pick - f0).dot(f_dir);
     let offset = pick - s0;
     let distance = (s_dir.x * offset.y - s_dir.y * offset.x).abs();
-    let heading = if s_dir.dot(f_dir) >= 0.0 { f_dir } else { -f_dir };
+    let heading = if s_dir.dot(f_dir) >= 0.0 {
+        f_dir
+    } else {
+        -f_dir
+    };
     let turned = (s0 - f0).dot(normal);
     let target = if turned.abs() <= 1.0e-9 {
         -distance
@@ -754,9 +758,7 @@ fn dynamic_dimension_follow_radial(
     let (rebuilt, leader) = match &*dimension {
         Dimension::Radius(d) => {
             let direction = to_dvec(d.definition_point) - to_dvec(d.angle_vertex);
-            let direction = direction
-                .try_normalize()
-                .unwrap_or(glam::DVec3::X);
+            let direction = direction.try_normalize().unwrap_or(glam::DVec3::X);
             (
                 crate::modules::annotate::radius_dim::radius_constraint_entity(
                     center,
@@ -769,9 +771,7 @@ fn dynamic_dimension_follow_radial(
         }
         Dimension::Diameter(d) => {
             let direction = to_dvec(d.angle_vertex) - to_dvec(d.definition_point);
-            let direction = direction
-                .try_normalize()
-                .unwrap_or(glam::DVec3::X);
+            let direction = direction.try_normalize().unwrap_or(glam::DVec3::X);
             (
                 crate::modules::annotate::diameter_dim::diameter_constraint_entity(
                     center,
@@ -980,7 +980,10 @@ pub(crate) fn grip_solve_anchor_refs(
         }
         codec::EntityType::LwPolyline(polyline) => {
             let segment = grip_id - polyline.vertices.len();
-            if polyline.vertices.get(segment).is_some_and(|vertex| vertex.bulge.abs() < 1e-9)
+            if polyline
+                .vertices
+                .get(segment)
+                .is_some_and(|vertex| vertex.bulge.abs() < 1e-9)
                 && (segment + 1 < polyline.vertices.len() || polyline.is_closed)
             {
                 vec![ParametricRef::segment(handle, segment)]
@@ -1212,10 +1215,7 @@ pub struct ParametricConstraintSet {
     /// Also a derived cache, not
     /// persisted; a `ConflictResolverPanel` reads this rather than calling
     /// `kernel_constraints::diagnosis::classify_redundant` itself.
-    pub conflicts: Vec<(
-        ConstraintId,
-        kernel_constraints::diagnosis::RedundancyKind,
-    )>,
+    pub conflicts: Vec<(ConstraintId, kernel_constraints::diagnosis::RedundancyKind)>,
 }
 
 impl ParametricConstraintSet {
@@ -1440,7 +1440,11 @@ pub(crate) fn polyline_vertex_index(entity: &codec::EntityType, marker: usize) -
         codec::EntityType::Polyline2D(polyline) => (polyline.vertices.len(), polyline.is_closed()),
         _ => return None,
     };
-    Some(if closed && marker == count && count > 0 { 0 } else { marker })
+    Some(if closed && marker == count && count > 0 {
+        0
+    } else {
+        marker
+    })
 }
 
 /// Below this squared distance (1e-6 world units), two points count as
@@ -1449,9 +1453,7 @@ const COINCIDENT_EPSILON_SQ: f64 = 1.0e-12;
 
 /// Addressable constraint points for one entity, in the same marker space
 /// used by persistent constraint references.
-pub(crate) fn parametric_point_candidates(
-    entity: &codec::EntityType,
-) -> Vec<(i32, Vector3)> {
+pub(crate) fn parametric_point_candidates(entity: &codec::EntityType) -> Vec<(i32, Vector3)> {
     let mut points: Vec<_> = super::dimension_assoc::source_points(entity)
         .into_iter()
         .enumerate()
@@ -1490,15 +1492,20 @@ pub(crate) fn parametric_point_candidates(
         codec::EntityType::LwPolyline(_) | codec::EntityType::Polyline2D(_)
     ) {
         if let Some(planar) = crate::entities::curve::entity_curve(entity) {
-            points.extend(planar.curve.segments().into_iter().enumerate().map(
-                |(index, curve)| {
-                    let point = planar.plane.point_at(curve.point_at(0.5));
-                    (
-                        POLYLINE_SEGMENT_MIDPOINT_MARKER_BASE - index as i32,
-                        Vector3::new(point[0], point[1], point[2]),
-                    )
-                },
-            ));
+            points.extend(
+                planar
+                    .curve
+                    .segments()
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, curve)| {
+                        let point = planar.plane.point_at(curve.point_at(0.5));
+                        (
+                            POLYLINE_SEGMENT_MIDPOINT_MARKER_BASE - index as i32,
+                            Vector3::new(point[0], point[1], point[2]),
+                        )
+                    }),
+            );
         }
     }
     points
@@ -1955,7 +1962,6 @@ pub(crate) fn constraint_hover_points(
         }
     }
 
-
     if matches!(
         constraint.kind,
         ConstraintKind::Perpendicular | ConstraintKind::Tangent
@@ -2080,8 +2086,7 @@ pub(crate) fn constraint_glyph_box(
     } else {
         GLYPH_GAP
     };
-    let distance =
-        outward[0].abs() * size.width * 0.5 + outward[1].abs() * size.height * 0.5 + gap;
+    let distance = outward[0].abs() * size.width * 0.5 + outward[1].abs() * size.height * 0.5 + gap;
     let tangent = [-outward[1], outward[0]];
     (
         iced::Point::new(
@@ -2093,8 +2098,7 @@ pub(crate) fn constraint_glyph_box(
 }
 
 pub(crate) fn constraint_glyph_offsets(glyphs: &[(iced::Point, [f32; 2], &str)]) -> Vec<f32> {
-    let mut groups: rustc_hash::FxHashMap<[u32; 4], Vec<usize>> =
-        rustc_hash::FxHashMap::default();
+    let mut groups: rustc_hash::FxHashMap<[u32; 4], Vec<usize>> = rustc_hash::FxHashMap::default();
     for (index, (anchor, outward, _)) in glyphs.iter().enumerate() {
         groups
             .entry([
@@ -2136,17 +2140,13 @@ pub(crate) fn constraint_glyph_offsets(glyphs: &[(iced::Point, [f32; 2], &str)])
 /// the overlay draw/hover paths so the clickable area can never drift from
 /// what's drawn and no caller recomputes offsets.
 pub(crate) fn glyph_hit_test_entries(entries: &[GlyphEntry], p: iced::Point) -> Option<usize> {
-    entries
-        .iter()
-        .enumerate()
-        .rev()
-        .find_map(|(index, entry)| {
-            let within = p.x >= entry.top_left.x
-                && p.x <= entry.top_left.x + entry.size.width
-                && p.y >= entry.top_left.y
-                && p.y <= entry.top_left.y + entry.size.height;
-            within.then_some(index)
-        })
+    entries.iter().enumerate().rev().find_map(|(index, entry)| {
+        let within = p.x >= entry.top_left.x
+            && p.x <= entry.top_left.x + entry.size.width
+            && p.y >= entry.top_left.y
+            && p.y <= entry.top_left.y + entry.size.height;
+        within.then_some(index)
+    })
 }
 
 impl super::Scene {
@@ -2167,10 +2167,11 @@ impl super::Scene {
             let mut added = false;
             for constraint in set.constraints.iter().filter(|constraint| {
                 constraint.enabled
-                    && (include_curve_relations || matches!(
-                        constraint.kind,
-                        ConstraintKind::Coincident | ConstraintKind::PointOnCurve
-                    ))
+                    && (include_curve_relations
+                        || matches!(
+                            constraint.kind,
+                            ConstraintKind::Coincident | ConstraintKind::PointOnCurve
+                        ))
             }) {
                 if !constraint
                     .refs
@@ -2257,9 +2258,9 @@ impl super::Scene {
                 let measured = points.filter(|_| !angular).map(|(first, second)| {
                     let delta = second - first;
                     let axis = match self.document.get_entity(*dimension) {
-                        Some(codec::EntityType::Dimension(
-                            codec::entities::Dimension::Linear(linear),
-                        )) => Some((linear.rotation.cos(), linear.rotation.sin())),
+                        Some(codec::EntityType::Dimension(codec::entities::Dimension::Linear(
+                            linear,
+                        ))) => Some((linear.rotation.cos(), linear.rotation.sin())),
                         _ => None,
                     };
                     match (constraint.kind, axis) {
@@ -2323,7 +2324,8 @@ impl super::Scene {
         }
         for (name, measured) in followed {
             let source = measured_expression(measured);
-            if self.named_parameters.get(&name).map(|p| p.source.as_str()) != Some(source.as_str()) {
+            if self.named_parameters.get(&name).map(|p| p.source.as_str()) != Some(source.as_str())
+            {
                 let _ = self.named_parameters.set(&name, &source);
             }
         }
@@ -2372,9 +2374,7 @@ impl super::Scene {
         bar_mode: i16,
     ) -> bool {
         self.is_parametric_constraint_visible(scope, id)
-            && kind
-                .bar_mode_bit()
-                .is_none_or(|bit| bar_mode & bit != 0)
+            && kind.bar_mode_bit().is_none_or(|bit| bar_mode & bit != 0)
             && (self.shown_parametric_constraints.contains(&(scope, id))
                 || (display_mode & 2 != 0 && related_entity_selected))
     }
@@ -2488,10 +2488,11 @@ impl super::Scene {
     /// True for a dynamic dimension of a dimensional constraint (not an
     /// annotational one, which is an ordinary plotted dimension).
     pub(crate) fn is_dynamic_dimension(&self, handle: Handle) -> bool {
-        self.parametric_constraints
-            .iter()
-            .any(|set| set.dimensions.values().any(|dimension| *dimension == handle))
-            && !self.dimension_is_annotational(handle)
+        self.parametric_constraints.iter().any(|set| {
+            set.dimensions
+                .values()
+                .any(|dimension| *dimension == handle)
+        }) && !self.dimension_is_annotational(handle)
     }
 
     /// True when a dimensional constraint's dimension uses the annotational
@@ -2533,6 +2534,7 @@ impl super::Scene {
             }
         }
         crate::io::xref::strip_resolved_xref_content(&mut document);
+        crate::entities::field::stamp_save_dates(&mut document);
         document
     }
 
@@ -2564,15 +2566,10 @@ impl super::Scene {
                 continue;
             }
             let style_name = dimension.base().style_name.clone();
-            let style = self
-                .document
-                .dim_styles
-                .iter()
-                .find(|style| {
-                    style.name.eq_ignore_ascii_case(&style_name)
-                        || (style_name.trim().is_empty()
-                            && style.name.eq_ignore_ascii_case("Standard"))
-                });
+            let style = self.document.dim_styles.iter().find(|style| {
+                style.name.eq_ignore_ascii_case(&style_name)
+                    || (style_name.trim().is_empty() && style.name.eq_ignore_ascii_case("Standard"))
+            });
             let text_height = style
                 .map(|style| style.dimtxt)
                 .filter(|height| *height > 1e-9)
@@ -2602,8 +2599,7 @@ impl super::Scene {
             // it rather than lifted above it.
             let radial = matches!(
                 dimension,
-                codec::entities::Dimension::Radius(_)
-                    | codec::entities::Dimension::Diameter(_)
+                codec::entities::Dimension::Radius(_) | codec::entities::Dimension::Diameter(_)
             );
             let centred = !radial || ov::int(xdata, ov::DIMTAD) == Some(0);
             let sizes_set = sizes.iter().all(|(code, size)| {
@@ -2859,9 +2855,7 @@ impl super::Scene {
             crate::app::settings::AutoConstraintKind::Coincident => InferenceKind::Coincident,
             crate::app::settings::AutoConstraintKind::Collinear => InferenceKind::Collinear,
             crate::app::settings::AutoConstraintKind::Parallel => InferenceKind::Parallel,
-            crate::app::settings::AutoConstraintKind::Perpendicular => {
-                InferenceKind::Perpendicular
-            }
+            crate::app::settings::AutoConstraintKind::Perpendicular => InferenceKind::Perpendicular,
             crate::app::settings::AutoConstraintKind::Tangent => InferenceKind::Tangent,
             crate::app::settings::AutoConstraintKind::Concentric => InferenceKind::Concentric,
             crate::app::settings::AutoConstraintKind::Horizontal => InferenceKind::Horizontal,
@@ -2881,75 +2875,60 @@ impl super::Scene {
             tangent_must_share_point: settings.tangent_must_share_point,
             perpendicular_must_intersect: settings.perpendicular_must_intersect,
         };
-        let mut mapped: Vec<_> =
-            infer_constraints_with_settings(&primitives, &inference_settings)
-                .into_iter()
-                .filter(|relation| {
-                    !matches!(relation, InferredConstraint::Coincident { first, second, .. }
+        let mut mapped: Vec<_> = infer_constraints_with_settings(&primitives, &inference_settings)
+            .into_iter()
+            .filter(|relation| {
+                !matches!(relation, InferredConstraint::Coincident { first, second, .. }
                         if sources[*first].handle == sources[*second].handle)
-                })
-                .map(|relation| match relation {
-                    InferredConstraint::Coincident {
-                        first,
-                        first_endpoint,
-                        second,
-                        second_endpoint,
-                    } => (
-                        ConstraintKind::Coincident,
-                        vec![
-                            sources[first].endpoints[marker(first_endpoint)],
-                            sources[second].endpoints[marker(second_endpoint)],
-                        ],
-                    ),
-                    InferredConstraint::Collinear { first, second } => (
-                        ConstraintKind::Colinear,
-                        vec![
-                            sources[first].whole,
-                            sources[second].whole,
-                        ],
-                    ),
-                    InferredConstraint::Concentric { first, second } => (
-                        ConstraintKind::Concentric,
-                        vec![
-                            ParametricRef::center(sources[first].handle),
-                            ParametricRef::center(sources[second].handle),
-                        ],
-                    ),
-                    InferredConstraint::Parallel { first, second } => (
-                        ConstraintKind::Parallel,
-                        vec![
-                            sources[first].whole,
-                            sources[second].whole,
-                        ],
-                    ),
-                    InferredConstraint::Perpendicular { first, second } => (
-                        ConstraintKind::Perpendicular,
-                        vec![
-                            sources[first].whole,
-                            sources[second].whole,
-                        ],
-                    ),
-                    InferredConstraint::Horizontal { entity } => (
-                        ConstraintKind::Horizontal,
-                        vec![sources[entity].whole],
-                    ),
-                    InferredConstraint::Vertical { entity } => (
-                        ConstraintKind::Vertical,
-                        vec![sources[entity].whole],
-                    ),
-                    InferredConstraint::Tangent { first, second } => (
-                        ConstraintKind::Tangent,
-                        vec![
-                            sources[first].whole,
-                            sources[second].whole,
-                        ],
-                    ),
-                    InferredConstraint::Equal { first, second } => (
-                        ConstraintKind::Equal,
-                        vec![sources[first].whole, sources[second].whole],
-                    ),
-                })
-                .collect();
+            })
+            .map(|relation| match relation {
+                InferredConstraint::Coincident {
+                    first,
+                    first_endpoint,
+                    second,
+                    second_endpoint,
+                } => (
+                    ConstraintKind::Coincident,
+                    vec![
+                        sources[first].endpoints[marker(first_endpoint)],
+                        sources[second].endpoints[marker(second_endpoint)],
+                    ],
+                ),
+                InferredConstraint::Collinear { first, second } => (
+                    ConstraintKind::Colinear,
+                    vec![sources[first].whole, sources[second].whole],
+                ),
+                InferredConstraint::Concentric { first, second } => (
+                    ConstraintKind::Concentric,
+                    vec![
+                        ParametricRef::center(sources[first].handle),
+                        ParametricRef::center(sources[second].handle),
+                    ],
+                ),
+                InferredConstraint::Parallel { first, second } => (
+                    ConstraintKind::Parallel,
+                    vec![sources[first].whole, sources[second].whole],
+                ),
+                InferredConstraint::Perpendicular { first, second } => (
+                    ConstraintKind::Perpendicular,
+                    vec![sources[first].whole, sources[second].whole],
+                ),
+                InferredConstraint::Horizontal { entity } => {
+                    (ConstraintKind::Horizontal, vec![sources[entity].whole])
+                }
+                InferredConstraint::Vertical { entity } => {
+                    (ConstraintKind::Vertical, vec![sources[entity].whole])
+                }
+                InferredConstraint::Tangent { first, second } => (
+                    ConstraintKind::Tangent,
+                    vec![sources[first].whole, sources[second].whole],
+                ),
+                InferredConstraint::Equal { first, second } => (
+                    ConstraintKind::Equal,
+                    vec![sources[first].whole, sources[second].whole],
+                ),
+            })
+            .collect();
         if let Some(existing) = self.parametric_constraint_set(scope) {
             mapped.retain(|(kind, refs)| {
                 !existing.constraints.iter().any(|constraint| {
@@ -3015,8 +2994,7 @@ impl super::Scene {
                         constraint.kind == ConstraintKind::Coincident
                             && constraint.refs.len() == 2
                             && (constraint.refs == refs
-                                || (constraint.refs[0] == refs[1]
-                                    && constraint.refs[1] == refs[0]))
+                                || (constraint.refs[0] == refs[1] && constraint.refs[1] == refs[0]))
                     })
                 });
                 if !already_exists
@@ -3067,7 +3045,7 @@ impl super::Scene {
     /// `(id, anchor, outward_screen_direction, label, is_conflicting,
     /// hover_points)` for every enabled, visible constraint whose glyph
     /// projects on-screen.
-    /// `vp_size` is the full canvas size (as `SelectionState::vp_size`
+    /// `vp_size` is the full canvas size (as `SelectionView::vp_size`
     /// reports it), matching what `viewport_edit_frame`/
     /// `active_model_tile_bounds` expect. Mirrors the projection
     /// `crate::app::view` builds its own render list with. The memoised
@@ -3114,11 +3092,10 @@ impl super::Scene {
             // A dynamic dimension is its constraint's whole display.
             .filter(|c| c.enabled && !set.dimensions.contains_key(&c.id))
             .filter(|c| {
-                let selected = c
-                    .refs
-                    .iter()
-                    .any(|reference| self.selected.contains(&reference.entity)
-                        || self.preview_hidden.contains(&reference.entity));
+                let selected = c.refs.iter().any(|reference| {
+                    self.selected.contains(&reference.entity)
+                        || self.preview_hidden.contains(&reference.entity)
+                });
                 self.should_display_parametric_constraint(
                     scope,
                     c.id,
@@ -3148,10 +3125,8 @@ impl super::Scene {
                             eye,
                             bounds,
                         )?;
-                        let point = iced::Point::new(
-                            bounds.x + projected.x,
-                            bounds.y + projected.y,
-                        );
+                        let point =
+                            iced::Point::new(bounds.x + projected.x, bounds.y + projected.y);
                         (point.x.is_finite() && point.y.is_finite()).then_some(point)
                     })
                     .collect();
@@ -3163,8 +3138,7 @@ impl super::Scene {
                             if index == 2 {
                                 "S│".to_string()
                             } else if c.refs.get(index).is_some_and(|reference| {
-                                reference.marker.is_some()
-                                    && reference.segment_index().is_none()
+                                reference.marker.is_some() && reference.segment_index().is_none()
                             }) {
                                 "S•".to_string()
                             } else {
@@ -3189,17 +3163,18 @@ impl super::Scene {
                             eye,
                             bounds,
                         )?;
-                        let direction =
-                            (outward_screen - screen).normalize_or(glam::Vec2::NEG_Y);
+                        let direction = (outward_screen - screen).normalize_or(glam::Vec2::NEG_Y);
                         let point = iced::Point::new(bounds.x + screen.x, bounds.y + screen.y);
-                        point.x.is_finite().then(|| (
-                            c.id,
-                            point,
-                            direction.to_array(),
-                            label,
-                            is_conflicting,
-                            hover_points.clone(),
-                        ))
+                        point.x.is_finite().then(|| {
+                            (
+                                c.id,
+                                point,
+                                direction.to_array(),
+                                label,
+                                is_conflicting,
+                                hover_points.clone(),
+                            )
+                        })
                     })
                     .collect::<Vec<_>>()
             })
@@ -3288,7 +3263,8 @@ impl super::Scene {
         bar_mode: i16,
         p: iced::Point,
     ) -> Option<ConstraintId> {
-        let entries = self.cached_glyph_placements(scope, vp_size, show_values, display_mode, bar_mode);
+        let entries =
+            self.cached_glyph_placements(scope, vp_size, show_values, display_mode, bar_mode);
         let index = glyph_hit_test_entries(&entries, p)?;
         Some(entries[index].id)
     }
@@ -3563,9 +3539,7 @@ mod tests {
             Vector3::new(10.0, 0.0, 0.0),
         );
         line.common.handle = h(1);
-        document
-            .add_entity(codec::EntityType::Line(line))
-            .unwrap();
+        document.add_entity(codec::EntityType::Line(line)).unwrap();
         let mut circle = codec::entities::Circle::from_center_radius(Vector3::ZERO, 5.0);
         circle.common.handle = h(2);
         document
@@ -3615,7 +3589,9 @@ mod tests {
             Vector3::new(10.0, 5.0, 0.0),
         );
         tangent_line.common.handle = h(4);
-        document.add_entity(codec::EntityType::Line(tangent_line)).unwrap();
+        document
+            .add_entity(codec::EntityType::Line(tangent_line))
+            .unwrap();
         let relation = |id, kind, refs| ParametricConstraint {
             id,
             kind,
@@ -3647,13 +3623,18 @@ mod tests {
         ]);
         rectangle.common.handle = h(5);
         rectangle.is_closed = true;
-        document.add_entity(codec::EntityType::LwPolyline(rectangle)).unwrap();
+        document
+            .add_entity(codec::EntityType::LwPolyline(rectangle))
+            .unwrap();
         let parallel = glyph_placements(
             &document,
             &relation(
                 2,
                 ConstraintKind::Parallel,
-                vec![ParametricRef::segment(h(5), 0), ParametricRef::segment(h(5), 2)],
+                vec![
+                    ParametricRef::segment(h(5), 0),
+                    ParametricRef::segment(h(5), 2),
+                ],
             ),
         );
         assert_eq!(parallel.len(), 2);
@@ -3662,7 +3643,10 @@ mod tests {
         let perpendicular = relation(
             3,
             ConstraintKind::Perpendicular,
-            vec![ParametricRef::segment(h(5), 3), ParametricRef::segment(h(5), 2)],
+            vec![
+                ParametricRef::segment(h(5), 3),
+                ParametricRef::segment(h(5), 2),
+            ],
         );
         assert_eq!(
             glyph_placement(&document, &perpendicular).unwrap().0,
@@ -3686,11 +3670,18 @@ mod tests {
         assert!(scene.constraint_hover_highlights.is_empty());
         assert_eq!(scene.constraint_hover_wires.len(), 1);
         let wire = &scene.constraint_hover_wires[0];
-        let points: Vec<_> = wire.points.iter().zip(&wire.points_low).map(|(high, low)| [
-            high[0] as f64 + low[0] as f64,
-            high[1] as f64 + low[1] as f64,
-            high[2] as f64 + low[2] as f64,
-        ]).collect();
+        let points: Vec<_> = wire
+            .points
+            .iter()
+            .zip(&wire.points_low)
+            .map(|(high, low)| {
+                [
+                    high[0] as f64 + low[0] as f64,
+                    high[1] as f64 + low[1] as f64,
+                    high[2] as f64 + low[2] as f64,
+                ]
+            })
+            .collect();
         assert_eq!(points, vec![[4.0, 0.0, 0.0], [4.0, 2.0, 0.0]]);
     }
 
@@ -3801,13 +3792,11 @@ mod tests {
     fn glyph_hit_test_entries_matches_precomputed_boxes() {
         let mut scene = super::super::Scene::new();
         let scope = ParametricScope::ModelSpace;
-        let line = scene.add_entity(codec::EntityType::Line(
-            codec::entities::Line::from_points(
-                Vector3::new(-1.0, 0.0, 0.0),
-                Vector3::new(1.0, 0.0, 0.0),
-            ),
-        ));
-        scene.selection.borrow_mut().vp_size = (800.0, 600.0);
+        let line = scene.add_entity(codec::EntityType::Line(codec::entities::Line::from_points(
+            Vector3::new(-1.0, 0.0, 0.0),
+            Vector3::new(1.0, 0.0, 0.0),
+        )));
+        scene.selection.borrow_mut().view.vp_size = (800.0, 600.0);
         let id = scene.parametric_constraint_set_mut(scope).add(
             ConstraintKind::Horizontal,
             vec![ParametricRef::whole(line)],
@@ -3841,13 +3830,11 @@ mod tests {
     fn cached_glyph_placements_hit_returns_same_arc() {
         let mut scene = super::super::Scene::new();
         let scope = ParametricScope::ModelSpace;
-        let line = scene.add_entity(codec::EntityType::Line(
-            codec::entities::Line::from_points(
-                Vector3::new(-1.0, 0.0, 0.0),
-                Vector3::new(1.0, 0.0, 0.0),
-            ),
-        ));
-        scene.selection.borrow_mut().vp_size = (800.0, 600.0);
+        let line = scene.add_entity(codec::EntityType::Line(codec::entities::Line::from_points(
+            Vector3::new(-1.0, 0.0, 0.0),
+            Vector3::new(1.0, 0.0, 0.0),
+        )));
+        scene.selection.borrow_mut().view.vp_size = (800.0, 600.0);
         let id = scene.parametric_constraint_set_mut(scope).add(
             ConstraintKind::Horizontal,
             vec![ParametricRef::whole(line)],
@@ -3871,13 +3858,11 @@ mod tests {
     fn cached_glyph_placements_invalidated_by_metadata_edit() {
         let mut scene = super::super::Scene::new();
         let scope = ParametricScope::ModelSpace;
-        let line = scene.add_entity(codec::EntityType::Line(
-            codec::entities::Line::from_points(
-                Vector3::new(-1.0, 0.0, 0.0),
-                Vector3::new(1.0, 0.0, 0.0),
-            ),
-        ));
-        scene.selection.borrow_mut().vp_size = (800.0, 600.0);
+        let line = scene.add_entity(codec::EntityType::Line(codec::entities::Line::from_points(
+            Vector3::new(-1.0, 0.0, 0.0),
+            Vector3::new(1.0, 0.0, 0.0),
+        )));
+        scene.selection.borrow_mut().view.vp_size = (800.0, 600.0);
         let id = scene.parametric_constraint_set_mut(scope).add(
             ConstraintKind::Horizontal,
             vec![ParametricRef::whole(line)],
@@ -4062,18 +4047,14 @@ mod tests {
     #[test]
     fn automatic_inference_maps_relations_and_skips_existing_constraints() {
         let mut scene = super::super::Scene::new();
-        let first = scene.add_entity(codec::EntityType::Line(
-            codec::entities::Line::from_points(
-                Vector3::new(0.0, 0.0, 0.0),
-                Vector3::new(5.0, 0.0, 0.0),
-            ),
-        ));
-        let second = scene.add_entity(codec::EntityType::Line(
-            codec::entities::Line::from_points(
-                Vector3::new(5.0, 0.0, 0.0),
-                Vector3::new(10.0, 0.0, 0.0),
-            ),
-        ));
+        let first = scene.add_entity(codec::EntityType::Line(codec::entities::Line::from_points(
+            Vector3::new(0.0, 0.0, 0.0),
+            Vector3::new(5.0, 0.0, 0.0),
+        )));
+        let second = scene.add_entity(codec::EntityType::Line(codec::entities::Line::from_points(
+            Vector3::new(5.0, 0.0, 0.0),
+            Vector3::new(10.0, 0.0, 0.0),
+        )));
         scene
             .parametric_constraint_set_mut(ParametricScope::ModelSpace)
             .add(
@@ -4082,12 +4063,11 @@ mod tests {
                 None,
             );
 
-        let inferred =
-            scene.inferred_parametric_constraints(
-                ParametricScope::ModelSpace,
-                &[first, second],
-                &crate::app::settings::AutoConstrainSettings::default(),
-            );
+        let inferred = scene.inferred_parametric_constraints(
+            ParametricScope::ModelSpace,
+            &[first, second],
+            &crate::app::settings::AutoConstrainSettings::default(),
+        );
 
         assert!(!inferred.iter().any(|(kind, refs)| {
             *kind == ConstraintKind::Horizontal && *refs == [ParametricRef::whole(first)]
@@ -4106,12 +4086,10 @@ mod tests {
     #[test]
     fn visibility_toggles_geometric_and_dimensional_independently() {
         let mut scene = super::super::Scene::new();
-        let line = scene.add_entity(codec::EntityType::Line(
-            codec::entities::Line::from_points(
-                Vector3::new(0.0, 0.0, 0.0),
-                Vector3::new(5.0, 0.0, 0.0),
-            ),
-        ));
+        let line = scene.add_entity(codec::EntityType::Line(codec::entities::Line::from_points(
+            Vector3::new(0.0, 0.0, 0.0),
+            Vector3::new(5.0, 0.0, 0.0),
+        )));
         let set = scene.parametric_constraint_set_mut(ParametricScope::ModelSpace);
         let geometric = set.add(
             ConstraintKind::Horizontal,
@@ -4147,32 +4125,72 @@ mod tests {
             None,
         );
         assert!(!scene.should_display_parametric_constraint(
-            scope, id, ConstraintKind::Horizontal, false, 3, 4095
+            scope,
+            id,
+            ConstraintKind::Horizontal,
+            false,
+            3,
+            4095
         ));
         assert!(scene.should_display_parametric_constraint(
-            scope, id, ConstraintKind::Horizontal, true, 2, 4095
+            scope,
+            id,
+            ConstraintKind::Horizontal,
+            true,
+            2,
+            4095
         ));
         assert!(!scene.should_display_parametric_constraint(
-            scope, id, ConstraintKind::Horizontal, true, 1, 4095
+            scope,
+            id,
+            ConstraintKind::Horizontal,
+            true,
+            1,
+            4095
         ));
         scene.note_parametric_constraint_applied(scope, id, 1);
         assert!(scene.should_display_parametric_constraint(
-            scope, id, ConstraintKind::Horizontal, false, 0, 4095
+            scope,
+            id,
+            ConstraintKind::Horizontal,
+            false,
+            0,
+            4095
         ));
         scene.set_parametric_constraint_visibility(scope, None, false, false);
         assert!(!scene.should_display_parametric_constraint(
-            scope, id, ConstraintKind::Horizontal, true, 3, 4095
+            scope,
+            id,
+            ConstraintKind::Horizontal,
+            true,
+            3,
+            4095
         ));
         scene.set_parametric_constraint_visibility(scope, None, false, true);
         assert!(scene.should_display_parametric_constraint(
-            scope, id, ConstraintKind::Horizontal, false, 0, 4095
+            scope,
+            id,
+            ConstraintKind::Horizontal,
+            false,
+            0,
+            4095
         ));
         scene.note_parametric_constraint_applied(scope, id, 0);
         assert!(!scene.should_display_parametric_constraint(
-            scope, id, ConstraintKind::Horizontal, false, 3, 4095
+            scope,
+            id,
+            ConstraintKind::Horizontal,
+            false,
+            3,
+            4095
         ));
         assert!(scene.should_display_parametric_constraint(
-            scope, id, ConstraintKind::Horizontal, true, 2, 4095
+            scope,
+            id,
+            ConstraintKind::Horizontal,
+            true,
+            2,
+            4095
         ));
     }
 
@@ -4188,7 +4206,12 @@ mod tests {
         scene.hidden_parametric_constraints.insert((scope, id));
 
         assert!(!scene.should_display_parametric_constraint(
-            scope, id, ConstraintKind::Horizontal, true, 2, 4095
+            scope,
+            id,
+            ConstraintKind::Horizontal,
+            true,
+            2,
+            4095
         ));
     }
 
@@ -4198,10 +4221,7 @@ mod tests {
         let mut polyline = codec::entities::LwPolyline::new();
         polyline.common.handle = h(1);
         polyline.vertices = vec![
-            codec::entities::LwVertex::with_bulge(
-                codec::types::Vector2::new(0.0, 0.0),
-                1.0,
-            ),
+            codec::entities::LwVertex::with_bulge(codec::types::Vector2::new(0.0, 0.0), 1.0),
             codec::entities::LwVertex::from_coords(10.0, 0.0),
         ];
         document
@@ -4219,10 +4239,7 @@ mod tests {
         let mut scene = super::super::Scene::new();
         let mut polyline = codec::entities::LwPolyline::new();
         polyline.vertices = vec![
-            codec::entities::LwVertex::with_bulge(
-                codec::types::Vector2::new(0.0, 0.0),
-                1.0,
-            ),
+            codec::entities::LwVertex::with_bulge(codec::types::Vector2::new(0.0, 0.0), 1.0),
             codec::entities::LwVertex::from_coords(10.0, 0.0),
             codec::entities::LwVertex::from_coords(0.0, -4.0),
         ];
@@ -4319,22 +4336,53 @@ mod two_lines_placement_tests {
         let first = [p(200.0, 0.0), p(300.0, 0.0)];
         let pick = p(250.0, 0.0);
         let cases = [
-            ([p(0.0, 0.0), p(100.0, 50.0)], [p(0.0, -111.803), p(111.803, -111.803)]),
-            ([p(0.0, 40.0), p(100.0, 90.0)], [p(0.0, 147.58), p(111.803, 147.58)]),
-            ([p(100.0, 0.0), p(200.0, 50.0)], [p(100.0, -67.08), p(211.803, -67.08)]),
-            ([p(-100.0, 0.0), p(0.0, 50.0)], [p(-100.0, -156.52), p(11.803, -156.52)]),
-            ([p(0.0, 0.0), p(200.0, 100.0)], [p(0.0, -111.8), p(223.607, -111.8)]),
-            ([p(0.0, 0.0), p(79.0569, 79.0569)], [p(0.0, -176.78), p(111.803, -176.78)]),
-            ([p(0.0, 0.0), p(100.0, -50.0)], [p(0.0, -111.8), p(111.803, -111.8)]),
-            ([p(100.0, 50.0), p(0.0, 0.0)], [p(100.0, 111.8), p(-11.803, 111.8)]),
-            ([p(0.0, 20.0), p(100.0, 70.0)], [p(0.0, 129.69), p(111.803, 129.69)]),
+            (
+                [p(0.0, 0.0), p(100.0, 50.0)],
+                [p(0.0, -111.803), p(111.803, -111.803)],
+            ),
+            (
+                [p(0.0, 40.0), p(100.0, 90.0)],
+                [p(0.0, 147.58), p(111.803, 147.58)],
+            ),
+            (
+                [p(100.0, 0.0), p(200.0, 50.0)],
+                [p(100.0, -67.08), p(211.803, -67.08)],
+            ),
+            (
+                [p(-100.0, 0.0), p(0.0, 50.0)],
+                [p(-100.0, -156.52), p(11.803, -156.52)],
+            ),
+            (
+                [p(0.0, 0.0), p(200.0, 100.0)],
+                [p(0.0, -111.8), p(223.607, -111.8)],
+            ),
+            (
+                [p(0.0, 0.0), p(79.0569, 79.0569)],
+                [p(0.0, -176.78), p(111.803, -176.78)],
+            ),
+            (
+                [p(0.0, 0.0), p(100.0, -50.0)],
+                [p(0.0, -111.8), p(111.803, -111.8)],
+            ),
+            (
+                [p(100.0, 50.0), p(0.0, 0.0)],
+                [p(100.0, 111.8), p(-11.803, 111.8)],
+            ),
+            (
+                [p(0.0, 20.0), p(100.0, 70.0)],
+                [p(0.0, 129.69), p(111.803, 129.69)],
+            ),
         ];
         for (second, expected) in cases {
             let placed = two_lines_placement(first, pick, second).expect("a placement");
-            assert!(close(placed[0], expected[0]) && close(placed[1], expected[1]), "{second:?} -> {placed:?}, expected {expected:?}");
+            assert!(
+                close(placed[0], expected[0]) && close(placed[1], expected[1]),
+                "{second:?} -> {placed:?}, expected {expected:?}"
+            );
         }
         // The first line picked near its end: the distance grows with it.
-        let placed = two_lines_placement(first, p(290.0, 0.0), [p(0.0, 0.0), p(100.0, 50.0)]).unwrap();
+        let placed =
+            two_lines_placement(first, p(290.0, 0.0), [p(0.0, 0.0), p(100.0, 50.0)]).unwrap();
         assert!(close(placed[0], p(0.0, -129.69)));
         // A slanted first line: the second line's start keeps its place along it.
         let placed = two_lines_placement(
@@ -4343,6 +4391,9 @@ mod two_lines_placement_tests {
             [p(400.0, 300.0), p(500.0, 300.0)],
         )
         .unwrap();
-        assert!(close(placed[0], p(408.82, 282.36)) && close(placed[1], p(498.26, 327.08)), "{placed:?}");
+        assert!(
+            close(placed[0], p(408.82, 282.36)) && close(placed[1], p(498.26, 327.08)),
+            "{placed:?}"
+        );
     }
 }

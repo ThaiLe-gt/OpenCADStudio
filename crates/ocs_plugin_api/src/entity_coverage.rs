@@ -62,7 +62,9 @@ fn insert_scale(name: &str, value: f64) -> Result<(), String> {
 }
 
 #[cfg(feature = "host")]
-fn validate_hatch_paths(paths: &[crate::host::codec::entities::BoundaryPath]) -> Result<(), String> {
+fn validate_hatch_paths(
+    paths: &[crate::host::codec::entities::BoundaryPath],
+) -> Result<(), String> {
     use crate::host::codec::entities::BoundaryEdge;
     use crate::host::codec::types::Vector2;
     let close = |a: Vector2, b: Vector2| (a.x - b.x).hypot(a.y - b.y) <= 1e-8;
@@ -89,11 +91,19 @@ fn validate_hatch_paths(paths: &[crate::host::codec::entities::BoundaryPath]) ->
         for (ei, edge) in path.edges.iter().enumerate() {
             let pair = match edge {
                 BoundaryEdge::Line(line) => {
-                    if !line.start.x.is_finite() || !line.start.y.is_finite() || !line.end.x.is_finite() || !line.end.y.is_finite() {
-                        return Err(format!("Hatch boundary path {pi} edge {ei} line has non-finite coordinates"));
+                    if !line.start.x.is_finite()
+                        || !line.start.y.is_finite()
+                        || !line.end.x.is_finite()
+                        || !line.end.y.is_finite()
+                    {
+                        return Err(format!(
+                            "Hatch boundary path {pi} edge {ei} line has non-finite coordinates"
+                        ));
                     }
                     if (line.start.x - line.end.x).hypot(line.start.y - line.end.y) < 1e-12 {
-                        return Err(format!("Hatch boundary path {pi} edge {ei} line has zero length"));
+                        return Err(format!(
+                            "Hatch boundary path {pi} edge {ei} line has zero length"
+                        ));
                     }
                     (line.start, line.end)
                 }
@@ -105,34 +115,65 @@ fn validate_hatch_paths(paths: &[crate::host::codec::entities::BoundaryPath]) ->
                         return Err(format!("Hatch boundary path {pi} edge {ei} arc radius must be finite and positive"));
                     }
                     if !arc.start_angle.is_finite() || !arc.end_angle.is_finite() {
-                        return Err(format!("Hatch boundary path {pi} edge {ei} arc angles must be finite"));
+                        return Err(format!(
+                            "Hatch boundary path {pi} edge {ei} arc angles must be finite"
+                        ));
                     }
-                    let point = |angle: f64| Vector2::new(
-                        arc.center.x + arc.radius * angle.cos(),
-                        arc.center.y + arc.radius * angle.sin(),
-                    );
+                    let point = |angle: f64| {
+                        Vector2::new(
+                            arc.center.x + arc.radius * angle.cos(),
+                            arc.center.y + arc.radius * angle.sin(),
+                        )
+                    };
                     let (start, end) = (point(arc.start_angle), point(arc.end_angle));
-                    if arc.counter_clockwise { (start, end) } else { (end, start) }
+                    if arc.counter_clockwise {
+                        (start, end)
+                    } else {
+                        (end, start)
+                    }
                 }
                 BoundaryEdge::EllipticArc(arc) => {
                     if !arc.center.x.is_finite() || !arc.center.y.is_finite() {
                         return Err(format!("Hatch boundary path {pi} edge {ei} ellipse center has non-finite coordinates"));
                     }
-                    if !arc.major_axis_endpoint.x.is_finite() || !arc.major_axis_endpoint.y.is_finite() {
+                    if !arc.major_axis_endpoint.x.is_finite()
+                        || !arc.major_axis_endpoint.y.is_finite()
+                    {
                         return Err(format!("Hatch boundary path {pi} edge {ei} ellipse major axis has non-finite coordinates"));
                     }
                     if arc.major_axis_endpoint.x.hypot(arc.major_axis_endpoint.y) < 1e-12 {
-                        return Err(format!("Hatch boundary path {pi} edge {ei} ellipse major axis has zero length"));
+                        return Err(format!(
+                            "Hatch boundary path {pi} edge {ei} ellipse major axis has zero length"
+                        ));
                     }
-                    if !arc.minor_axis_ratio.is_finite() || !(0.0..=1.0).contains(&arc.minor_axis_ratio) || arc.minor_axis_ratio == 0.0 {
+                    if !arc.minor_axis_ratio.is_finite()
+                        || !(0.0..=1.0).contains(&arc.minor_axis_ratio)
+                        || arc.minor_axis_ratio == 0.0
+                    {
                         return Err(format!("Hatch boundary path {pi} edge {ei} ellipse ratio must be within (0, 1]"));
                     }
                     if !arc.start_angle.is_finite() || !arc.end_angle.is_finite() {
-                        return Err(format!("Hatch boundary path {pi} edge {ei} ellipse angles must be finite"));
+                        return Err(format!(
+                            "Hatch boundary path {pi} edge {ei} ellipse angles must be finite"
+                        ));
                     }
-                    let start = ellipse_point(arc.center, arc.major_axis_endpoint, arc.minor_axis_ratio, arc.start_angle);
-                    let end = ellipse_point(arc.center, arc.major_axis_endpoint, arc.minor_axis_ratio, arc.end_angle);
-                    if arc.counter_clockwise { (start, end) } else { (end, start) }
+                    let start = ellipse_point(
+                        arc.center,
+                        arc.major_axis_endpoint,
+                        arc.minor_axis_ratio,
+                        arc.start_angle,
+                    );
+                    let end = ellipse_point(
+                        arc.center,
+                        arc.major_axis_endpoint,
+                        arc.minor_axis_ratio,
+                        arc.end_angle,
+                    );
+                    if arc.counter_clockwise {
+                        (start, end)
+                    } else {
+                        (end, start)
+                    }
                 }
                 BoundaryEdge::Polyline(poly) => {
                     if poly.vertices.len() < 3 {
@@ -144,14 +185,21 @@ fn validate_hatch_paths(paths: &[crate::host::codec::entities::BoundaryPath]) ->
                         }
                     }
                     if !poly.is_closed {
-                        return Err(format!("Hatch boundary path {pi} edge {ei} polyline is open"));
+                        return Err(format!(
+                            "Hatch boundary path {pi} edge {ei} polyline is open"
+                        ));
                     }
                     let first = poly.vertices.first().unwrap();
-                    (Vector2::new(first.x, first.y), Vector2::new(first.x, first.y))
+                    (
+                        Vector2::new(first.x, first.y),
+                        Vector2::new(first.x, first.y),
+                    )
                 }
                 BoundaryEdge::Spline(spline) => {
                     if spline.degree < 1 {
-                        return Err(format!("Hatch boundary path {pi} edge {ei} spline degree must be at least 1"));
+                        return Err(format!(
+                            "Hatch boundary path {pi} edge {ei} spline degree must be at least 1"
+                        ));
                     }
                     if spline.control_points.len() < spline.degree as usize + 1 {
                         return Err(format!("Hatch boundary path {pi} edge {ei} spline has too few control points for its degree"));
@@ -171,7 +219,9 @@ fn validate_hatch_paths(paths: &[crate::host::codec::entities::BoundaryPath]) ->
                             return Err(format!("Hatch boundary path {pi} edge {ei} fit point {fi} has non-finite coordinates"));
                         }
                     }
-                    for (name, tangent) in [("start", spline.start_tangent), ("end", spline.end_tangent)] {
+                    for (name, tangent) in
+                        [("start", spline.start_tangent), ("end", spline.end_tangent)]
+                    {
                         if !tangent.x.is_finite() || !tangent.y.is_finite() {
                             return Err(format!("Hatch boundary path {pi} edge {ei} spline {name} tangent is non-finite"));
                         }
@@ -179,10 +229,16 @@ fn validate_hatch_paths(paths: &[crate::host::codec::entities::BoundaryPath]) ->
                     let points = if spline.fit_points.len() >= 2 {
                         spline.fit_points.clone()
                     } else {
-                        spline.control_points.iter().map(|p| Vector2::new(p.x, p.y)).collect()
+                        spline
+                            .control_points
+                            .iter()
+                            .map(|p| Vector2::new(p.x, p.y))
+                            .collect()
                     };
                     if points.len() < 2 {
-                        return Err(format!("Hatch boundary path {pi} edge {ei} spline has too few points"));
+                        return Err(format!(
+                            "Hatch boundary path {pi} edge {ei} spline has too few points"
+                        ));
                     }
                     (*points.first().unwrap(), *points.last().unwrap())
                 }
@@ -192,7 +248,9 @@ fn validate_hatch_paths(paths: &[crate::host::codec::entities::BoundaryPath]) ->
         for ei in 0..endpoints.len() {
             let next = (ei + 1) % endpoints.len();
             if !close(endpoints[ei].1, endpoints[next].0) {
-                return Err(format!("Hatch boundary path {pi} is not closed between edges {ei} and {next}"));
+                return Err(format!(
+                    "Hatch boundary path {pi} is not closed between edges {ei} and {next}"
+                ));
             }
         }
     }
@@ -218,14 +276,20 @@ fn validate_hatch_pattern(value: &crate::host::codec::entities::Hatch) -> Result
     }
     for (index, line) in value.pattern.lines.iter().enumerate() {
         if !line.angle.is_finite()
-            || !line.base_point.x.is_finite() || !line.base_point.y.is_finite()
-            || !line.offset.x.is_finite() || !line.offset.y.is_finite()
+            || !line.base_point.x.is_finite()
+            || !line.base_point.y.is_finite()
+            || !line.offset.x.is_finite()
+            || !line.offset.y.is_finite()
             || line.dash_lengths.iter().any(|dash| !dash.is_finite())
         {
-            return Err(format!("Hatch.pattern.lines[{index}] contains non-finite values"));
+            return Err(format!(
+                "Hatch.pattern.lines[{index}] contains non-finite values"
+            ));
         }
         if line.offset.x.hypot(line.offset.y) < 1e-12 {
-            return Err(format!("Hatch.pattern.lines[{index}].offset must be nonzero"));
+            return Err(format!(
+                "Hatch.pattern.lines[{index}].offset must be nonzero"
+            ));
         }
     }
     Ok(())
@@ -303,7 +367,11 @@ fn validate_leader(
         {
             return Err(format!(
                 "Leader.{name} must be finite and {}",
-                if name == "text_height" { "greater than zero" } else { "non-negative" }
+                if name == "text_height" {
+                    "greater than zero"
+                } else {
+                    "non-negative"
+                }
             ));
         }
     }
@@ -346,7 +414,10 @@ fn validate_mline(
         }
         for (vi, vertex) in new.vertices.iter().enumerate() {
             finite_vector(&format!("MLine.vertices[{vi}].position"), &vertex.position)?;
-            finite_vector(&format!("MLine.vertices[{vi}].direction"), &vertex.direction)?;
+            finite_vector(
+                &format!("MLine.vertices[{vi}].direction"),
+                &vertex.direction,
+            )?;
             finite_vector(&format!("MLine.vertices[{vi}].miter"), &vertex.miter)?;
             for (si, segment) in vertex.segments.iter().enumerate() {
                 if segment
@@ -369,7 +440,9 @@ fn validate_mline(
             return Err("MLine.vertices must not all coincide".into());
         }
     }
-    if new.flags.contains(crate::host::codec::entities::MLineFlags::CLOSED)
+    if new
+        .flags
+        .contains(crate::host::codec::entities::MLineFlags::CLOSED)
         && new.vertices.len() < 3
     {
         return Err("closed MLine requires at least 3 vertices".into());
@@ -398,49 +471,103 @@ fn validate_dimension(
     if base.style_name.trim().is_empty() {
         return Err("Dimension.style_name is empty".into());
     }
-    let (points, scalars, distinct): (Vec<(&str, &crate::host::codec::types::Vector3)>, Vec<(&str, f64)>, Vec<(&str, &str)>) = match new {
+    let (points, scalars, distinct): (
+        Vec<(&str, &crate::host::codec::types::Vector3)>,
+        Vec<(&str, f64)>,
+        Vec<(&str, &str)>,
+    ) = match new {
         D::Aligned(d) => (
-            vec![("definition_point", &d.definition_point), ("first_point", &d.first_point), ("second_point", &d.second_point)],
+            vec![
+                ("definition_point", &d.definition_point),
+                ("first_point", &d.first_point),
+                ("second_point", &d.second_point),
+            ],
             vec![("ext_line_rotation", d.ext_line_rotation)],
             vec![("first_point", "second_point")],
         ),
         D::Linear(d) => (
-            vec![("definition_point", &d.definition_point), ("first_point", &d.first_point), ("second_point", &d.second_point)],
-            vec![("rotation", d.rotation), ("ext_line_rotation", d.ext_line_rotation)],
+            vec![
+                ("definition_point", &d.definition_point),
+                ("first_point", &d.first_point),
+                ("second_point", &d.second_point),
+            ],
+            vec![
+                ("rotation", d.rotation),
+                ("ext_line_rotation", d.ext_line_rotation),
+            ],
             vec![("first_point", "second_point")],
         ),
         D::Radius(d) => (
-            vec![("definition_point", &d.definition_point), ("angle_vertex", &d.angle_vertex)],
+            vec![
+                ("definition_point", &d.definition_point),
+                ("angle_vertex", &d.angle_vertex),
+            ],
             vec![("leader_length", d.leader_length)],
             vec![("definition_point", "angle_vertex")],
         ),
         D::Diameter(d) => (
-            vec![("definition_point", &d.definition_point), ("angle_vertex", &d.angle_vertex)],
+            vec![
+                ("definition_point", &d.definition_point),
+                ("angle_vertex", &d.angle_vertex),
+            ],
             vec![("leader_length", d.leader_length)],
             vec![("definition_point", "angle_vertex")],
         ),
         D::Angular2Ln(d) => (
-            vec![("definition_point", &d.definition_point), ("dimension_arc", &d.dimension_arc), ("first_point", &d.first_point), ("second_point", &d.second_point), ("angle_vertex", &d.angle_vertex)],
+            vec![
+                ("definition_point", &d.definition_point),
+                ("dimension_arc", &d.dimension_arc),
+                ("first_point", &d.first_point),
+                ("second_point", &d.second_point),
+                ("angle_vertex", &d.angle_vertex),
+            ],
             vec![],
             vec![],
         ),
         D::Angular3Pt(d) => (
-            vec![("definition_point", &d.definition_point), ("first_point", &d.first_point), ("second_point", &d.second_point), ("angle_vertex", &d.angle_vertex)],
+            vec![
+                ("definition_point", &d.definition_point),
+                ("first_point", &d.first_point),
+                ("second_point", &d.second_point),
+                ("angle_vertex", &d.angle_vertex),
+            ],
             vec![],
-            vec![("first_point", "angle_vertex"), ("second_point", "angle_vertex")],
+            vec![
+                ("first_point", "angle_vertex"),
+                ("second_point", "angle_vertex"),
+            ],
         ),
         D::Ordinate(d) => (
-            vec![("definition_point", &d.definition_point), ("feature_location", &d.feature_location), ("leader_endpoint", &d.leader_endpoint)],
+            vec![
+                ("definition_point", &d.definition_point),
+                ("feature_location", &d.feature_location),
+                ("leader_endpoint", &d.leader_endpoint),
+            ],
             vec![],
             vec![],
         ),
         D::Arc(d) => (
-            vec![("definition_point", &d.definition_point), ("first_extension_point", &d.first_extension_point), ("second_extension_point", &d.second_extension_point), ("center_point", &d.center_point), ("first_leader_point", &d.first_leader_point), ("second_leader_point", &d.second_leader_point)],
-            vec![("arc_start_parameter", d.arc_start_parameter), ("arc_end_parameter", d.arc_end_parameter)],
+            vec![
+                ("definition_point", &d.definition_point),
+                ("first_extension_point", &d.first_extension_point),
+                ("second_extension_point", &d.second_extension_point),
+                ("center_point", &d.center_point),
+                ("first_leader_point", &d.first_leader_point),
+                ("second_leader_point", &d.second_leader_point),
+            ],
+            vec![
+                ("arc_start_parameter", d.arc_start_parameter),
+                ("arc_end_parameter", d.arc_end_parameter),
+            ],
             vec![("first_extension_point", "second_extension_point")],
         ),
         D::LargeRadial(d) => (
-            vec![("definition_point", &d.definition_point), ("chord_point", &d.chord_point), ("override_center", &d.override_center), ("jog_point", &d.jog_point)],
+            vec![
+                ("definition_point", &d.definition_point),
+                ("chord_point", &d.chord_point),
+                ("override_center", &d.override_center),
+                ("jog_point", &d.jog_point),
+            ],
             vec![("jog_angle", d.jog_angle)],
             vec![("definition_point", "chord_point")],
         ),
@@ -484,7 +611,11 @@ fn validate_multileader(
         if !value.is_finite() || value < 0.0 || (!allow_zero && value == 0.0) {
             return Err(format!(
                 "MultiLeader.{name} must be finite and {}",
-                if allow_zero { "non-negative" } else { "greater than zero" }
+                if allow_zero {
+                    "non-negative"
+                } else {
+                    "greater than zero"
+                }
             ));
         }
     }
@@ -515,21 +646,38 @@ fn validate_multileader(
     ] {
         finite_vector(&format!("MultiLeader.context.{name}"), point)?;
     }
-    if context.transform_matrix.iter().any(|value| !value.is_finite()) {
+    if context
+        .transform_matrix
+        .iter()
+        .any(|value| !value.is_finite())
+    {
         return Err("MultiLeader.context.transform_matrix must be finite".into());
     }
     for (ri, root) in context.leader_roots.iter().enumerate() {
-        finite_vector(&format!("MultiLeader.context.leader_roots[{ri}].connection_point"), &root.connection_point)?;
-        finite_vector(&format!("MultiLeader.context.leader_roots[{ri}].direction"), &root.direction)?;
+        finite_vector(
+            &format!("MultiLeader.context.leader_roots[{ri}].connection_point"),
+            &root.connection_point,
+        )?;
+        finite_vector(
+            &format!("MultiLeader.context.leader_roots[{ri}].direction"),
+            &root.direction,
+        )?;
         if !root.landing_distance.is_finite() {
-            return Err(format!("MultiLeader.context.leader_roots[{ri}].landing_distance must be finite"));
+            return Err(format!(
+                "MultiLeader.context.leader_roots[{ri}].landing_distance must be finite"
+            ));
         }
         for (li, line) in root.lines.iter().enumerate() {
             if line.points.is_empty() {
-                return Err(format!("MultiLeader.context.leader_roots[{ri}].lines[{li}] has no points"));
+                return Err(format!(
+                    "MultiLeader.context.leader_roots[{ri}].lines[{li}] has no points"
+                ));
             }
             for (pi, point) in line.points.iter().enumerate() {
-                finite_vector(&format!("MultiLeader.context.leader_roots[{ri}].lines[{li}].points[{pi}]"), point)?;
+                finite_vector(
+                    &format!("MultiLeader.context.leader_roots[{ri}].lines[{li}].points[{pi}]"),
+                    point,
+                )?;
             }
         }
     }
@@ -568,12 +716,16 @@ fn validate_table(
     }
     for (ci, column) in new.columns.iter().enumerate() {
         if !column.width.is_finite() || column.width <= 0.0 {
-            return Err(format!("Table.columns[{ci}].width must be finite and greater than zero"));
+            return Err(format!(
+                "Table.columns[{ci}].width must be finite and greater than zero"
+            ));
         }
     }
     for (ri, row) in new.rows.iter().enumerate() {
         if !row.height.is_finite() || row.height <= 0.0 {
-            return Err(format!("Table.rows[{ri}].height must be finite and greater than zero"));
+            return Err(format!(
+                "Table.rows[{ri}].height must be finite and greater than zero"
+            ));
         }
         if row.cells.len() != new.columns.len() {
             return Err(format!(
@@ -583,11 +735,20 @@ fn validate_table(
             ));
         }
         for (ci, cell) in row.cells.iter().enumerate() {
-            if !cell.rotation.is_finite() || !cell.geometry_scale.is_finite() || !cell.block_scale.is_finite() {
-                return Err(format!("Table.rows[{ri}].cells[{ci}] has non-finite rotation or scale"));
+            if !cell.rotation.is_finite()
+                || !cell.geometry_scale.is_finite()
+                || !cell.block_scale.is_finite()
+            {
+                return Err(format!(
+                    "Table.rows[{ri}].cells[{ci}] has non-finite rotation or scale"
+                ));
             }
             for (ki, content) in cell.contents.iter().enumerate() {
-                if !content.rotation.is_finite() || !content.scale.is_finite() || !content.text_height.is_finite() || content.text_height < 0.0 {
+                if !content.rotation.is_finite()
+                    || !content.scale.is_finite()
+                    || !content.text_height.is_finite()
+                    || content.text_height < 0.0
+                {
                     return Err(format!(
                         "Table.rows[{ri}].cells[{ci}].contents[{ki}] has invalid rotation, scale or text height"
                     ));
@@ -607,7 +768,9 @@ fn validate_table(
             || range.bottom_row >= rows
             || range.right_col >= columns
         {
-            return Err(format!("Table.merged_ranges[{mi}] lies outside the {rows}x{columns} grid"));
+            return Err(format!(
+                "Table.merged_ranges[{mi}] lies outside the {rows}x{columns} grid"
+            ));
         }
         for (mj, other) in new.merged_ranges.iter().enumerate().skip(mi + 1) {
             let separate = range.bottom_row < other.top_row
@@ -615,7 +778,9 @@ fn validate_table(
                 || range.right_col < other.left_col
                 || other.right_col < range.left_col;
             if !separate {
-                return Err(format!("Table.merged_ranges[{mi}] overlaps merged_ranges[{mj}]"));
+                return Err(format!(
+                    "Table.merged_ranges[{mi}] overlaps merged_ranges[{mj}]"
+                ));
             }
         }
     }
@@ -651,7 +816,10 @@ fn validate_polygon_mesh(
     }
     solid_normal("PolygonMesh.normal", &new.normal)?;
     for (index, vertex) in new.vertices.iter().enumerate() {
-        finite_vector(&format!("PolygonMesh.vertices[{index}].location"), &vertex.location)?;
+        finite_vector(
+            &format!("PolygonMesh.vertices[{index}].location"),
+            &vertex.location,
+        )?;
     }
     Ok(())
 }
@@ -666,7 +834,11 @@ fn validate_polyface_mesh(
     if old == Some(new) {
         return Ok(());
     }
-    if !new.elevation.is_finite() || !new.thickness.is_finite() || !new.start_width.is_finite() || !new.end_width.is_finite() {
+    if !new.elevation.is_finite()
+        || !new.thickness.is_finite()
+        || !new.start_width.is_finite()
+        || !new.end_width.is_finite()
+    {
         return Err("PolyfaceMesh elevation, thickness and widths must be finite".into());
     }
     solid_normal("PolyfaceMesh.normal", &new.normal)?;
@@ -674,9 +846,18 @@ fn validate_polyface_mesh(
         return Err("PolyfaceMesh.vertices requires at least 3 vertices".into());
     }
     for (index, vertex) in new.vertices.iter().enumerate() {
-        finite_vector(&format!("PolyfaceMesh.vertices[{index}].location"), &vertex.location)?;
-        if !vertex.bulge.is_finite() || !vertex.start_width.is_finite() || !vertex.end_width.is_finite() || !vertex.curve_tangent.is_finite() {
-            return Err(format!("PolyfaceMesh.vertices[{index}] has non-finite bulge, width or tangent"));
+        finite_vector(
+            &format!("PolyfaceMesh.vertices[{index}].location"),
+            &vertex.location,
+        )?;
+        if !vertex.bulge.is_finite()
+            || !vertex.start_width.is_finite()
+            || !vertex.end_width.is_finite()
+            || !vertex.curve_tangent.is_finite()
+        {
+            return Err(format!(
+                "PolyfaceMesh.vertices[{index}] has non-finite bulge, width or tangent"
+            ));
         }
     }
     if new.faces.is_empty() {
@@ -694,7 +875,9 @@ fn validate_polyface_mesh(
             }
         }
         if indices.iter().filter(|value| **value != 0).count() < 3 {
-            return Err(format!("PolyfaceMesh.faces[{index}] needs at least 3 vertex indices"));
+            return Err(format!(
+                "PolyfaceMesh.faces[{index}] needs at least 3 vertex indices"
+            ));
         }
     }
     Ok(())
@@ -722,7 +905,11 @@ fn validate_mesh(
         if face.vertices.len() < 3 {
             return Err(format!("Mesh.faces[{index}] needs at least 3 vertices"));
         }
-        if let Some(bad) = face.vertices.iter().find(|vertex| **vertex >= new.vertices.len()) {
+        if let Some(bad) = face
+            .vertices
+            .iter()
+            .find(|vertex| **vertex >= new.vertices.len())
+        {
             return Err(format!(
                 "Mesh.faces[{index}] references vertex {bad} but only {} exist",
                 new.vertices.len()
@@ -731,13 +918,20 @@ fn validate_mesh(
     }
     for (index, edge) in new.edges.iter().enumerate() {
         if edge.start >= new.vertices.len() || edge.end >= new.vertices.len() {
-            return Err(format!("Mesh.edges[{index}] references a vertex out of range"));
+            return Err(format!(
+                "Mesh.edges[{index}] references a vertex out of range"
+            ));
         }
         if edge.start == edge.end {
             return Err(format!("Mesh.edges[{index}] has identical endpoints"));
         }
-        if edge.crease.is_some_and(|crease| !crease.is_finite() || crease < 0.0) {
-            return Err(format!("Mesh.edges[{index}].crease must be finite and non-negative"));
+        if edge
+            .crease
+            .is_some_and(|crease| !crease.is_finite() || crease < 0.0)
+        {
+            return Err(format!(
+                "Mesh.edges[{index}].crease must be finite and non-negative"
+            ));
         }
     }
     Ok(())
@@ -765,7 +959,11 @@ fn validate_helix(
     finite_vector("Helix.axis_base_point", &new.axis_base_point)?;
     finite_vector("Helix.start_point", &new.start_point)?;
     solid_normal("Helix.axis_vector", &new.axis_vector)?;
-    for (name, value) in [("radius", new.radius), ("turns", new.turns), ("turn_height", new.turn_height)] {
+    for (name, value) in [
+        ("radius", new.radius),
+        ("turns", new.turns),
+        ("turn_height", new.turn_height),
+    ] {
         if !value.is_finite() || value <= 0.0 {
             return Err(format!("Helix.{name} must be finite and greater than zero"));
         }
@@ -774,7 +972,9 @@ fn validate_helix(
     let length = axis.x.hypot(axis.y).hypot(axis.z);
     let delta = new.start_point - new.axis_base_point;
     let along = (delta.x * axis.x + delta.y * axis.y + delta.z * axis.z) / length;
-    let radial = ((delta.x * delta.x + delta.y * delta.y + delta.z * delta.z) - along * along).max(0.0).sqrt();
+    let radial = ((delta.x * delta.x + delta.y * delta.y + delta.z * delta.z) - along * along)
+        .max(0.0)
+        .sqrt();
     if radial <= 1.0e-9 {
         return Err("Helix.start_point must not lie on the axis".into());
     }
@@ -793,14 +993,19 @@ fn validate_raster_image(
     }
     if let Some(old) = old {
         if old.file_path != new.file_path {
-            return Err("RasterImage.file_path is fixed at creation; the image definition owns it".into());
+            return Err(
+                "RasterImage.file_path is fixed at creation; the image definition owns it".into(),
+            );
         }
     } else if new.file_path.trim().is_empty() {
         return Err("RasterImage.file_path is empty".into());
     } else if new.definition_handle.is_none_or(|handle| handle.is_null())
         && !std::path::Path::new(&new.file_path).is_file()
     {
-        return Err(format!("RasterImage.file_path {:?} is not a readable file", new.file_path));
+        return Err(format!(
+            "RasterImage.file_path {:?} is not a readable file",
+            new.file_path
+        ));
     }
     finite_vector("RasterImage.insertion_point", &new.insertion_point)?;
     finite_vector("RasterImage.u_vector", &new.u_vector)?;
@@ -820,7 +1025,9 @@ fn validate_raster_image(
     }
     for (index, vertex) in new.clip_boundary.vertices.iter().enumerate() {
         if !vertex.x.is_finite() || !vertex.y.is_finite() {
-            return Err(format!("RasterImage.clip_boundary.vertices[{index}] must be finite"));
+            return Err(format!(
+                "RasterImage.clip_boundary.vertices[{index}] must be finite"
+            ));
         }
     }
     if new.clipping_enabled && new.clip_boundary.vertices.len() < 2 {
@@ -847,7 +1054,8 @@ fn validate_wipeout(
     if cross.x.hypot(cross.y).hypot(cross.z) <= 1.0e-12 {
         return Err("Wipeout.u_vector and v_vector must be nonzero and not parallel".into());
     }
-    if !new.size.x.is_finite() || !new.size.y.is_finite() || new.size.x <= 0.0 || new.size.y <= 0.0 {
+    if !new.size.x.is_finite() || !new.size.y.is_finite() || new.size.x <= 0.0 || new.size.y <= 0.0
+    {
         return Err("Wipeout.size must be finite and greater than zero".into());
     }
     if new.brightness > 100 || new.contrast > 100 || new.fade > 100 {
@@ -858,7 +1066,9 @@ fn validate_wipeout(
     }
     for (index, vertex) in new.clip_boundary_vertices.iter().enumerate() {
         if !vertex.x.is_finite() || !vertex.y.is_finite() {
-            return Err(format!("Wipeout.clip_boundary_vertices[{index}] must be finite"));
+            return Err(format!(
+                "Wipeout.clip_boundary_vertices[{index}] must be finite"
+            ));
         }
     }
     let count = new.clip_boundary_vertices.len();
@@ -894,7 +1104,11 @@ fn validate_underlay(
     }
     finite_vector("Underlay.insertion_point", &new.insertion_point)?;
     solid_normal("Underlay.normal", &new.normal)?;
-    for (name, value) in [("x_scale", new.x_scale), ("y_scale", new.y_scale), ("z_scale", new.z_scale)] {
+    for (name, value) in [
+        ("x_scale", new.x_scale),
+        ("y_scale", new.y_scale),
+        ("z_scale", new.z_scale),
+    ] {
         if !value.is_finite() || value == 0.0 {
             return Err(format!("Underlay.{name} must be finite and nonzero"));
         }
@@ -910,7 +1124,9 @@ fn validate_underlay(
     }
     for (index, vertex) in new.clip_boundary_vertices.iter().enumerate() {
         if !vertex.x.is_finite() || !vertex.y.is_finite() {
-            return Err(format!("Underlay.clip_boundary_vertices[{index}] must be finite"));
+            return Err(format!(
+                "Underlay.clip_boundary_vertices[{index}] must be finite"
+            ));
         }
     }
     if !new.clip_boundary_vertices.is_empty() && new.clip_boundary_vertices.len() < 2 {
@@ -933,12 +1149,24 @@ fn validate_viewport(
     finite_vector("Viewport.view_center", &new.view_center)?;
     finite_vector("Viewport.view_target", &new.view_target)?;
     solid_normal("Viewport.view_direction", &new.view_direction)?;
-    for (name, value) in [("width", new.width), ("height", new.height), ("view_height", new.view_height), ("lens_length", new.lens_length), ("custom_scale", new.custom_scale)] {
+    for (name, value) in [
+        ("width", new.width),
+        ("height", new.height),
+        ("view_height", new.view_height),
+        ("lens_length", new.lens_length),
+        ("custom_scale", new.custom_scale),
+    ] {
         if !value.is_finite() || value <= 0.0 {
-            return Err(format!("Viewport.{name} must be finite and greater than zero"));
+            return Err(format!(
+                "Viewport.{name} must be finite and greater than zero"
+            ));
         }
     }
-    for (name, value) in [("front_clip_z", new.front_clip_z), ("back_clip_z", new.back_clip_z), ("twist_angle", new.twist_angle)] {
+    for (name, value) in [
+        ("front_clip_z", new.front_clip_z),
+        ("back_clip_z", new.back_clip_z),
+        ("twist_angle", new.twist_angle),
+    ] {
         if !value.is_finite() {
             return Err(format!("Viewport.{name} must be finite"));
         }
@@ -1077,7 +1305,10 @@ fn basic_entity_errors(new: &crate::host::EntityType) -> Vec<String> {
         EntityType::Ellipse(v) => {
             chk!(finite_vector("Ellipse.center", &v.center));
             chk!(solid_normal("Ellipse.major_axis", &v.major_axis));
-            if !v.minor_axis_ratio.is_finite() || v.minor_axis_ratio <= 0.0 || v.minor_axis_ratio > 1.0 {
+            if !v.minor_axis_ratio.is_finite()
+                || v.minor_axis_ratio <= 0.0
+                || v.minor_axis_ratio > 1.0
+            {
                 errs.push("Ellipse.minor_axis_ratio must be within (0, 1]".into());
             }
             chk!(finite("Ellipse.start_parameter", v.start_parameter));
@@ -1119,8 +1350,13 @@ fn basic_entity_errors(new: &crate::host::EntityType) -> Vec<String> {
                 if !vertex.location.x.is_finite() || !vertex.location.y.is_finite() {
                     errs.push(format!("LwPolyline.vertices[{i}].location must be finite"));
                 }
-                if !vertex.bulge.is_finite() || !vertex.start_width.is_finite() || !vertex.end_width.is_finite() {
-                    errs.push(format!("LwPolyline.vertices[{i}] has a non-finite bulge or width"));
+                if !vertex.bulge.is_finite()
+                    || !vertex.start_width.is_finite()
+                    || !vertex.end_width.is_finite()
+                {
+                    errs.push(format!(
+                        "LwPolyline.vertices[{i}] has a non-finite bulge or width"
+                    ));
                 }
             }
             if !v.constant_width.is_finite() || v.constant_width < 0.0 {
@@ -1135,12 +1371,25 @@ fn basic_entity_errors(new: &crate::host::EntityType) -> Vec<String> {
                 errs.push("Polyline2D.vertices requires at least 2 vertices".into());
             }
             for (i, vertex) in v.vertices.iter().enumerate() {
-                chk!(finite_vector(&format!("Polyline2D.vertices[{i}].location"), &vertex.location));
-                if !vertex.bulge.is_finite() || !vertex.start_width.is_finite() || !vertex.end_width.is_finite() {
-                    errs.push(format!("Polyline2D.vertices[{i}] has a non-finite bulge or width"));
+                chk!(finite_vector(
+                    &format!("Polyline2D.vertices[{i}].location"),
+                    &vertex.location
+                ));
+                if !vertex.bulge.is_finite()
+                    || !vertex.start_width.is_finite()
+                    || !vertex.end_width.is_finite()
+                {
+                    errs.push(format!(
+                        "Polyline2D.vertices[{i}] has a non-finite bulge or width"
+                    ));
                 }
             }
-            for (name, value) in [("start_width", v.start_width), ("end_width", v.end_width), ("thickness", v.thickness), ("elevation", v.elevation)] {
+            for (name, value) in [
+                ("start_width", v.start_width),
+                ("end_width", v.end_width),
+                ("thickness", v.thickness),
+                ("elevation", v.elevation),
+            ] {
                 chk!(finite(&format!("Polyline2D.{name}"), value));
             }
             chk!(solid_normal("Polyline2D.normal", &v.normal));
@@ -1150,7 +1399,10 @@ fn basic_entity_errors(new: &crate::host::EntityType) -> Vec<String> {
                 errs.push("Polyline.vertices requires at least 2 vertices".into());
             }
             for (i, vertex) in v.vertices.iter().enumerate() {
-                chk!(finite_vector(&format!("Polyline.vertices[{i}].location"), &vertex.location));
+                chk!(finite_vector(
+                    &format!("Polyline.vertices[{i}].location"),
+                    &vertex.location
+                ));
             }
         }
         EntityType::Polyline3D(v) => {
@@ -1158,9 +1410,16 @@ fn basic_entity_errors(new: &crate::host::EntityType) -> Vec<String> {
                 errs.push("Polyline3D.vertices requires at least 2 vertices".into());
             }
             for (i, vertex) in v.vertices.iter().enumerate() {
-                chk!(finite_vector(&format!("Polyline3D.vertices[{i}].position"), &vertex.position));
+                chk!(finite_vector(
+                    &format!("Polyline3D.vertices[{i}].position"),
+                    &vertex.position
+                ));
             }
-            for (name, value) in [("default_start_width", v.default_start_width), ("default_end_width", v.default_end_width), ("elevation", v.elevation)] {
+            for (name, value) in [
+                ("default_start_width", v.default_start_width),
+                ("default_end_width", v.default_end_width),
+                ("elevation", v.elevation),
+            ] {
                 chk!(finite(&format!("Polyline3D.{name}"), value));
             }
             chk!(solid_normal("Polyline3D.normal", &v.normal));
@@ -1255,7 +1514,10 @@ fn validate_surface(
     if old.is_some_and(|old| old.u_isolines == new.u_isolines && old.v_isolines == new.v_isolines) {
         return Ok(());
     }
-    for (name, value) in [("u_isolines", new.u_isolines), ("v_isolines", new.v_isolines)] {
+    for (name, value) in [
+        ("u_isolines", new.u_isolines),
+        ("v_isolines", new.v_isolines),
+    ] {
         if !(0..=200).contains(&value) {
             return Err(format!("Surface.{name} must be between 0 and 200"));
         }
@@ -1271,7 +1533,9 @@ fn validate_section_symbol(
     old: Option<&crate::host::codec::entities::SectionSymbol>,
     new: &crate::host::codec::entities::SectionSymbol,
 ) -> Result<(), String> {
-    if old.is_some_and(|old| old.points == new.points && old.symbol_scale.to_bits() == new.symbol_scale.to_bits()) {
+    if old.is_some_and(|old| {
+        old.points == new.points && old.symbol_scale.to_bits() == new.symbol_scale.to_bits()
+    }) {
         return Ok(());
     }
     if !new.symbol_scale.is_finite() || new.symbol_scale <= 0.0 {
@@ -1281,10 +1545,18 @@ fn validate_section_symbol(
         return Err("SectionSymbol.points requires at least 2 points".into());
     }
     for (index, point) in new.points.iter().enumerate() {
-        finite_vector(&format!("SectionSymbol.points[{index}].point"), &point.point)?;
-        finite_vector(&format!("SectionSymbol.points[{index}].label_offset"), &point.label_offset)?;
+        finite_vector(
+            &format!("SectionSymbol.points[{index}].point"),
+            &point.point,
+        )?;
+        finite_vector(
+            &format!("SectionSymbol.points[{index}].label_offset"),
+            &point.label_offset,
+        )?;
         if !point.bulge.is_finite() {
-            return Err(format!("SectionSymbol.points[{index}].bulge must be finite"));
+            return Err(format!(
+                "SectionSymbol.points[{index}].bulge must be finite"
+            ));
         }
     }
     Ok(())
@@ -1403,10 +1675,18 @@ pub fn validate_new_canvas_entity(entity: &crate::host::EntityType) -> Result<()
             }
             finite_vector("Insert.insert_point", &value.insert_point)?;
             solid_normal("Insert.normal", &value.normal)?;
-            for (name, scale) in [("x_scale", value.x_scale()), ("y_scale", value.y_scale()), ("z_scale", value.z_scale())] {
+            for (name, scale) in [
+                ("x_scale", value.x_scale()),
+                ("y_scale", value.y_scale()),
+                ("z_scale", value.z_scale()),
+            ] {
                 insert_scale(&format!("Insert.{name}"), scale)?;
             }
-            for (name, number) in [("rotation", value.rotation), ("column_spacing", value.column_spacing), ("row_spacing", value.row_spacing)] {
+            for (name, number) in [
+                ("rotation", value.rotation),
+                ("column_spacing", value.column_spacing),
+                ("row_spacing", value.row_spacing),
+            ] {
                 if !number.is_finite() {
                     return Err(format!("Insert.{name} must be finite"));
                 }
@@ -1512,7 +1792,9 @@ pub fn validate_new_canvas_entity(entity: &crate::host::EntityType) -> Result<()
             }
             for (si, sp) in value.seed_points.iter().enumerate() {
                 if !sp.x.is_finite() || !sp.y.is_finite() {
-                    return Err(format!("Hatch.seed_points[{si}] has non-finite coordinates"));
+                    return Err(format!(
+                        "Hatch.seed_points[{si}] has non-finite coordinates"
+                    ));
                 }
             }
             validate_hatch_paths(&value.paths)?;
@@ -1553,8 +1835,7 @@ pub fn validate_entity_mutation(
             Err(format!("{name} must contain finite coordinates"))
         }
     };
-    let same3 = |a: &crate::host::codec::types::Vector3,
-                 b: &crate::host::codec::types::Vector3| {
+    let same3 = |a: &crate::host::codec::types::Vector3, b: &crate::host::codec::types::Vector3| {
         a.x.to_bits() == b.x.to_bits()
             && a.y.to_bits() == b.y.to_bits()
             && a.z.to_bits() == b.z.to_bits()
@@ -1773,18 +2054,34 @@ pub fn validate_entity_mutation(
                 return Err("Shape.style_handle is read-only".into());
             }
         }
-        (EntityType::Dimension(old), EntityType::Dimension(new)) => validate_dimension(Some(old), new)?,
-        (EntityType::MultiLeader(old), EntityType::MultiLeader(new)) => validate_multileader(Some(old), new)?,
+        (EntityType::Dimension(old), EntityType::Dimension(new)) => {
+            validate_dimension(Some(old), new)?
+        }
+        (EntityType::MultiLeader(old), EntityType::MultiLeader(new)) => {
+            validate_multileader(Some(old), new)?
+        }
         (EntityType::Table(old), EntityType::Table(new)) => validate_table(Some(old), new)?,
-        (EntityType::PolygonMesh(old), EntityType::PolygonMesh(new)) => validate_polygon_mesh(Some(old), new)?,
-        (EntityType::PolyfaceMesh(old), EntityType::PolyfaceMesh(new)) => validate_polyface_mesh(Some(old), new)?,
+        (EntityType::PolygonMesh(old), EntityType::PolygonMesh(new)) => {
+            validate_polygon_mesh(Some(old), new)?
+        }
+        (EntityType::PolyfaceMesh(old), EntityType::PolyfaceMesh(new)) => {
+            validate_polyface_mesh(Some(old), new)?
+        }
         (EntityType::Mesh(old), EntityType::Mesh(new)) => validate_mesh(Some(old), new)?,
         (EntityType::Helix(old), EntityType::Helix(new)) => validate_helix(Some(old), new)?,
-        (EntityType::RasterImage(old), EntityType::RasterImage(new)) => validate_raster_image(Some(old), new)?,
+        (EntityType::RasterImage(old), EntityType::RasterImage(new)) => {
+            validate_raster_image(Some(old), new)?
+        }
         (EntityType::Wipeout(old), EntityType::Wipeout(new)) => validate_wipeout(Some(old), new)?,
-        (EntityType::Underlay(old), EntityType::Underlay(new)) => validate_underlay(Some(old), new)?,
-        (EntityType::Viewport(old), EntityType::Viewport(new)) => validate_viewport(Some(old), new)?,
-        (EntityType::ViewBorder(old), EntityType::ViewBorder(new)) => validate_view_border(Some(old), new)?,
+        (EntityType::Underlay(old), EntityType::Underlay(new)) => {
+            validate_underlay(Some(old), new)?
+        }
+        (EntityType::Viewport(old), EntityType::Viewport(new)) => {
+            validate_viewport(Some(old), new)?
+        }
+        (EntityType::ViewBorder(old), EntityType::ViewBorder(new)) => {
+            validate_view_border(Some(old), new)?
+        }
         (EntityType::Light(old), EntityType::Light(new)) => validate_light(Some(old), new)?,
         (EntityType::Ole2Frame(old), EntityType::Ole2Frame(new)) => {
             validate_ole_frame(Some(old), new)?;
@@ -1793,7 +2090,9 @@ pub fn validate_entity_mutation(
             }
         }
         (EntityType::Surface(old), EntityType::Surface(new)) => validate_surface(Some(old), new)?,
-        (EntityType::SectionSymbol(old), EntityType::SectionSymbol(new)) => validate_section_symbol(Some(old), new)?,
+        (EntityType::SectionSymbol(old), EntityType::SectionSymbol(new)) => {
+            validate_section_symbol(Some(old), new)?
+        }
         (EntityType::MLine(old), EntityType::MLine(new)) => validate_mline(Some(old), new)?,
         (EntityType::Leader(old), EntityType::Leader(new)) => validate_leader(Some(old), new)?,
         (EntityType::AttributeDefinition(old), EntityType::AttributeDefinition(new)) => {
@@ -1948,7 +2247,9 @@ pub fn validate_entity_mutation(
             if old.seed_points != new.seed_points {
                 for (si, sp) in new.seed_points.iter().enumerate() {
                     if !sp.x.is_finite() || !sp.y.is_finite() {
-                        return Err(format!("Hatch.seed_points[{si}] has non-finite coordinates"));
+                        return Err(format!(
+                            "Hatch.seed_points[{si}] has non-finite coordinates"
+                        ));
                     }
                 }
             }
@@ -1958,7 +2259,7 @@ pub fn validate_entity_mutation(
             if old.is_mpolygon != new.is_mpolygon
                 || old.mpolygon_hatch_color != new.mpolygon_hatch_color
                 || old.mpolygon_x_direction != new.mpolygon_x_direction
-                || old.mpolygon_boundary_handle_count != new.mpolygon_boundary_handle_count
+                || old.mpolygon_invalid_loops != new.mpolygon_invalid_loops
             {
                 return Err("Hatch MPOLYGON fields are unmapped and read-only".into());
             }
@@ -2022,7 +2323,7 @@ pub fn validate_canvas_entity_references(
                         .iter()
                         .any(|style| style.handle == handle)
                 },
-        );
+            );
         if !found {
             return Err(format!(
                 "Tolerance dimension style {:?} does not exist",
@@ -2069,9 +2370,10 @@ pub fn validate_canvas_entity_references(
         _ => None,
     } {
         let name = value.block_name.trim();
-        let record = document.block_records.get(name).ok_or_else(|| {
-            format!("Insert block {:?} does not exist", value.block_name)
-        })?;
+        let record = document
+            .block_records
+            .get(name)
+            .ok_or_else(|| format!("Insert block {:?} does not exist", value.block_name))?;
         if record.is_model_space() || record.is_paper_space() {
             return Err("Insert cannot reference a model-space or paper-space block".into());
         }
@@ -2122,19 +2424,30 @@ pub fn validate_canvas_entity_references(
                 _ => false,
             };
             if !matches {
-                return Err(format!("SectionSymbol {name} {handle:?} is not an existing {wanted} object"));
+                return Err(format!(
+                    "SectionSymbol {name} {handle:?} is not an existing {wanted} object"
+                ));
             }
         }
     }
     if let EntityType::ViewBorder(value) = entity {
-        if !matches!(document.get_entity(value.active_viewport), Some(EntityType::Viewport(_))) {
-            return Err(format!("ViewBorder viewport {:?} does not exist", value.active_viewport));
+        if !matches!(
+            document.get_entity(value.active_viewport),
+            Some(EntityType::Viewport(_))
+        ) {
+            return Err(format!(
+                "ViewBorder viewport {:?} does not exist",
+                value.active_viewport
+            ));
         }
         if !matches!(
             document.objects.get(&value.scale_handle),
             Some(crate::host::codec::objects::ObjectType::Scale(_))
         ) {
-            return Err(format!("ViewBorder scale {:?} does not exist", value.scale_handle));
+            return Err(format!(
+                "ViewBorder scale {:?} does not exist",
+                value.scale_handle
+            ));
         }
     }
     if let EntityType::Viewport(value) = entity {
@@ -2177,7 +2490,9 @@ pub fn validate_canvas_entity_references(
                 document.objects.get(&handle),
                 Some(crate::host::codec::objects::ObjectType::ImageDefinition(_))
             ) {
-                return Err(format!("RasterImage image definition {handle:?} does not exist"));
+                return Err(format!(
+                    "RasterImage image definition {handle:?} does not exist"
+                ));
             }
         }
     }
@@ -2193,13 +2508,23 @@ pub fn validate_canvas_entity_references(
         for (ri, row) in value.rows.iter().enumerate() {
             for (ci, cell) in row.cells.iter().enumerate() {
                 for content in &cell.contents {
-                    if let Some(handle) = content.text_style_handle.filter(|handle| !handle.is_null()) {
-                        if !document.text_styles.iter().any(|style| style.handle == handle) {
+                    if let Some(handle) =
+                        content.text_style_handle.filter(|handle| !handle.is_null())
+                    {
+                        if !document
+                            .text_styles
+                            .iter()
+                            .any(|style| style.handle == handle)
+                        {
                             return Err(format!("Table.rows[{ri}].cells[{ci}] text style handle {handle:?} does not exist"));
                         }
                     }
                     if let Some(handle) = content.block_handle.filter(|handle| !handle.is_null()) {
-                        if !document.block_records.iter().any(|record| record.handle == handle) {
+                        if !document
+                            .block_records
+                            .iter()
+                            .any(|record| record.handle == handle)
+                        {
                             return Err(format!("Table.rows[{ri}].cells[{ci}] block handle {handle:?} does not exist"));
                         }
                     }
@@ -2209,34 +2534,63 @@ pub fn validate_canvas_entity_references(
     }
     if let EntityType::MultiLeader(value) = entity {
         use crate::host::codec::objects::ObjectType;
-        let handle_exists = |handle: Option<crate::host::codec::Handle>, what: &str, ok: &dyn Fn(crate::host::codec::Handle) -> bool| {
-            match handle.filter(|handle| !handle.is_null()) {
-                Some(handle) if !ok(handle) => Err(format!("MultiLeader {what} handle {handle:?} does not exist")),
-                _ => Ok(()),
-            }
+        let handle_exists =
+            |handle: Option<crate::host::codec::Handle>,
+             what: &str,
+             ok: &dyn Fn(crate::host::codec::Handle) -> bool| {
+                match handle.filter(|handle| !handle.is_null()) {
+                    Some(handle) if !ok(handle) => Err(format!(
+                        "MultiLeader {what} handle {handle:?} does not exist"
+                    )),
+                    _ => Ok(()),
+                }
+            };
+        let is_block = |h| {
+            document
+                .block_records
+                .iter()
+                .any(|record| record.handle == h)
         };
-        let is_block = |h| document.block_records.iter().any(|record| record.handle == h);
         let is_text_style = |h| document.text_styles.iter().any(|style| style.handle == h);
         let is_linetype = |h| document.line_types.iter().any(|ltype| ltype.handle == h);
-        let is_mleader_style = |h| matches!(document.objects.get(&h), Some(ObjectType::MultiLeaderStyle(_)));
+        let is_mleader_style = |h| {
+            matches!(
+                document.objects.get(&h),
+                Some(ObjectType::MultiLeaderStyle(_))
+            )
+        };
         handle_exists(value.style_handle, "style", &is_mleader_style)?;
         handle_exists(value.text_style_handle, "text style", &is_text_style)?;
-        handle_exists(value.context.text_style_handle, "context text style", &is_text_style)?;
+        handle_exists(
+            value.context.text_style_handle,
+            "context text style",
+            &is_text_style,
+        )?;
         handle_exists(value.line_type_handle, "line type", &is_linetype)?;
         handle_exists(value.arrowhead_handle, "arrowhead block", &is_block)?;
         handle_exists(value.block_content_handle, "block content", &is_block)?;
-        handle_exists(value.context.block_content_handle, "context block content", &is_block)?;
+        handle_exists(
+            value.context.block_content_handle,
+            "context block content",
+            &is_block,
+        )?;
     }
     if let EntityType::Dimension(value) = entity {
         let name = value.base().style_name.trim();
-        if !document.dim_styles.iter().any(|style| style.name.eq_ignore_ascii_case(name)) {
-            return Err(format!("Dimension style {:?} does not exist", value.base().style_name));
+        if !document
+            .dim_styles
+            .iter()
+            .any(|style| style.name.eq_ignore_ascii_case(name))
+        {
+            return Err(format!(
+                "Dimension style {:?} does not exist",
+                value.base().style_name
+            ));
         }
     }
     if let EntityType::MLine(value) = entity {
-        let style = resolve_mline_style(document, value).ok_or_else(|| {
-            format!("MLine style {:?} does not exist", value.style_name)
-        })?;
+        let style = resolve_mline_style(document, value)
+            .ok_or_else(|| format!("MLine style {:?} does not exist", value.style_name))?;
         if style.elements.is_empty() {
             return Err(format!("MLine style {:?} has no elements", style.name));
         }
@@ -2253,11 +2607,11 @@ pub fn validate_canvas_entity_references(
     }
     if let EntityType::Leader(value) = entity {
         use crate::host::codec::entities::LeaderCreationType;
-        if !document
-            .dim_styles
-            .iter()
-            .any(|style| style.name.eq_ignore_ascii_case(value.dimension_style.trim()))
-        {
+        if !document.dim_styles.iter().any(|style| {
+            style
+                .name
+                .eq_ignore_ascii_case(value.dimension_style.trim())
+        }) {
             return Err(format!(
                 "Leader dimension style {:?} does not exist",
                 value.dimension_style
@@ -2277,10 +2631,9 @@ pub fn validate_canvas_entity_references(
                     )
                 })?;
             let expected = match value.creation_type {
-                LeaderCreationType::WithText => matches!(
-                    annotation,
-                    EntityType::Text(_) | EntityType::MText(_)
-                ),
+                LeaderCreationType::WithText => {
+                    matches!(annotation, EntityType::Text(_) | EntityType::MText(_))
+                }
                 LeaderCreationType::WithTolerance => matches!(annotation, EntityType::Tolerance(_)),
                 LeaderCreationType::WithBlock => matches!(annotation, EntityType::Insert(_)),
                 LeaderCreationType::NoAnnotation => unreachable!(),
@@ -2565,8 +2918,17 @@ mod tests {
             serde_json::from_str(get_embedded_entity_coverage_json()).unwrap();
         for entry in &catalog.entity_kinds {
             let mut seen = std::collections::HashSet::new();
-            for property in entry.properties.iter().filter(|p| p.model_access != ModelAccess::Unmapped) {
-                assert!(seen.insert(property.name.clone()), "{}: duplicate exposed name {}", entry.kind, property.name);
+            for property in entry
+                .properties
+                .iter()
+                .filter(|p| p.model_access != ModelAccess::Unmapped)
+            {
+                assert!(
+                    seen.insert(property.name.clone()),
+                    "{}: duplicate exposed name {}",
+                    entry.kind,
+                    property.name
+                );
             }
         }
     }
@@ -2648,7 +3010,7 @@ mod tests {
                 entry
                     .properties
                     .iter()
-                .filter(|property| property.validation == "transaction_geometry")
+                    .filter(|property| property.validation == "transaction_geometry")
                     .map(|property| format!("{}.{}", entry.kind, property.name))
             })
             .collect();
@@ -2676,7 +3038,7 @@ mod tests {
                 "Face3D.second_corner".to_owned(),
                 "Face3D.third_corner".to_owned(),
                 "Face3D.fourth_corner".to_owned(),
-            "Face3D.invisible_edges".to_owned(),
+                "Face3D.invisible_edges".to_owned(),
                 "Insert.insert_point".to_owned(),
                 "Insert.x_scale".to_owned(),
                 "Insert.y_scale".to_owned(),
@@ -2693,7 +3055,7 @@ mod tests {
                 "Tolerance.text".to_owned(),
                 "Tolerance.dimension_style_name".to_owned(),
                 "Tolerance.text_height".to_owned(),
-            "Tolerance.dimension_gap".to_owned(),
+                "Tolerance.dimension_gap".to_owned(),
                 "Shape.insertion_point".to_owned(),
                 "Shape.size".to_owned(),
                 "Shape.shape_name".to_owned(),
@@ -2706,24 +3068,24 @@ mod tests {
                 "Shape.style_name".to_owned(),
                 "AttributeDefinition.tag".to_owned(),
                 "AttributeDefinition.prompt".to_owned(),
-            "AttributeDefinition.default_value".to_owned(),
-            "AttributeDefinition.insertion_point".to_owned(),
-            "AttributeDefinition.alignment_point".to_owned(),
+                "AttributeDefinition.default_value".to_owned(),
+                "AttributeDefinition.insertion_point".to_owned(),
+                "AttributeDefinition.alignment_point".to_owned(),
                 "AttributeDefinition.height".to_owned(),
                 "AttributeDefinition.rotation".to_owned(),
-            "AttributeDefinition.width_factor".to_owned(),
-            "AttributeDefinition.oblique_angle".to_owned(),
-            "AttributeDefinition.text_style".to_owned(),
-            "AttributeDefinition.text_generation_flags".to_owned(),
-            "AttributeDefinition.horizontal_alignment".to_owned(),
-            "AttributeDefinition.vertical_alignment".to_owned(),
+                "AttributeDefinition.width_factor".to_owned(),
+                "AttributeDefinition.oblique_angle".to_owned(),
+                "AttributeDefinition.text_style".to_owned(),
+                "AttributeDefinition.text_generation_flags".to_owned(),
+                "AttributeDefinition.horizontal_alignment".to_owned(),
+                "AttributeDefinition.vertical_alignment".to_owned(),
                 "AttributeDefinition.flags".to_owned(),
                 "AttributeDefinition.field_length".to_owned(),
                 "AttributeDefinition.normal".to_owned(),
                 "AttributeDefinition.mtext_flag".to_owned(),
                 "AttributeDefinition.is_multiline".to_owned(),
                 "AttributeDefinition.line_count".to_owned(),
-            "AttributeDefinition.lock_position".to_owned(),
+                "AttributeDefinition.lock_position".to_owned(),
                 "AttributeEntity.tag".to_owned(),
                 "AttributeEntity.value".to_owned(),
                 "AttributeEntity.insertion_point".to_owned(),
@@ -2982,10 +3344,8 @@ mod tests {
     fn tolerance_geometry_and_style_references_are_validated() {
         use crate::host::codec::{self, types::Vector3};
         let document = codec::CadDocument::new();
-        let mut tolerance = codec::entities::Tolerance::with_text(
-            Vector3::new(1.0, 2.0, 0.0),
-            "{\\Fgdt;p}%%v0.1",
-        );
+        let mut tolerance =
+            codec::entities::Tolerance::with_text(Vector3::new(1.0, 2.0, 0.0), "{\\Fgdt;p}%%v0.1");
         let entity = codec::EntityType::Tolerance(tolerance.clone());
         validate_new_canvas_entity(&entity).unwrap();
         validate_canvas_entity_references(&document, &entity).unwrap();
@@ -3033,22 +3393,25 @@ mod tests {
         .contains("does not match"));
         let mut missing = leader.clone();
         missing.annotation_handle = codec::Handle::new(0xdead);
-        assert!(validate_canvas_entity_references(
-            &document,
-            &codec::EntityType::Leader(missing)
-        )
-        .unwrap_err()
-        .contains("does not exist"));
+        assert!(
+            validate_canvas_entity_references(&document, &codec::EntityType::Leader(missing))
+                .unwrap_err()
+                .contains("does not exist")
+        );
         let mut none_with_handle = leader.clone();
         none_with_handle.creation_type = LeaderCreationType::NoAnnotation;
-        assert!(validate_new_canvas_entity(&codec::EntityType::Leader(none_with_handle))
-            .unwrap_err()
-            .contains("no annotation"));
+        assert!(
+            validate_new_canvas_entity(&codec::EntityType::Leader(none_with_handle))
+                .unwrap_err()
+                .contains("no annotation")
+        );
         let mut one_point = leader.clone();
         one_point.vertices.truncate(1);
-        assert!(validate_new_canvas_entity(&codec::EntityType::Leader(one_point))
-            .unwrap_err()
-            .contains("at least 2"));
+        assert!(
+            validate_new_canvas_entity(&codec::EntityType::Leader(one_point))
+                .unwrap_err()
+                .contains("at least 2")
+        );
         let mut bad_style = leader.clone();
         bad_style.dimension_style = "Missing".into();
         assert!(validate_canvas_entity_references(
@@ -3075,7 +3438,9 @@ mod tests {
         let document = codec::CadDocument::new();
         let mut mline = codec::entities::MLine::new();
         for x in [0.0, 5.0] {
-            mline.vertices.push(MLineVertex::new(Vector3::new(x, 0.0, 0.0)));
+            mline
+                .vertices
+                .push(MLineVertex::new(Vector3::new(x, 0.0, 0.0)));
         }
         let mut entity = codec::EntityType::MLine(mline.clone());
         validate_new_canvas_entity(&entity).unwrap();
@@ -3084,21 +3449,36 @@ mod tests {
 
         let mut missing = mline.clone();
         missing.style_name = "Missing".into();
-        assert!(bind_canvas_entity_references(&document, &mut codec::EntityType::MLine(missing))
-            .unwrap_err().contains("does not exist"));
+        assert!(
+            bind_canvas_entity_references(&document, &mut codec::EntityType::MLine(missing))
+                .unwrap_err()
+                .contains("does not exist")
+        );
         let mut wrong_segments = mline.clone();
         wrong_segments.vertices[0].init_segments(3);
-        assert!(bind_canvas_entity_references(&document, &mut codec::EntityType::MLine(wrong_segments))
-            .unwrap_err().contains("segments but style"));
+        assert!(bind_canvas_entity_references(
+            &document,
+            &mut codec::EntityType::MLine(wrong_segments)
+        )
+        .unwrap_err()
+        .contains("segments but style"));
         let mut one = mline.clone();
         one.vertices.truncate(1);
-        assert!(validate_new_canvas_entity(&codec::EntityType::MLine(one)).unwrap_err().contains("at least 2"));
+        assert!(validate_new_canvas_entity(&codec::EntityType::MLine(one))
+            .unwrap_err()
+            .contains("at least 2"));
         let mut closed = mline.clone();
         closed.flags |= codec::entities::MLineFlags::CLOSED;
-        assert!(validate_new_canvas_entity(&codec::EntityType::MLine(closed)).unwrap_err().contains("at least 3"));
+        assert!(
+            validate_new_canvas_entity(&codec::EntityType::MLine(closed))
+                .unwrap_err()
+                .contains("at least 3")
+        );
         let mut scale = mline.clone();
         scale.scale_factor = 0.0;
-        assert!(validate_new_canvas_entity(&codec::EntityType::MLine(scale)).unwrap_err().contains("nonzero"));
+        assert!(validate_new_canvas_entity(&codec::EntityType::MLine(scale))
+            .unwrap_err()
+            .contains("nonzero"));
     }
 
     #[cfg(feature = "host")]
@@ -3129,11 +3509,9 @@ mod tests {
             unreachable!()
         };
         bad.size = 0.0;
-        assert!(
-            validate_new_canvas_entity(&codec::EntityType::Shape(bad))
-                .unwrap_err()
-                .contains("greater than zero")
-        );
+        assert!(validate_new_canvas_entity(&codec::EntityType::Shape(bad))
+            .unwrap_err()
+            .contains("greater than zero"));
     }
 
     #[test]
@@ -3257,11 +3635,9 @@ mod tests {
 
         let mut xline = codec::entities::XLine::default();
         xline.base_point.x = f64::NAN;
-        assert!(
-            validate_new_canvas_entity(&codec::EntityType::XLine(xline))
-                .unwrap_err()
-                .contains("XLine.base_point")
-        );
+        assert!(validate_new_canvas_entity(&codec::EntityType::XLine(xline))
+            .unwrap_err()
+            .contains("XLine.base_point"));
 
         let solid = codec::entities::Solid::new(
             Vector3::ZERO,
@@ -3412,9 +3788,13 @@ mod tests {
                 .contains("no whitespace")
         );
     }
+    #[cfg(feature = "host")]
     #[test]
     fn hatch_geometry_and_boundaries_are_validated() {
-        use codec::entities::hatch::{BoundaryEdge, BoundaryPath, LineEdge};
+        use crate::host::codec::{
+            self,
+            entities::hatch::{BoundaryEdge, BoundaryPath, LineEdge},
+        };
         let mut hatch = codec::entities::Hatch::new();
         let mut path = BoundaryPath::new();
         for (start, end) in [
@@ -3434,35 +3814,42 @@ mod tests {
 
         let mut invalid = hatch.clone();
         invalid.paths.clear();
-        assert!(validate_new_canvas_entity(&codec::EntityType::Hatch(invalid))
-            .unwrap_err()
-            .contains("at least one boundary path"));
+        assert!(
+            validate_new_canvas_entity(&codec::EntityType::Hatch(invalid))
+                .unwrap_err()
+                .contains("at least one boundary path")
+        );
 
         let mut invalid = hatch.clone();
         invalid.is_solid = false;
         invalid.pattern_scale = 0.0;
-        assert!(validate_new_canvas_entity(&codec::EntityType::Hatch(invalid))
-            .unwrap_err()
-            .contains("greater than zero"));
+        assert!(
+            validate_new_canvas_entity(&codec::EntityType::Hatch(invalid))
+                .unwrap_err()
+                .contains("greater than zero")
+        );
 
         let mut document = codec::CadDocument::new();
-        let boundary = document.add_entity(codec::EntityType::Line(
-            codec::entities::Line::from_points(
+        let boundary = document
+            .add_entity(codec::EntityType::Line(codec::entities::Line::from_points(
                 codec::types::Vector3::ZERO,
                 codec::types::Vector3::UNIT_X,
-            ),
-        )).unwrap();
+            )))
+            .unwrap();
         let mut associative = hatch.clone();
         associative.is_associative = true;
         associative.paths[0].boundary_handles.push(boundary);
         validate_canvas_entity_references(
             &document,
             &codec::EntityType::Hatch(associative.clone()),
-        ).unwrap();
+        )
+        .unwrap();
         associative.paths[0].boundary_handles[0] = codec::Handle::new(u64::MAX);
         assert!(validate_canvas_entity_references(
             &document,
             &codec::EntityType::Hatch(associative),
-        ).unwrap_err().contains("does not exist"));
+        )
+        .unwrap_err()
+        .contains("does not exist"));
     }
 }

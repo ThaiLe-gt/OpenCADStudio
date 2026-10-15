@@ -14,7 +14,7 @@ fn add_slice(scene: &mut Scene) -> Handle {
     thickness.values = vec![XDataValue::Real(0.75)];
     common.extended_data.add_record(thickness);
 
-    scene.add_entity(EntityType::Extended(ExtendedEntity {
+    scene.add_entity(EntityType::Extended(Box::new(ExtendedEntity {
         common,
         data: ExtendedEntityData::SectionObject(SectionObjectData {
             state: 1,
@@ -29,7 +29,7 @@ fn add_slice(scene: &mut Scene) -> Handle {
             back_line_vertices: Vec::new(),
             settings_handle: Handle::NULL,
         }),
-    }))
+    })))
 }
 
 fn assert_section_graph(document: &codec::CadDocument, extension: &str) {

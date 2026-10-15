@@ -131,9 +131,21 @@ pub struct Face3DInstance {
 impl Face3DInstance {
     pub fn layout<'a>() -> wgpu::VertexBufferLayout<'a> {
         const ATTRS: &[wgpu::VertexAttribute] = &[
-            wgpu::VertexAttribute { offset: std::mem::offset_of!(Face3DInstance, translation) as u64, shader_location: 4, format: wgpu::VertexFormat::Float32x3 },
-            wgpu::VertexAttribute { offset: std::mem::offset_of!(Face3DInstance, translation_low) as u64, shader_location: 5, format: wgpu::VertexFormat::Float32x3 },
-            wgpu::VertexAttribute { offset: std::mem::offset_of!(Face3DInstance, draw_depth) as u64, shader_location: 6, format: wgpu::VertexFormat::Float32 },
+            wgpu::VertexAttribute {
+                offset: std::mem::offset_of!(Face3DInstance, translation) as u64,
+                shader_location: 4,
+                format: wgpu::VertexFormat::Float32x3,
+            },
+            wgpu::VertexAttribute {
+                offset: std::mem::offset_of!(Face3DInstance, translation_low) as u64,
+                shader_location: 5,
+                format: wgpu::VertexFormat::Float32x3,
+            },
+            wgpu::VertexAttribute {
+                offset: std::mem::offset_of!(Face3DInstance, draw_depth) as u64,
+                shader_location: 6,
+                format: wgpu::VertexFormat::Float32,
+            },
         ];
         wgpu::VertexBufferLayout {
             array_stride: std::mem::size_of::<Self>() as u64,
@@ -187,8 +199,7 @@ impl Face3DGpu {
         view_dir: glam::Vec3,
         depth_map: &rustc_hash::FxHashMap<u64, [f32; 2]>,
     ) -> Self {
-        let depth_of =
-            |w: &WireModel| -> f32 { super::wire_gpu::wire_draw_depth(w, depth_map) };
+        let depth_of = |w: &WireModel| -> f32 { super::wire_gpu::wire_draw_depth(w, depth_map) };
         let mut verts_3d: Vec<Face3DVertex> = Vec::with_capacity(face3d_wires.len() * 6);
         let mut verts_2d: Vec<Face3DVertex> = Vec::new();
 
@@ -205,11 +216,7 @@ impl Face3DGpu {
                         position,
                         color: fill_color,
                         draw_depth: 0.0,
-                        position_low: wire
-                            .fill_tris_low
-                            .get(index)
-                            .copied()
-                            .unwrap_or([0.0; 3]),
+                        position_low: wire.fill_tris_low.get(index).copied().unwrap_or([0.0; 3]),
                     });
                 }
             }
@@ -281,7 +288,11 @@ impl Face3DGpu {
                     zmin = zmin.min(p[2]);
                     zmax = zmax.max(p[2]);
                 }
-                let depth = if zmax - zmin > 1e-4 { 0.0 } else { depth_of(wire) };
+                let depth = if zmax - zmin > 1e-4 {
+                    0.0
+                } else {
+                    depth_of(wire)
+                };
                 for (i, &position) in wire.fill_tris.iter().enumerate() {
                     verts_2d.push(Face3DVertex {
                         position,
@@ -352,7 +363,11 @@ fn upload_block_chunks(
             continue;
         };
         let [r, g, b, a] = source.color;
-        let color = if is_3d { [r * 0.45, g * 0.45, b * 0.45, a] } else { source.color };
+        let color = if is_3d {
+            [r * 0.45, g * 0.45, b * 0.45, a]
+        } else {
+            source.color
+        };
         let vertices: Vec<Face3DVertex> = source
             .fill_tris
             .iter()
@@ -361,11 +376,7 @@ fn upload_block_chunks(
                 position,
                 color,
                 draw_depth: 0.0,
-                position_low: source
-                    .fill_tris_low
-                    .get(index)
-                    .copied()
-                    .unwrap_or([0.0; 3]),
+                position_low: source.fill_tris_low.get(index).copied().unwrap_or([0.0; 3]),
             })
             .collect();
         if vertices.is_empty() {

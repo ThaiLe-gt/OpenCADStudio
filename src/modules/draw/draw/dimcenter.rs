@@ -1,10 +1,10 @@
 // Legacy centre cross and associative centre mark commands.
 
-use codec::types::Vector3;
+use crate::t;
 use codec::entities::{CenterMarkAssociation, CenterMarkSource};
+use codec::types::Vector3;
 use codec::{EntityType, Handle, Line};
 use glam::DVec3;
-use crate::t;
 
 use crate::command::{CadCommand, CmdResult};
 use crate::modules::{IconKind, ModuleEvent, ToolDef};

@@ -99,7 +99,7 @@ impl OpenCADStudio {
         // after it takes keyboard focus. Gate input separately from its metadata.
         let allowed = self.spacemouse_focused && self.active_modal.is_none();
         let camera = scene.navigation_camera();
-        let (w, h) = scene.selection.borrow().vp_size;
+        let (w, h) = scene.selection.borrow().view.vp_size;
         let bounds = scene.active_model_tile_bounds(w, h);
         let aspect = scene
             .active_viewport
@@ -211,17 +211,17 @@ impl OpenCADStudio {
                     .acknowledge(&view.target, &self.navigation_target());
                 self.spacemouse_pivot = (view.pivot_visible && moving)
                     .then_some((self.navigation_target(), view.pivot));
-                let (w, h) = self.tabs[i].scene.selection.borrow().vp_size;
+                let (w, h) = self.tabs[i].scene.selection.borrow().view.vp_size;
                 self.reproject_box_anchor(i, w, h);
                 // The pointer may be stationary while the left hand navigates.
                 // Refresh the active command's snap/preview against the new
                 // camera, using the existing pointer path without a click.
                 let cursor = {
                     let selection = self.tabs[i].scene.selection.borrow();
-                    (!selection.left_down
-                        && !selection.middle_down
+                    (!selection.input.left_down
+                        && !selection.input.middle_down
                         && self.tabs[i].active_cmd.is_some())
-                    .then_some(selection.last_move_pos)
+                    .then_some(selection.input.last_move_pos)
                     .flatten()
                 };
                 if let Some(cursor) = cursor {
@@ -246,7 +246,7 @@ impl OpenCADStudio {
             return None;
         }
         let scene = &self.tabs[self.active_tab].scene;
-        let (w, h) = scene.selection.borrow().vp_size;
+        let (w, h) = scene.selection.borrow().view.vp_size;
         let rect = scene
             .active_viewport
             .and_then(|handle| scene.viewport_screen_rect(handle, (w, h)))
@@ -367,6 +367,7 @@ mod tests {
             .scene
             .selection
             .borrow_mut()
+            .view
             .vp_size = (800., 600.);
         app.spacemouse_focused = true;
         app.spacemouse.test_connect();

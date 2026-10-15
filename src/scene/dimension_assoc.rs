@@ -807,10 +807,7 @@ fn remap_plane_offset(
 /// its first handle, so "some handle in `xrefs` exists" was true even for a
 /// reference whose actual source had been erased. Walking the chain asks the
 /// question that was meant — is the geometry still there.
-pub(crate) fn dimension_is_associative(
-    document: &codec::CadDocument,
-    dimension: Handle,
-) -> bool {
+pub(crate) fn dimension_is_associative(document: &codec::CadDocument, dimension: Handle) -> bool {
     document.objects.values().any(|object| {
         let ObjectType::Associative(object) = object else {
             return false;
@@ -2161,9 +2158,7 @@ impl Scene {
     }
     pub(crate) fn sync_diameter_association_angle(&mut self, dimension: Handle) {
         let chord = match self.document.get_entity(dimension) {
-            Some(EntityType::Dimension(Dimension::Diameter(diameter))) => {
-                diameter.angle_vertex
-            }
+            Some(EntityType::Dimension(Dimension::Diameter(diameter))) => diameter.angle_vertex,
             _ => return,
         };
 
@@ -2255,10 +2250,7 @@ mod tests {
             5.0,
         )));
         let dimension = scene.add_entity(EntityType::Dimension(Dimension::Diameter(
-            DimensionDiameter::new(
-                Vector3::new(5.0, 0.0, 0.0),
-                Vector3::new(-5.0, 0.0, 0.0),
-            ),
+            DimensionDiameter::new(Vector3::new(5.0, 0.0, 0.0), Vector3::new(-5.0, 0.0, 0.0)),
         )));
         scene.attach_dimension_association(dimension, vec![Some(circle)]);
         let association = scene
@@ -2271,7 +2263,10 @@ mod tests {
                         object.data,
                         AssociativeData::DimensionAssociation(ref association)
                             if association.dimension == dimension
-                    ) => Some(*handle),
+                    ) =>
+                {
+                    Some(*handle)
+                }
                 _ => None,
             })
             .expect("diameter association");
@@ -2435,4 +2430,58 @@ fn persisted_measurement_scale(
         user_lfac: effective / calculated,
         viewport_compensation: calculated,
     })
+}
+
+/// Drop reactors an entity holds on a dimension association it has no part
+/// in: neither the association's dimension nor geometry it references. Copies
+/// made by earlier releases kept their source's association this way, which
+/// the reference application reports as a damaged drawing. Returns how many
+/// reactors were dropped.
+pub(crate) fn drop_stray_dimension_reactors(document: &mut codec::CadDocument) -> usize {
+    let associations: rustc_hash::FxHashMap<Handle, (Handle, Vec<Handle>)> = document
+        .objects
+        .iter()
+        .filter_map(|(handle, object)| {
+            let ObjectType::Associative(object) = object else {
+                return None;
+            };
+            let AssociativeData::DimensionAssociation(association) = &object.data else {
+                return None;
+            };
+            let geometry = association
+                .references
+                .iter()
+                .flatten()
+                .flat_map(|reference| {
+                    reference
+                        .xrefs
+                        .iter()
+                        .chain(&reference.intersection_objects)
+                        .copied()
+                })
+                .collect();
+            Some((*handle, (association.dimension, geometry)))
+        })
+        .collect();
+    if associations.is_empty() {
+        return 0;
+    }
+    let mut dropped = 0;
+    let handles: Vec<Handle> = document
+        .entities()
+        .map(|entity| entity.common().handle)
+        .collect();
+    for handle in handles {
+        let Some(entity) = document.get_entity_mut(handle) else {
+            continue;
+        };
+        let reactors = &mut entity.common_mut().reactors;
+        let before = reactors.len();
+        reactors.retain(|reactor| match associations.get(reactor) {
+            Some((dimension, geometry)) => *dimension == handle || geometry.contains(&handle),
+            None => true,
+        });
+        dropped += before - reactors.len();
+    }
+    dropped
 }

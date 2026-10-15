@@ -2,16 +2,14 @@
 
 #![allow(unused_imports)]
 use super::util::*;
-use crate::ui::window::block_palette::BlockPaletteMsg;
 use super::{format_size, VIEWCUBE_HIT_SIZE};
 use crate::app::helpers::{
-    parse_coord, polar_constrain_near, ucs_rotate_vec, ucs_to_wcs, ucs_z_axis,
-    CoordKind,
+    parse_coord, polar_constrain_near, ucs_rotate_vec, ucs_to_wcs, ucs_z_axis, CoordKind,
 };
 use crate::app::{Message, OpenCADStudio, POLY_START_DELAY_MS};
 use crate::modules::ModuleEvent;
-use crate::scene::pick::grip::{find_hit_grip, find_hit_grip_paper, find_hit_grip_rte, GripEdit};
 use crate::scene::model::object::GripApply;
+use crate::scene::pick::grip::{find_hit_grip, find_hit_grip_paper, find_hit_grip_rte, GripEdit};
 use crate::scene::{
     self, hover_id, CubeRegion, Scene, VIEWCUBE_DRAW_PX, VIEWCUBE_PAD, VIEWCUBE_PX,
 };
@@ -20,7 +18,6 @@ use codec::types::Color as AcadColor;
 use codec::{EntityType as AcadEntityType, Handle};
 use iced::time::Instant;
 use iced::{mouse, Point, Task};
-
 
 impl OpenCADStudio {
     pub(in crate::app) fn open_save_dialog_window(&mut self, tab_idx: usize) -> Task<Message> {
@@ -65,7 +62,6 @@ impl OpenCADStudio {
         Task::none()
     }
 
-
     pub(in crate::app) fn close_save_dialog_window(&mut self) -> Task<Message> {
         self.aec_drop_acknowledged = false;
         if self.active_modal == Some(crate::app::ModalKind::SaveDialog) {
@@ -74,7 +70,6 @@ impl OpenCADStudio {
         }
         Task::none()
     }
-
 
     pub(in crate::app) fn open_unsaved_dialog_window(&mut self) -> Task<Message> {
         self.active_modal = Some(crate::app::ModalKind::Unsaved);
@@ -96,7 +91,6 @@ impl OpenCADStudio {
         }
     }
 
-
     pub(in crate::app) fn close_unsaved_dialog_window(&mut self) -> Task<Message> {
         if self.active_modal == Some(crate::app::ModalKind::Unsaved) {
             self.active_modal = None;
@@ -105,141 +99,132 @@ impl OpenCADStudio {
         Task::none()
     }
 
-
-pub(super) fn on_ribbon_tool_click(&mut self, tool_id: String, event: ModuleEvent) -> Task<Message> {
-                // Commands use `start_allowed`; other events need a drawing
-                // and stay blocked on the Start page (#299, #388, #389).
-                if self.tabs[self.active_tab].is_start && !matches!(event, ModuleEvent::Command(_)) {
-                    self.ribbon.close_dropdown();
-                    self.command_line
-                        .push_info(crate::t!("No drawing open — use New or Open first.").as_ref());
-                    return Task::none();
-                }
-                // Dismiss any open dropdown / collapsed-panel flyout on tool use,
-                // and remember this tool as its panel's last-used one.
-                self.ribbon.close_dropdown();
-                self.ribbon.note_panel_tool(&tool_id);
-                self.ribbon.activate_tool(&tool_id);
-                match event {
-                    ModuleEvent::Command(cmd) => {
-                        let task = self.dispatch_command(&cmd);
-                        // One-shot tools (view changes, clipboard, toggles,
-                        // audits…) leave nothing running: no interactive
-                        // command and no dialog. Their highlight would stick
-                        // forever — turn it off now. Interactive commands and
-                        // dialog owners keep theirs; the command end / modal
-                        // close clears those. (#355)
-                        let i = self.active_tab;
-                        if self.tabs[i].active_cmd.is_none()
-                            && self.active_modal.is_none()
-                            && !self.tabs[i].pan_mode
-                            && !self.tabs[i].orbit_mode
-                            && !self.tabs[i].zoom_dynamic_mode
-                        {
-                            self.ribbon.deactivate_tool();
-                        }
-                        return task;
-                    }
-                    ModuleEvent::OpenFileDialog => {
+    pub(super) fn on_ribbon_tool_click(
+        &mut self,
+        tool_id: String,
+        event: ModuleEvent,
+    ) -> Task<Message> {
+        // Commands use `start_allowed`; other events need a drawing
+        // and stay blocked on the Start page (#299, #388, #389).
+        if self.tabs[self.active_tab].is_start && !matches!(event, ModuleEvent::Command(_)) {
+            self.ribbon.close_dropdown();
+            self.command_line
+                .push_info(crate::t!("No drawing open — use New or Open first.").as_ref());
+            return Task::none();
+        }
+        // Dismiss any open dropdown / collapsed-panel flyout on tool use,
+        // and remember this tool as its panel's last-used one.
+        self.ribbon.close_dropdown();
+        self.ribbon.note_panel_tool(&tool_id);
+        self.ribbon.activate_tool(&tool_id);
+        match event {
+            // `dispatch_command` turns a one-shot tool's highlight off
+            // again once nothing is left running (#355).
+            ModuleEvent::Command(cmd) => return self.dispatch_command(&cmd),
+            ModuleEvent::OpenFileDialog => {
+                self.command_line
+                    .push_info(crate::t!("Open DWG/DXF: not yet implemented.").as_ref());
+            }
+            ModuleEvent::ClearModels => {
+                let i = self.active_tab;
+                self.tabs[i].scene.clear();
+                self.tabs[i].properties = PropertiesPanel::empty();
+                self.command_line
+                    .push_output(crate::t!("Scene cleared.").as_ref());
+            }
+            ModuleEvent::SetVisualStyle(name) => {
+                use crate::modules::view::visual_style;
+                match visual_style::mode_for_keyword(&name) {
+                    Some(mode) => return Task::done(Message::SetRenderMode(mode)),
+                    None => {
+                        // Name the styles that do exist, from the same
+                        // list every other caller reads.
                         self.command_line
-                            .push_info(crate::t!("Open DWG/DXF: not yet implemented.").as_ref());
-                    }
-                    ModuleEvent::ClearModels => {
-                        let i = self.active_tab;
-                        self.tabs[i].scene.clear();
-                        self.tabs[i].properties = PropertiesPanel::empty();
-                        self.command_line.push_output(crate::t!("Scene cleared.").as_ref());
-                    }
-                    ModuleEvent::SetVisualStyle(name) => {
-                        use crate::modules::view::visual_style;
-                        match visual_style::mode_for_keyword(&name) {
-                            Some(mode) => return Task::done(Message::SetRenderMode(mode)),
-                            None => {
-                                // Name the styles that do exist, from the same
-                                // list every other caller reads.
-                                self.command_line.push_error(
-                                    crate::tf!("Unknown visual style \"{name}\".").as_ref(),
-                                );
-                                self.command_line
-                                    .push_info(crate::t!(visual_style::keyword_prompt()).as_ref());
-                            }
-                        }
-                    }
-                    ModuleEvent::ToggleLayers => {
-                        return Task::done(Message::ToggleLayers);
-                    }
-                    ModuleEvent::PluginFileDialog {
-                        command,
-                        title,
-                        filter_name,
-                        extensions,
-                    } => {
-                        return Task::perform(
-                            async move {
-                                let exts: Vec<&str> =
-                                    extensions.iter().map(|s| s.as_str()).collect();
-                                let path = crate::sys::file_dialog()
-                                    .set_title(title)
-                                    .add_filter(filter_name, &exts)
-                                    .add_filter(crate::t!("All Files").as_ref(), &["*"])
-                                    .pick_file()
-                                    .await
-                                    .map(|h| crate::sys::handle_path(&h));
-                                (command, path)
-                            },
-                            |(command, path)| Message::PluginFileDialogResult { command, path },
-                        );
+                            .push_error(crate::tf!("Unknown visual style \"{name}\".").as_ref());
+                        self.command_line
+                            .push_info(crate::t!(visual_style::keyword_prompt()).as_ref());
                     }
                 }
-                // Every non-Command event above is a one-shot (state toggle,
-                // clear, dialog spawn) — nothing stays running to clear the
-                // highlight later, so turn it off here. (#355)
-                self.ribbon.deactivate_tool();
-                Task::none()
+            }
+            ModuleEvent::ToggleLayers => {
+                return Task::done(Message::ToggleLayers);
+            }
+            ModuleEvent::PluginFileDialog {
+                command,
+                title,
+                filter_name,
+                extensions,
+            } => {
+                return Task::perform(
+                    async move {
+                        let exts: Vec<&str> = extensions.iter().map(|s| s.as_str()).collect();
+                        let path = crate::sys::file_dialog()
+                            .set_title(title)
+                            .add_filter(filter_name, &exts)
+                            .add_filter(crate::t!("All Files").as_ref(), &["*"])
+                            .pick_file()
+                            .await
+                            .map(|h| crate::sys::handle_path(&h));
+                        (command, path)
+                    },
+                    |(command, path)| Message::PluginFileDialogResult { command, path },
+                );
+            }
+        }
+        // Every non-Command event above is a one-shot (state toggle,
+        // clear, dialog spawn) — nothing stays running to clear the
+        // highlight later, so turn it off here. (#355)
+        self.ribbon.deactivate_tool();
+        Task::none()
     }
 
     pub(super) fn on_unsaved_dialog_discard(&mut self) -> Task<Message> {
-                match self.pending_close.take() {
-                    Some(crate::app::PendingClose::Tab(idx)) => {
-                        let close_win = self.close_unsaved_dialog_window();
-                        // Discarded — drop this tab's autosave recovery copy.
-                        #[cfg(not(target_arch = "wasm32"))]
-                        let _ = std::fs::remove_file(self.autosave_target(idx));
-                        if self.tabs.len() == 1 {
-                            self.tab_counter += 1;
-                            self.tabs[0] =
-                                crate::app::document::DocumentTab::new_drawing(self.tab_counter);
-                            self.active_tab = 0;
-                            self.apply_display_defaults(0);
-                        } else {
-                            self.tabs.remove(idx);
-                            if self.active_tab >= self.tabs.len() {
-                                self.active_tab = self.tabs.len() - 1;
-                            }
-                        }
-                        // The active tab is now a fresh blank or a
-                        // different existing tab; sync ribbon chips so
-                        // they don't keep showing the discarded tab's
-                        // last selection. #21.
-                        self.sync_ribbon_layers();
-                        self.sync_ribbon_from_selection();
-                        return Task::batch([close_win, self.continue_tab_close_queue()]);
+        match self.pending_close.take() {
+            Some(crate::app::PendingClose::Tab(tab_id)) => {
+                let close_win = self.close_unsaved_dialog_window();
+                // Resolve the id now: the tab may have closed while
+                // the dialog was open (batched close, automation),
+                // in which case there is nothing left to discard.
+                let Some(idx) = self.tabs.iter().position(|t| t.id == tab_id) else {
+                    return Task::batch([close_win, self.continue_tab_close_queue()]);
+                };
+                // Discarded — drop this tab's autosave recovery copy.
+                #[cfg(not(target_arch = "wasm32"))]
+                let _ = std::fs::remove_file(self.autosave_target(idx));
+                if self.tabs.len() == 1 {
+                    self.tab_counter += 1;
+                    self.tabs[0] = crate::app::document::DocumentTab::new_drawing(self.tab_counter);
+                    self.active_tab = 0;
+                    self.apply_display_defaults(0);
+                } else {
+                    self.tabs.remove(idx);
+                    if self.active_tab >= self.tabs.len() {
+                        self.active_tab = self.tabs.len() - 1;
                     }
-                    Some(crate::app::PendingClose::Quit) => {
-                        if let Some(idx) = self.tabs.iter().position(|t| t.dirty) {
-                            self.tabs[idx].dirty = false;
-                        }
-                        if self.tabs.iter().any(|t| t.dirty) {
-                            // More dirty tabs remain — keep window open.
-                            self.pending_close = Some(crate::app::PendingClose::Quit);
-                        } else {
-                            let close_win = self.close_unsaved_dialog_window();
-                            return Task::batch(vec![close_win, self.exit_app()]);
-                        }
-                    }
-                    None => {}
                 }
-                Task::none()
+                // The active tab is now a fresh blank or a
+                // different existing tab; sync ribbon chips so
+                // they don't keep showing the discarded tab's
+                // last selection. #21.
+                self.sync_ribbon_layers();
+                self.sync_ribbon_from_selection();
+                return Task::batch([close_win, self.continue_tab_close_queue()]);
+            }
+            Some(crate::app::PendingClose::Quit) => {
+                if let Some(idx) = self.tabs.iter().position(|t| t.dirty) {
+                    self.tabs[idx].dirty = false;
+                }
+                if self.tabs.iter().any(|t| t.dirty) {
+                    // More dirty tabs remain — keep window open.
+                    self.pending_close = Some(crate::app::PendingClose::Quit);
+                } else {
+                    let close_win = self.close_unsaved_dialog_window();
+                    return Task::batch(vec![close_win, self.exit_app()]);
+                }
+            }
+            None => {}
+        }
+        Task::none()
     }
 
     pub(super) fn on_unsaved_dialog_save(&mut self) -> Task<Message> {
@@ -249,16 +234,23 @@ pub(super) fn on_ribbon_tool_click(&mut self, tool_id: String, event: ModuleEven
                 return Task::none();
             };
             let (idx, continuation) = match pending {
-                crate::app::PendingClose::Tab(idx) => {
+                crate::app::PendingClose::Tab(tab_id) => {
+                    // The pending target is an id; resolve it against the
+                    // current tab list so a tab closed in the meantime can
+                    // neither panic the save path nor save the wrong file.
+                    let Some(idx) = self.tabs.iter().position(|t| t.id == tab_id) else {
+                        self.pending_close = None;
+                        return Task::batch([
+                            self.close_unsaved_dialog_window(),
+                            self.continue_tab_close_queue(),
+                        ]);
+                    };
                     (idx, crate::app::SaveContinuation::CloseTab)
                 }
                 crate::app::PendingClose::Quit => {
                     let Some(idx) = self.tabs.iter().position(|tab| tab.dirty) else {
                         self.pending_close = None;
-                        return Task::batch([
-                            self.close_unsaved_dialog_window(),
-                            self.exit_app(),
-                        ]);
+                        return Task::batch([self.close_unsaved_dialog_window(), self.exit_app()]);
                     };
                     (idx, crate::app::SaveContinuation::Quit)
                 }
@@ -298,8 +290,14 @@ pub(super) fn on_ribbon_tool_click(&mut self, tool_id: String, event: ModuleEven
         #[cfg(target_arch = "wasm32")]
         {
             match self.pending_close.take() {
-                Some(crate::app::PendingClose::Tab(idx)) => {
-                    self.pending_close = Some(crate::app::PendingClose::Tab(idx));
+                Some(crate::app::PendingClose::Tab(tab_id)) => {
+                    let Some(idx) = self.tabs.iter().position(|t| t.id == tab_id) else {
+                        return Task::batch([
+                            self.close_unsaved_dialog_window(),
+                            self.continue_tab_close_queue(),
+                        ]);
+                    };
+                    self.pending_close = Some(crate::app::PendingClose::Tab(tab_id));
                     self.save_dialog_for_unsaved = true;
                     let close = self.close_unsaved_dialog_window();
                     let save = self.save_with_default_format(idx);
@@ -314,10 +312,7 @@ pub(super) fn on_ribbon_tool_click(&mut self, tool_id: String, event: ModuleEven
                         let save = self.save_with_default_format(idx);
                         Task::batch([close, save])
                     } else {
-                        Task::batch([
-                            self.close_unsaved_dialog_window(),
-                            self.exit_app(),
-                        ])
+                        Task::batch([self.close_unsaved_dialog_window(), self.exit_app()])
                     }
                 }
                 None => Task::none(),
@@ -351,21 +346,44 @@ pub(super) fn on_ribbon_tool_click(&mut self, tool_id: String, event: ModuleEven
     /// one new block in the active drawing. Returns the new block's name, or an
     /// error message. Nested block definitions are imported first so nested
     /// INSERTs render (AutoCAD's "inserting a drawing imports its block defs").
-    fn import_file_as_block(&mut self, path: std::path::PathBuf) -> Result<String, String> {
+    pub(in crate::app) fn import_file_as_block(
+        &mut self,
+        path: std::path::PathBuf,
+    ) -> Result<String, String> {
+        self.import_drawing_block(path, false)
+    }
+
+    /// [`Self::import_file_as_block`]; with `redefine` a block already named
+    /// after the file takes the file's contents instead of a new name.
+    pub(super) fn import_drawing_block(
+        &mut self,
+        path: std::path::PathBuf,
+        redefine: bool,
+    ) -> Result<String, String> {
         let doc = crate::io::load_file(&path).map_err(|e| e.to_string())?;
         let stem = path
             .file_stem()
             .map(|s| s.to_string_lossy().into_owned())
             .unwrap_or_else(|| "Block".to_string());
-        self.import_document_as_block(doc, stem)
+        self.import_document_block(doc, stem, redefine)
     }
 
     /// Define one block in the active drawing from a loaded `CadDocument`'s
     /// model-space entities (base = the file's model-space insertion base).
+    #[cfg(test)]
     fn import_document_as_block(
         &mut self,
         doc: codec::CadDocument,
         stem: String,
+    ) -> Result<String, String> {
+        self.import_document_block(doc, stem, false)
+    }
+
+    fn import_document_block(
+        &mut self,
+        doc: codec::CadDocument,
+        stem: String,
+        redefine: bool,
     ) -> Result<String, String> {
         let i = self.active_tab;
         // Model-space block record handle (Layout object first, name fallback).
@@ -392,7 +410,10 @@ pub(super) fn on_ribbon_tool_click(&mut self, tool_id: String, event: ModuleEven
                     .iter()
                     .filter_map(|h| doc.get_entity(*h))
                     .filter(|e| {
-                        !matches!(e, codec::EntityType::Block(_) | codec::EntityType::BlockEnd(_))
+                        !matches!(
+                            e,
+                            codec::EntityType::Block(_) | codec::EntityType::BlockEnd(_)
+                        )
                     })
                     .cloned()
                     .collect()
@@ -405,7 +426,10 @@ pub(super) fn on_ribbon_tool_click(&mut self, tool_id: String, event: ModuleEven
                         o == model_br || o.is_null()
                     })
                     .filter(|e| {
-                        !matches!(e, codec::EntityType::Block(_) | codec::EntityType::BlockEnd(_))
+                        !matches!(
+                            e,
+                            codec::EntityType::Block(_) | codec::EntityType::BlockEnd(_)
+                        )
                     })
                     .cloned()
                     .collect()
@@ -419,7 +443,18 @@ pub(super) fn on_ribbon_tool_click(&mut self, tool_id: String, event: ModuleEven
             doc.header.model_space_insertion_base.y,
             doc.header.model_space_insertion_base.z,
         );
-        let name = self.block_name_from_file(&stem);
+        let redefine = redefine
+            && self.tabs[i]
+                .scene
+                .document
+                .block_records
+                .get(stem.trim())
+                .is_some();
+        let name = if redefine {
+            stem.trim().to_string()
+        } else {
+            self.block_name_from_file(&stem)
+        };
         // Capture every table record needed by the top-level entities and their
         // nested block definitions. Importing only the definitions leaves
         // source-only layers, linetypes, and text/dimension styles dangling.
@@ -491,72 +526,20 @@ pub(super) fn on_ribbon_tool_click(&mut self, tool_id: String, event: ModuleEven
                 .scene
                 .define_block_raw(&def.name, def.base_point, def.entities);
         }
-        self.tabs[i]
-            .scene
-            .define_block_from_owned_entities(entities, &name, base)?;
+        if redefine {
+            self.tabs[i].scene.redefine_block_raw(
+                &name,
+                codec::types::Vector3::new(base.x, base.y, base.z),
+                entities,
+            );
+        } else {
+            self.tabs[i]
+                .scene
+                .define_block_from_owned_entities(entities, &name, base)?;
+        }
         self.tabs[i].scene.populate_meshes_from_document();
         self.tabs[i].dirty = true;
         Ok(name)
-    }
-
-    pub(super) fn on_block_palette(&mut self, m: crate::ui::window::block_palette::BlockPaletteMsg) -> iced::Task<Message> {
-        use crate::ui::window::block_palette::{BlockEntry, BlockPaletteMsg};
-        match m {
-            BlockPaletteMsg::Search(s) => {
-                self.block_palette.search = s;
-                iced::Task::none()
-            }
-            BlockPaletteMsg::CyclePreviewSize => {
-                self.block_palette.preview_size =
-                    crate::ui::window::block_palette::cycle_preview_size(
-                        self.block_palette.preview_size,
-                    );
-                iced::Task::none()
-            }
-            BlockPaletteMsg::Refresh => {
-                self.refresh_block_palette();
-                iced::Task::none()
-            }
-            BlockPaletteMsg::PickFile => iced::Task::perform(
-                async {
-                    let handle = rfd::AsyncFileDialog::new()
-                        .set_title(crate::t!("Select Drawing to Insert as Block").as_ref())
-                        .add_filter(crate::t!("DWG/DXF Files").as_ref(), &["dwg", "dxf", "DWG", "DXF"])
-                        .pick_file()
-                        .await;
-                    match handle {
-                        Some(h) => Ok(crate::sys::handle_path(&h)),
-                        None => Err("Cancelled".to_string()),
-                    }
-                },
-                |r| Message::BlockPalette(BlockPaletteMsg::FilePicked(r)),
-            ),
-            BlockPaletteMsg::FilePicked(Ok(path)) => {
-                match self.import_file_as_block(path) {
-                    Ok(name) => {
-                        self.command_line
-                            .push_output(&crate::tf!("Inserting \"{name}\" from file."));
-                        self.refresh_block_palette();
-                        self.start_block_placement(&name);
-                    }
-                    Err(e) if e != "Cancelled" => {
-                        self.command_line.push_error(&crate::tf!("INSERT FILE: {e}"));
-                    }
-                    Err(_) => {}
-                }
-                iced::Task::none()
-            }
-            BlockPaletteMsg::FilePicked(Err(e)) => {
-                if e != "Cancelled" {
-                    self.command_line.push_error(&e);
-                }
-                iced::Task::none()
-            }
-            BlockPaletteMsg::Insert(name) => {
-                self.start_block_placement(&name);
-                iced::Task::none()
-            }
-        }
     }
 
     /// Dock chrome interaction (grab / pin / resize / hover / move) applied to
@@ -608,6 +591,17 @@ pub(super) fn on_ribbon_tool_click(&mut self, tool_id: String, event: ModuleEven
                     PanelId::NodeGraph => {
                         self.show_node_graph = false;
                     }
+                    PanelId::PointCloudManager => {
+                        self.pc_manager.show = false;
+                    }
+                    PanelId::Count => {
+                        self.count_palette.show = false;
+                        self.ribbon.set_count_palette(false);
+                    }
+                    PanelId::SheetSetManager => {
+                        self.sheet_set.show = false;
+                        self.ribbon.set_sheet_set(false);
+                    }
                     PanelId::Properties => {
                         self.show_properties = false;
                         self.ribbon.set_properties(false);
@@ -650,7 +644,13 @@ pub(super) fn on_ribbon_tool_click(&mut self, tool_id: String, event: ModuleEven
                 // produced a one-time jump plus a stuck drag. Column moves
                 // arrive via Message::XrefColMove only.
                 if self.dock_dragging.is_some() {
-                    let avail = self.tabs[self.active_tab].scene.selection.borrow().vp_size.1;
+                    let avail = self.tabs[self.active_tab]
+                        .scene
+                        .selection
+                        .borrow()
+                        .view
+                        .vp_size
+                        .1;
                     let side = if point.x < self.win_size.0 * 0.5 {
                         DockSide::Left
                     } else {
@@ -712,6 +712,9 @@ pub(super) fn on_ribbon_tool_click(&mut self, tool_id: String, event: ModuleEven
             PanelId::ExternalReferences => self.show_external_references,
             PanelId::Browser => self.show_browser,
             PanelId::NodeGraph => self.show_node_graph,
+            PanelId::PointCloudManager => self.pc_manager.show,
+            PanelId::Count => self.count_palette.show,
+            PanelId::SheetSetManager => self.sheet_set.show,
         }
     }
 
@@ -726,56 +729,6 @@ pub(super) fn on_ribbon_tool_click(&mut self, tool_id: String, event: ModuleEven
         ids.iter()
             .filter(|id| self.dock_panel_visible(**id))
             .count()
-    }
-
-    /// Start placing `name` through the INSERT command, skipping the name prompt.
-    fn start_block_placement(&mut self, name: &str) {
-        let i = self.active_tab;
-        let wires = self
-            .block_palette
-            .blocks
-            .iter()
-            .find(|b| b.name == name)
-            .map(|b| b.wires.clone())
-            .unwrap_or_else(|| self.tabs[i].scene.block_preview_wires(name));
-        use crate::modules::insert::insert_block::InsertBlockCommand;
-        let cmd = InsertBlockCommand::new_for_block(name.to_string(), wires, glam::Vec3::ZERO);
-        use crate::command::CadCommand;
-        self.command_line.push_info(&cmd.prompt());
-        self.tabs[i].active_cmd = Some(Box::new(cmd));
-        self.block_palette.placing = Some(name.to_string());
-    }
-
-    /// Rebuild the panel's block list + cached wires from the active drawing.
-    pub(crate) fn refresh_block_palette(&mut self) {
-        let i = self.active_tab;
-        let names = self.tabs[i].scene.custom_block_names();
-        self.block_palette.cached_names = names.clone();
-        self.block_palette.source_tab_id = Some(self.tabs[i].id);
-        self.block_palette.source_block_epoch = self.tabs[i].scene.block_epoch;
-        self.block_palette.blocks = names
-            .into_iter()
-            .map(|name| {
-                let wires = self.tabs[i].scene.block_preview_wires(&name);
-                crate::ui::window::block_palette::BlockEntry { name, wires }
-            })
-            .collect();
-    }
-
-    /// Cheap per-update check: rebuild when the active drawing's definitions
-    /// changed, even when their names happen to stay the same.
-    pub(crate) fn refresh_block_palette_if_stale(&mut self) {
-        if !self.show_block_palette {
-            return;
-        }
-        let i = self.active_tab;
-        // `block_epoch` advances for every block-definition change, so it
-        // avoids re-scanning every block name on unrelated application updates.
-        if self.block_palette.source_tab_id != Some(self.tabs[i].id)
-            || self.block_palette.source_block_epoch != self.tabs[i].scene.block_epoch
-        {
-            self.refresh_block_palette();
-        }
     }
 
     /// Rebuild the Reference Manager's entry list from the active drawing.
@@ -862,13 +815,16 @@ pub(super) fn on_ribbon_tool_click(&mut self, tool_id: String, event: ModuleEven
             .entities()
             .filter_map(|entity| match entity {
                 codec::EntityType::RasterImage(image)
-                    if image.definition_handle.is_some_and(|key| self.tabs[i].xref_unloaded.is_unloaded(key.value())) =>
+                    if image
+                        .definition_handle
+                        .is_some_and(|key| self.tabs[i].xref_unloaded.is_unloaded(key.value())) =>
                 {
                     Some(entity.common().handle)
                 }
                 codec::EntityType::Underlay(underlay)
-                    if matches!(underlay.underlay_type, codec::entities::UnderlayType::Pdf)
-                        && self.tabs[i].xref_unloaded.is_unloaded(underlay.definition_handle.value()) =>
+                    if self.tabs[i]
+                        .xref_unloaded
+                        .is_unloaded(underlay.definition_handle.value()) =>
                 {
                     Some(entity.common().handle)
                 }
@@ -887,12 +843,14 @@ pub(super) fn on_ribbon_tool_click(&mut self, tool_id: String, event: ModuleEven
     /// selection. Same engine fns as the CLI arms, batched with per-item
     /// report lines in the CLI wording; finishes with [`post_ref_op`] plus
     /// a palette rescan (mirror of the CLI post-op sequence).
-    pub(crate) fn xref_manager_op(
-        &mut self,
-        op: crate::ui::window::xref_manager::XrefPaletteOp,
-    ) {
+    pub(crate) fn xref_manager_op(&mut self, op: crate::ui::window::xref_manager::XrefPaletteOp) {
         if cfg!(target_arch = "wasm32") {
-            self.command_line.push_error(crate::t!("Reference changes are not available on web — the reference list is read-only.").as_ref());
+            self.command_line.push_error(
+                crate::t!(
+                    "Reference changes are not available on web — the reference list is read-only."
+                )
+                .as_ref(),
+            );
             return;
         }
         use crate::ui::window::xref_manager::XrefPaletteOp;
@@ -905,14 +863,10 @@ pub(super) fn on_ribbon_tool_click(&mut self, tool_id: String, event: ModuleEven
             idx.sort_unstable();
             idx.iter()
                 .filter_map(|idx| {
-                    self.xref_manager.entries.get(*idx).map(|e| {
-                        (
-                            e.key,
-                            e.name.clone(),
-                            e.kind,
-                            e.parent_key.is_some(),
-                        )
-                    })
+                    self.xref_manager
+                        .entries
+                        .get(*idx)
+                        .map(|e| (e.key, e.name.clone(), e.kind, e.parent_key.is_some()))
                 })
                 .collect()
         };
@@ -927,8 +881,9 @@ pub(super) fn on_ribbon_tool_click(&mut self, tool_id: String, event: ModuleEven
         );
         let host: Option<std::path::PathBuf> = self.tabs[i].current_path.clone();
         if needs_host && host.is_none() {
-            self.command_line
-                .push_error(crate::t!("XREF  Save the drawing first to resolve relative XREF paths.").as_ref());
+            self.command_line.push_error(
+                crate::t!("XREF  Save the drawing first to resolve relative XREF paths.").as_ref(),
+            );
             return;
         }
         let label = match op {
@@ -953,15 +908,11 @@ pub(super) fn on_ribbon_tool_click(&mut self, tool_id: String, event: ModuleEven
                         ).as_ref());
                         continue;
                     }
-                    match crate::io::xref::detach_reference(
-                        &mut self.tabs[i].scene.document,
-                        *key,
-                    ) {
+                    match crate::io::xref::detach_reference(&mut self.tabs[i].scene.document, *key)
+                    {
                         Ok(name) => {
-                            self.command_line.push_output(crate::tf!(
-                                "XREF: detached \"{}\".",
-                                name
-                            ).as_ref());
+                            self.command_line
+                                .push_output(crate::tf!("XREF: detached \"{}\".", name).as_ref());
                             self.tabs[i].xref_unloaded.remove(key);
                             self.tabs[i].xref_stat_cache.remove(key);
                             done += 1;
@@ -979,15 +930,11 @@ pub(super) fn on_ribbon_tool_click(&mut self, tool_id: String, event: ModuleEven
                         ).as_ref());
                         continue;
                     }
-                    match crate::io::xref::unload_reference(
-                        &mut self.tabs[i].scene.document,
-                        *key,
-                    ) {
+                    match crate::io::xref::unload_reference(&mut self.tabs[i].scene.document, *key)
+                    {
                         Ok(name) => {
-                            self.command_line.push_output(crate::tf!(
-                                "XREF: unloaded \"{}\".",
-                                name
-                            ).as_ref());
+                            self.command_line
+                                .push_output(crate::tf!("XREF: unloaded \"{}\".", name).as_ref());
                             self.tabs[i].xref_unloaded.add(*key);
                             done += 1;
                         }
@@ -995,6 +942,8 @@ pub(super) fn on_ribbon_tool_click(&mut self, tool_id: String, event: ModuleEven
                     }
                 }
                 self.tabs[i].scene.reseed_underlays();
+                // Point clouds redraw as unloaded (box and saved path).
+                self.tabs[i].scene.bump_geometry();
             }
             XrefPaletteOp::Reload => {
                 let base_dir: std::path::PathBuf = host
@@ -1021,8 +970,8 @@ pub(super) fn on_ribbon_tool_click(&mut self, tool_id: String, event: ModuleEven
                             "XREF: cannot reload nested reference '{}'. Reload it in its host drawing.",
                             name
                         ).as_ref());
-                    } else if *kind == crate::io::xref_model::RefKind::Pdf {
-                        // A PDF reloads by clearing its definition's unloaded state.
+                    } else if *kind == crate::io::xref_model::RefKind::Underlay {
+                        // An underlay reloads by clearing its definition's unloaded state.
                         for (key, row_name, row_kind, _) in &picked {
                             if row_kind != kind || row_name != name {
                                 continue;
@@ -1036,11 +985,23 @@ pub(super) fn on_ribbon_tool_click(&mut self, tool_id: String, event: ModuleEven
                             self.tabs[i].xref_unloaded.remove(key);
                         }
                         self.tabs[i].scene.reseed_underlays();
+                    } else if *kind == crate::io::xref_model::RefKind::PointCloud {
+                        // A point cloud reloads by setting its definition loaded.
+                        for (key, row_name, row_kind, _) in &picked {
+                            if row_kind == kind && row_name == name {
+                                crate::io::xref::set_point_cloud_loaded(
+                                    &mut self.tabs[i].scene.document,
+                                    codec::types::Handle::new(*key),
+                                    true,
+                                );
+                            }
+                        }
+                        self.tabs[i].scene.bump_geometry();
                     } else if *kind != crate::io::xref_model::RefKind::DwgXref {
-                        self.command_line.push_error(crate::tf!(
-                            "{}: reload applies to drawing references only.",
-                            name
-                        ).as_ref());
+                        self.command_line.push_error(
+                            crate::tf!("{}: reload applies to drawing references only.", name)
+                                .as_ref(),
+                        );
                     }
                 }
                 for (key, _) in &dwg_picked {
@@ -1080,18 +1041,14 @@ pub(super) fn on_ribbon_tool_click(&mut self, tool_id: String, event: ModuleEven
                     }
                 }
                 for (_, name) in &dwg_picked {
-                    match infos
-                        .iter()
-                        .find(|n| n.name.eq_ignore_ascii_case(name))
-                    {
+                    match infos.iter().find(|n| n.name.eq_ignore_ascii_case(name)) {
                         Some(info) => {
                             self.report_xref_status(info);
                             done += 1;
                         }
-                        None => self.command_line.push_error(crate::tf!(
-                            "XREF: no references match '{}'.",
-                            name
-                        ).as_ref()),
+                        None => self.command_line.push_error(
+                            crate::tf!("XREF: no references match '{}'.", name).as_ref(),
+                        ),
                     }
                 }
             }
@@ -1110,10 +1067,9 @@ pub(super) fn on_ribbon_tool_click(&mut self, tool_id: String, event: ModuleEven
                         crate::io::xref_model::RefType::Overlay,
                     ) {
                         Ok(name) => {
-                            self.command_line.push_output(crate::tf!(
-                                "XREF: \"{}\" set to Overlay.",
-                                name
-                            ).as_ref());
+                            self.command_line.push_output(
+                                crate::tf!("XREF: \"{}\" set to Overlay.", name).as_ref(),
+                            );
                             done += 1;
                         }
                         Err(msg) => self.command_line.push_error(msg.as_str()),
@@ -1135,10 +1091,9 @@ pub(super) fn on_ribbon_tool_click(&mut self, tool_id: String, event: ModuleEven
                         crate::io::xref_model::RefType::Attach,
                     ) {
                         Ok(name) => {
-                            self.command_line.push_output(crate::tf!(
-                                "XREF: \"{}\" set to Attach.",
-                                name
-                            ).as_ref());
+                            self.command_line.push_output(
+                                crate::tf!("XREF: \"{}\" set to Attach.", name).as_ref(),
+                            );
                             done += 1;
                         }
                         Err(msg) => self.command_line.push_error(msg.as_str()),
@@ -1156,10 +1111,13 @@ pub(super) fn on_ribbon_tool_click(&mut self, tool_id: String, event: ModuleEven
                     .unwrap_or_else(|| std::path::PathBuf::from("."));
                 for (key, name, _, is_nested) in &picked {
                     if *is_nested {
-                        self.command_line.push_error(crate::tf!(
+                        self.command_line.push_error(
+                            crate::tf!(
                             "XREF: cannot bind nested reference '{}'. Bind it in its host drawing.",
                             name
-                        ).as_ref());
+                        )
+                            .as_ref(),
+                        );
                         continue;
                     }
                     match crate::io::xref::bind_reference(
@@ -1170,10 +1128,9 @@ pub(super) fn on_ribbon_tool_click(&mut self, tool_id: String, event: ModuleEven
                     ) {
                         Ok(outcome) => {
                             if outcome.unremapped == 0 {
-                                self.command_line.push_output(crate::tf!(
-                                    "XREF: bound \"{}\".",
-                                    outcome.name
-                                ).as_ref());
+                                self.command_line.push_output(
+                                    crate::tf!("XREF: bound \"{}\".", outcome.name).as_ref(),
+                                );
                             } else {
                                 self.command_line.push_output(crate::tf!(
                                     "XREF: bound \"{}\" with {} unremapped style handles (see bind limitations).",
@@ -1205,10 +1162,10 @@ pub(super) fn on_ribbon_tool_click(&mut self, tool_id: String, event: ModuleEven
                         &host,
                     ) {
                         Ok(_) => {
-                            self.command_line.push_output(crate::tf!(
-                                "XREF: Path set for \"{}\" — Reload to apply.",
-                                name
-                            ).as_ref());
+                            self.command_line.push_output(
+                                crate::tf!("XREF: Path set for \"{}\" — Reload to apply.", name)
+                                    .as_ref(),
+                            );
                             done += 1;
                         }
                         Err(msg) => self.command_line.push_error(msg.as_str()),
@@ -1230,18 +1187,25 @@ pub(super) fn on_ribbon_tool_click(&mut self, tool_id: String, event: ModuleEven
     /// full resolve, per-ref report, stat baselines refreshed.
     pub(crate) fn xref_manager_reload_all(&mut self) {
         if cfg!(target_arch = "wasm32") {
-            self.command_line.push_error(crate::t!("Reference changes are not available on web — the reference list is read-only.").as_ref());
+            self.command_line.push_error(
+                crate::t!(
+                    "Reference changes are not available on web — the reference list is read-only."
+                )
+                .as_ref(),
+            );
             return;
         }
         let i = self.active_tab;
         let Some(path) = self.tabs[i].current_path.clone() else {
-            self.command_line
-                .push_error(crate::t!("XREF  Save the drawing first to resolve relative XREF paths.").as_ref());
+            self.command_line.push_error(
+                crate::t!("XREF  Save the drawing first to resolve relative XREF paths.").as_ref(),
+            );
             return;
         };
         let Some(base_dir) = path.parent().map(|p| p.to_path_buf()) else {
-            self.command_line
-                .push_error(crate::t!("XREF  Save the drawing first to resolve relative XREF paths.").as_ref());
+            self.command_line.push_error(
+                crate::t!("XREF  Save the drawing first to resolve relative XREF paths.").as_ref(),
+            );
             return;
         };
         let reload_keys: Vec<u64> = crate::io::xref::collect_entries_with_prev(
@@ -1323,7 +1287,9 @@ mod tests {
     fn import_document_as_block_defines_block() {
         let mut app = fresh();
         let doc = foreign_doc(&app);
-        let name = app.import_document_as_block(doc, "Fixture".to_string()).unwrap();
+        let name = app
+            .import_document_as_block(doc, "Fixture".to_string())
+            .unwrap();
         assert_eq!(name, "Fixture");
         assert!(app.tabs[app.active_tab]
             .scene
@@ -1346,9 +1312,7 @@ mod tests {
             .objects
             .values()
             .find_map(|o| match o {
-                codec::objects::ObjectType::Layout(l) if l.name == "Model" => {
-                    Some(l.block_record)
-                }
+                codec::objects::ObjectType::Layout(l) if l.name == "Model" => Some(l.block_record),
                 _ => None,
             })
             .unwrap();
@@ -1418,15 +1382,14 @@ mod tests {
     }
 
     /// The nested-INSERT's block name inside a defined block record.
-    fn nested_insert_target(
-        doc: &codec::CadDocument,
-        block: &str,
-    ) -> Option<String> {
+    fn nested_insert_target(doc: &codec::CadDocument, block: &str) -> Option<String> {
         let br = doc.block_records.get(block)?;
-        br.entity_handles.iter().find_map(|h| match doc.get_entity(*h)? {
-            EntityType::Insert(ins) => Some(ins.block_name.clone()),
-            _ => None,
-        })
+        br.entity_handles
+            .iter()
+            .find_map(|h| match doc.get_entity(*h)? {
+                EntityType::Insert(ins) => Some(ins.block_name.clone()),
+                _ => None,
+            })
     }
 
     /// A foreign document whose model space INSERTs a `Fixture` block whose
@@ -1503,7 +1466,9 @@ mod tests {
             )
             .unwrap();
 
-        let _ = app.import_document_as_block(doc, "Imported".to_string()).unwrap();
+        let _ = app
+            .import_document_as_block(doc, "Imported".to_string())
+            .unwrap();
         let doc = &app.tabs[i].scene.document;
         // The file's own "Door (2)" is kept intact and targets the file's
         // renamed "Door" (now "Door (3)" — "Door (2)" was taken by the source).
@@ -1550,7 +1515,9 @@ mod tests {
             )
             .unwrap();
 
-        let name = app.import_document_as_block(doc, "Imported".to_string()).unwrap();
+        let name = app
+            .import_document_as_block(doc, "Imported".to_string())
+            .unwrap();
         assert_eq!(name, "Imported");
 
         let doc = &app.tabs[i].scene.document;
@@ -1581,12 +1548,17 @@ mod tests {
     fn blockpalette_refresh_lists_and_places_block() {
         let mut app = fresh();
         let doc = foreign_doc(&app);
-        let name = app.import_document_as_block(doc, "Fixture".to_string()).unwrap();
+        let name = app
+            .import_document_as_block(doc, "Fixture".to_string())
+            .unwrap();
         app.refresh_block_palette();
         assert!(app.block_palette.blocks.iter().any(|b| b.name == "Fixture"));
         app.start_block_placement(&name);
-        let cmd = app.tabs[app.active_tab].active_cmd.as_ref().expect("INSERT running");
-        assert_eq!(cmd.name(), "INSERT");
+        let cmd = app.tabs[app.active_tab]
+            .active_cmd
+            .as_ref()
+            .expect("INSERT running");
+        assert_eq!(cmd.name(), "-INSERT");
         assert_eq!(app.block_palette.placing.as_deref(), Some("Fixture"));
     }
 
@@ -1641,7 +1613,10 @@ mod tests {
         let _ = app.on_dock(crate::ui::dock::DockMsg::AutoCollapseToggle(id));
         assert!(app.dock.auto_collapse(id), "pin enables auto-collapse");
         let _ = app.on_dock(crate::ui::dock::DockMsg::AutoCollapseToggle(id));
-        assert!(!app.dock.auto_collapse(id), "second pin disables auto-collapse");
+        assert!(
+            !app.dock.auto_collapse(id),
+            "second pin disables auto-collapse"
+        );
         let _ = app.on_dock(crate::ui::dock::DockMsg::Close(id));
         assert!(!app.show_block_palette, "close dismisses the sidebar");
     }
@@ -1659,7 +1634,9 @@ mod tests {
         );
         let _ = app.on_dock(crate::ui::dock::DockMsg::DockGrab(id));
         app.win_size = (1600.0, 900.0).into();
-        let _ = app.on_dock(crate::ui::dock::DockMsg::DragMove(iced::Point::new(100.0, 100.0)));
+        let _ = app.on_dock(crate::ui::dock::DockMsg::DragMove(iced::Point::new(
+            100.0, 100.0,
+        )));
         assert_eq!(
             app.dock_drag_target,
             Some((crate::app::config::DockSide::Left, 0))
@@ -1682,22 +1659,13 @@ mod tests {
         // Left: block palette hidden, properties shown -> 1 visible panel.
         app.show_block_palette = false;
         app.show_properties = true;
-        assert_eq!(
-            app.dock_visible_len(crate::app::config::DockSide::Left),
-            1
-        );
+        assert_eq!(app.dock_visible_len(crate::app::config::DockSide::Left), 1);
         // Reveal the block palette -> both count.
         app.show_block_palette = true;
-        assert_eq!(
-            app.dock_visible_len(crate::app::config::DockSide::Left),
-            2
-        );
+        assert_eq!(app.dock_visible_len(crate::app::config::DockSide::Left), 2);
         // A hidden (closed) panel counts for nothing even when stacked.
         app.show_block_palette = false;
-        assert_eq!(
-            app.dock_visible_len(crate::app::config::DockSide::Left),
-            1
-        );
+        assert_eq!(app.dock_visible_len(crate::app::config::DockSide::Left), 1);
     }
 
     #[test]
@@ -1715,14 +1683,15 @@ mod tests {
         app.show_block_palette = false;
         app.show_properties = true;
         let i = app.active_tab;
-        app.tabs[i].scene.selection.borrow_mut().vp_size = (1600.0, 900.0);
+        app.tabs[i].scene.selection.borrow_mut().view.vp_size = (1600.0, 900.0);
         app.win_size = (1600.0, 900.0).into();
         let id = crate::ui::dock::PanelId::Properties;
         let _ = app.on_dock(crate::ui::dock::DockMsg::DockGrab(id));
         // Pointer near the bottom of the left edge: one visible panel means a
         // single slot, so every y maps to index 0 (no top/bottom split).
-        let _ =
-            app.on_dock(crate::ui::dock::DockMsg::DragMove(iced::Point::new(100.0, 850.0)));
+        let _ = app.on_dock(crate::ui::dock::DockMsg::DragMove(iced::Point::new(
+            100.0, 850.0,
+        )));
         assert_eq!(
             app.dock_drag_target,
             Some((crate::app::config::DockSide::Left, 0))
@@ -1742,12 +1711,13 @@ mod tests {
         app.show_block_palette = true;
         app.show_properties = true;
         let i = app.active_tab;
-        app.tabs[i].scene.selection.borrow_mut().vp_size = (1600.0, 900.0);
+        app.tabs[i].scene.selection.borrow_mut().view.vp_size = (1600.0, 900.0);
         app.win_size = (1600.0, 900.0).into();
         let id = crate::ui::dock::PanelId::Properties;
         let _ = app.on_dock(crate::ui::dock::DockMsg::DockGrab(id));
-        let _ =
-            app.on_dock(crate::ui::dock::DockMsg::DragMove(iced::Point::new(100.0, 850.0)));
+        let _ = app.on_dock(crate::ui::dock::DockMsg::DragMove(iced::Point::new(
+            100.0, 850.0,
+        )));
         assert_eq!(
             app.dock_drag_target,
             Some((crate::app::config::DockSide::Left, 2))
@@ -1772,7 +1742,11 @@ mod tests {
         line.end = Vector3::new(1.0, 0.0, 0.0);
         app.tabs[i]
             .scene
-            .define_block_from_owned_entities(vec![EntityType::Line(line)], "Chair", glam::DVec3::ZERO)
+            .define_block_from_owned_entities(
+                vec![EntityType::Line(line)],
+                "Chair",
+                glam::DVec3::ZERO,
+            )
             .unwrap();
         assert_eq!(app.block_name_from_file("Chair"), "Chair (2)");
         assert_eq!(app.block_name_from_file("Table"), "Table");
@@ -1801,12 +1775,7 @@ mod tests {
         br.flags.is_xref = true;
         br.xref_path = "refs/plan.dwg".to_string();
         br.handle = app.tabs[i].scene.document.allocate_handle();
-        app.tabs[i]
-            .scene
-            .document
-            .block_records
-            .add(br)
-            .unwrap();
+        app.tabs[i].scene.document.block_records.add(br).unwrap();
         app.tabs[i].current_path = Some(old_dir.join("host.dwg"));
         let tab_id = app.tabs[i].id;
         let job_id = 4242u64;
@@ -1863,13 +1832,42 @@ mod tests {
     }
 
     #[test]
+    fn xref_rowop_unknown_id_is_noop() {
+        // #49 RED: row messages carry (key, saved_path) identity and resolve
+        // at dispatch; a deleted row's id must no-op instead of hitting whatever
+        // row now sits at the old index. Fails to compile until the payload
+        // carries XrefRowId instead of usize.
+        use crate::app::Message;
+        use crate::ui::window::xref_manager::{XrefPaletteOp, XrefRowId};
+        let mut app = fresh();
+        let i = app.active_tab;
+        let start = app.command_line.history.len();
+        let ghost = XrefRowId {
+            key: u64::MAX,
+            saved_path: "gone.dwg".to_string(),
+        };
+        let records_before = app.tabs[i].scene.document.block_records.iter().count();
+        let _ = app.update(Message::XrefRowOp(ghost, XrefPaletteOp::Detach));
+        assert_eq!(
+            app.tabs[i].scene.document.block_records.iter().count(),
+            records_before,
+            "no-op must not disturb the document"
+        );
+        let out = palette_output(&app, start);
+        assert!(
+            !out.contains("detached"),
+            "unknown id must not detach anything, got: {out:?}"
+        );
+    }
+
+    #[test]
     fn palette_rowop_nested_reports_per_entry() {
         // Behavioral matrix: every row op on a NESTED row via the GUI
         // message path. Nested rows must report per-entry errors (CLI
         // wording), never silently skip.
-        use codec::tables::BlockRecord;
         use crate::app::Message;
-        use crate::ui::window::xref_manager::XrefPaletteOp;
+        use crate::ui::window::xref_manager::{XrefPaletteOp, XrefRowId};
+        use codec::tables::BlockRecord;
         let dir = palette_tmpdir("nestedmatrix");
         let mut host_doc = codec::CadDocument::new();
         let mut inner = BlockRecord::new("INNER");
@@ -1887,8 +1885,14 @@ mod tests {
         app.tabs[i].scene.document.block_records.add(br).unwrap();
         app.tabs[i].current_path = Some(dir.join("app.dwg"));
         app.refresh_xref_manager();
-        let idx = app.xref_manager.entries.iter().position(|e| e.name == "INNER").expect("nested INNER listed");
-        assert!(app.xref_manager.entries[idx].parent_key.is_some());
+        let row = app
+            .xref_manager
+            .entries
+            .iter()
+            .find(|e| e.name == "INNER")
+            .expect("nested INNER listed");
+        assert!(row.parent_key.is_some());
+        let row_id = XrefRowId::of(row.key, &row.saved_path);
         for op in [
             XrefPaletteOp::Detach,
             XrefPaletteOp::Unload,
@@ -1897,11 +1901,19 @@ mod tests {
             XrefPaletteOp::Overlay,
         ] {
             let start = app.command_line.history.len();
-            let _ = app.update(Message::XrefRowOp(idx, op));
+            let _ = app.update(Message::XrefRowOp(row_id.clone(), op));
             let out = palette_output(&app, start);
-            assert!(out.contains("INNER"), "op {op:?} on nested row gave: {out:?}");
             assert!(
-                app.tabs[i].scene.document.block_records.get("HOST").is_some(),
+                out.contains("INNER"),
+                "op {op:?} on nested row gave: {out:?}"
+            );
+            assert!(
+                app.tabs[i]
+                    .scene
+                    .document
+                    .block_records
+                    .get("HOST")
+                    .is_some(),
                 "op {op:?} must not mutate the direct reference"
             );
         }
@@ -1912,9 +1924,9 @@ mod tests {
     fn palette_detach_unload_rowop_gui_path() {
         // Reproduction for "Detach/Unload from the palette do nothing":
         // drive the exact GUI message path (row right-click menu item).
-        use codec::tables::BlockRecord;
         use crate::app::Message;
-        use crate::ui::window::xref_manager::XrefPaletteOp;
+        use crate::ui::window::xref_manager::{XrefPaletteOp, XrefRowId};
+        use codec::tables::BlockRecord;
         let mut app = fresh();
         let i = app.active_tab;
         for name in ["PLAN", "SITE"] {
@@ -1926,19 +1938,46 @@ mod tests {
         }
         app.tabs[i].current_path = Some(std::env::temp_dir().join("ocs_repro_host.dwg"));
         app.refresh_xref_manager();
-        let idx = app.xref_manager.entries.iter().position(|e| e.name == "PLAN").expect("PLAN listed");
+        let plan = app
+            .xref_manager
+            .entries
+            .iter()
+            .find(|e| e.name == "PLAN")
+            .expect("PLAN listed")
+            .clone();
+        let plan_id = XrefRowId::of(plan.key, &plan.saved_path);
         let start = app.command_line.history.len();
-        let _ = app.update(Message::XrefRowOp(idx, XrefPaletteOp::Detach));
+        let _ = app.update(Message::XrefRowOp(plan_id, XrefPaletteOp::Detach));
         let out = palette_output(&app, start);
         assert!(out.contains("PLAN"), "detach output missing, got: {out:?}");
-        assert!(app.tabs[i].scene.document.block_records.get("PLAN").is_none(), "PLAN definition must be gone");
-        let idx = app.xref_manager.entries.iter().position(|e| e.name == "SITE").expect("SITE listed");
+        assert!(
+            app.tabs[i]
+                .scene
+                .document
+                .block_records
+                .get("PLAN")
+                .is_none(),
+            "PLAN definition must be gone"
+        );
+        let site = app
+            .xref_manager
+            .entries
+            .iter()
+            .find(|e| e.name == "SITE")
+            .expect("SITE listed")
+            .clone();
+        let site_id = XrefRowId::of(site.key, &site.saved_path);
         let start = app.command_line.history.len();
-        let _ = app.update(Message::XrefRowOp(idx, XrefPaletteOp::Unload));
+        let _ = app.update(Message::XrefRowOp(site_id, XrefPaletteOp::Unload));
         let out = palette_output(&app, start);
         assert!(out.contains("SITE"), "unload output missing, got: {out:?}");
         assert_eq!(
-            app.xref_manager.entries.iter().find(|e| e.name == "SITE").unwrap().status,
+            app.xref_manager
+                .entries
+                .iter()
+                .find(|e| e.name == "SITE")
+                .unwrap()
+                .status,
             crate::io::xref_model::RefStatus::Unloaded
         );
     }
@@ -1947,10 +1986,10 @@ mod tests {
     fn palette_overlay_and_pathtype_rowop_gui_path() {
         // Row-menu Overlay + Change-Path row ops on a direct row via the
         // GUI message path: type flag flips, saved path clears.
-        use codec::tables::BlockRecord;
         use crate::app::Message;
         use crate::io::xref_model::{Pathtype, RefType};
-        use crate::ui::window::xref_manager::XrefPaletteOp;
+        use crate::ui::window::xref_manager::{XrefPaletteOp, XrefRowId};
+        use codec::tables::BlockRecord;
         let mut app = fresh();
         let i = app.active_tab;
         let mut br = BlockRecord::new("PLAN");
@@ -1960,20 +1999,51 @@ mod tests {
         app.tabs[i].scene.document.block_records.add(br).unwrap();
         app.tabs[i].current_path = Some(std::env::temp_dir().join("ocs_rowop_host.dwg"));
         app.refresh_xref_manager();
-        let idx = app.xref_manager.entries.iter().position(|e| e.name == "PLAN").expect("PLAN listed");
+        let plan = app
+            .xref_manager
+            .entries
+            .iter()
+            .find(|e| e.name == "PLAN")
+            .expect("PLAN listed")
+            .clone();
+        let plan_id = XrefRowId::of(plan.key, &plan.saved_path);
         let start = app.command_line.history.len();
-        let _ = app.update(Message::XrefRowOp(idx, XrefPaletteOp::Overlay));
+        let _ = app.update(Message::XrefRowOp(plan_id.clone(), XrefPaletteOp::Overlay));
         let out = palette_output(&app, start);
         assert!(out.contains("PLAN"), "got: {out:?}");
-        let br = app.tabs[i].scene.document.block_records.get("PLAN").unwrap();
+        let br = app.tabs[i]
+            .scene
+            .document
+            .block_records
+            .get("PLAN")
+            .unwrap();
         assert!(br.flags.is_xref_overlay && !br.flags.is_xref);
-        assert_eq!(app.xref_manager.entries.iter().find(|e| e.name == "PLAN").unwrap().ref_type, RefType::Overlay);
+        assert_eq!(
+            app.xref_manager
+                .entries
+                .iter()
+                .find(|e| e.name == "PLAN")
+                .unwrap()
+                .ref_type,
+            RefType::Overlay
+        );
         let start = app.command_line.history.len();
-        let _ = app.update(Message::XrefRowOp(idx, XrefPaletteOp::Pathtype(Pathtype::None)));
+        let _ = app.update(Message::XrefRowOp(
+            plan_id,
+            XrefPaletteOp::Pathtype(Pathtype::None),
+        ));
         let out = palette_output(&app, start);
         assert!(out.contains("PLAN"), "got: {out:?}");
-        let br = app.tabs[i].scene.document.block_records.get("PLAN").unwrap();
-        assert_eq!(br.xref_path, "plan.dwg", "Remove Path strips to the bare filename");
+        let br = app.tabs[i]
+            .scene
+            .document
+            .block_records
+            .get("PLAN")
+            .unwrap();
+        assert_eq!(
+            br.xref_path, "plan.dwg",
+            "Remove Path strips to the bare filename"
+        );
     }
 
     #[test]
@@ -1996,9 +2066,21 @@ mod tests {
         let start = app.command_line.history.len();
         app.xref_manager_reload_all();
         let out = palette_output(&app, start);
-        assert!(out.contains("PLAN"), "reload-all must report the reference, got: {out:?}");
-        let entry = app.xref_manager.entries.iter().find(|e| e.name == "PLAN").expect("PLAN listed");
-        assert_eq!(entry.status, crate::io::xref_model::RefStatus::Loaded, "PLAN must resolve Loaded");
+        assert!(
+            out.contains("PLAN"),
+            "reload-all must report the reference, got: {out:?}"
+        );
+        let entry = app
+            .xref_manager
+            .entries
+            .iter()
+            .find(|e| e.name == "PLAN")
+            .expect("PLAN listed");
+        assert_eq!(
+            entry.status,
+            crate::io::xref_model::RefStatus::Loaded,
+            "PLAN must resolve Loaded"
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -2016,8 +2098,8 @@ mod tests {
     fn palette_unload_nested_reports_per_entry() {
         // F6: palette Unload on a nested row reports the per-entry nested
         // error (CLI wording) instead of the confusing 'no loaded reference'.
-        use codec::tables::BlockRecord;
         use crate::ui::window::xref_manager::XrefPaletteOp;
+        use codec::tables::BlockRecord;
         let dir = palette_tmpdir("nested");
         let mut host_doc = codec::CadDocument::new();
         let mut inner = BlockRecord::new("INNER");
@@ -2035,7 +2117,12 @@ mod tests {
         app.tabs[i].scene.document.block_records.add(br).unwrap();
         app.tabs[i].current_path = Some(dir.join("app.dwg"));
         app.refresh_xref_manager();
-        let idx = app.xref_manager.entries.iter().position(|e| e.name == "INNER").expect("nested INNER listed");
+        let idx = app
+            .xref_manager
+            .entries
+            .iter()
+            .position(|e| e.name == "INNER")
+            .expect("nested INNER listed");
         assert!(app.xref_manager.entries[idx].parent_key.is_some());
         app.xref_manager.selected.insert(idx);
         let start = app.command_line.history.len();
@@ -2051,27 +2138,36 @@ mod tests {
         // F7: palette Reload on an image/PDF row reports the drawing-only
         // error and leaves its unloaded flag untouched (no spurious
         // no-match after a flag clear).
-        use codec::objects::{ImageDefinition, ObjectType};
         use crate::io::xref_model::RefKind;
         use crate::ui::window::xref_manager::XrefPaletteOp;
+        use codec::objects::{ImageDefinition, ObjectType};
         let dir = palette_tmpdir("imgreload");
         let mut app = fresh();
         let i = app.active_tab;
         let h = app.tabs[i].scene.document.allocate_handle();
         let mut def = ImageDefinition::with_dimensions("img.png", 8, 8);
         def.handle = h;
-        app.tabs[i].scene.document.objects.insert(h, ObjectType::ImageDefinition(def));
-        let mut img = codec::entities::RasterImage::new(
-            "img.png",
-            codec::types::Vector3::ZERO,
-            8.0,
-            8.0,
-        );
+        app.tabs[i]
+            .scene
+            .document
+            .objects
+            .insert(h, ObjectType::ImageDefinition(def));
+        let mut img =
+            codec::entities::RasterImage::new("img.png", codec::types::Vector3::ZERO, 8.0, 8.0);
         img.definition_handle = Some(h);
-        app.tabs[i].scene.document.add_entity(codec::EntityType::RasterImage(img)).unwrap();
+        app.tabs[i]
+            .scene
+            .document
+            .add_entity(codec::EntityType::RasterImage(img))
+            .unwrap();
         app.tabs[i].current_path = Some(dir.join("host.dwg"));
         app.refresh_xref_manager();
-        let idx = app.xref_manager.entries.iter().position(|e| e.kind == RefKind::Image).expect("image listed");
+        let idx = app
+            .xref_manager
+            .entries
+            .iter()
+            .position(|e| e.kind == RefKind::Image)
+            .expect("image listed");
         let key = app.xref_manager.entries[idx].key;
         app.xref_manager.selected.insert(idx);
         app.tabs[i].xref_unloaded.add(key);
@@ -2080,7 +2176,10 @@ mod tests {
         let out = palette_output(&app, start);
         assert!(out.contains("img.png"), "got: {out:?}");
         assert_eq!(app.command_line.history.len(), start + 1);
-        assert!(app.tabs[i].xref_unloaded.is_unloaded(key), "image flag must stay untouched");
+        assert!(
+            app.tabs[i].xref_unloaded.is_unloaded(key),
+            "image flag must stay untouched"
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 }

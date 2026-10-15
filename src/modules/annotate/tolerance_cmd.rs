@@ -76,9 +76,11 @@ impl CadCommand for ToleranceCommand {
             if !points.is_empty() {
                 points.push(DVec3::splat(f64::NAN));
             }
-            points.extend(stroke.iter().map(|[x, y]| {
-                pt + self.plane.x * *x as f64 + self.plane.y * *y as f64
-            }));
+            points.extend(
+                stroke
+                    .iter()
+                    .map(|[x, y]| pt + self.plane.x * *x as f64 + self.plane.y * *y as f64),
+            );
         }
         Some(WireModel {
             bg_adapt: None,
@@ -88,6 +90,7 @@ impl CadCommand for ToleranceCommand {
             world_width: 0.0,
             depth_override: None,
             display_visible: true,
+            snap_only: false,
             plot_visible: true,
             fill_is_3d: false,
             fill_is_2d_solid: false,
@@ -98,7 +101,10 @@ impl CadCommand for ToleranceCommand {
             dash_align_end: None,
             text_verts: Vec::new(),
             name: "tolerance_preview".into(),
-            points: points.iter().map(|point| point.as_vec3().to_array()).collect(),
+            points: points
+                .iter()
+                .map(|point| point.as_vec3().to_array())
+                .collect(),
             points_low: Vec::new(),
             color: WireModel::CYAN,
             selected: false,
@@ -113,10 +119,13 @@ impl CadCommand for ToleranceCommand {
             plinegen: true,
             fill_tris: vec![],
             fill_tris_low: Vec::new(),
+
+            ..Default::default()
         })
     }
 }
 
-
 // ── Autocomplete registry ─────────────────────────────────
-inventory::submit!(crate::command::CommandRegistration { names: &["TOLERANCE"] });  // ToleranceCommand
+inventory::submit!(crate::command::CommandRegistration {
+    names: &["TOLERANCE"]
+}); // ToleranceCommand

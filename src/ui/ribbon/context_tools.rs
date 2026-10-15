@@ -1,4 +1,4 @@
-//! Selection-driven tools: while only PDF underlays (or only xrefs) are
+//! Selection-driven tools: while only underlays of one kind (or only xrefs) are
 //! selected their actions show on the right-edge toolbar; they go when the
 //! selection changes. Contrast and fade stay in the Properties panel.
 
@@ -9,6 +9,7 @@ use crate::modules::{ModuleEvent, ToolDef};
 /// as on.
 #[derive(Clone, Debug, PartialEq)]
 pub struct UnderlayContext {
+    pub kind: codec::entities::UnderlayType,
     pub monochrome: bool,
     pub shown: bool,
     pub snap: bool,
@@ -27,10 +28,11 @@ const CLIP: &[u8] = include_bytes!("../../../assets/icons/xclip.svg");
 /// The clip icon with a small red cross at its lower right.
 const UNCLIP: &[u8] = include_bytes!("../../../assets/icons/xclip_remove.svg");
 
-/// PDF underlay tools: display, clipping, options, layers and import.
-pub fn pdf_underlay_tools() -> Vec<ToolDef> {
+/// Underlay tools: display, clipping, options, layers and (PDF only)
+/// import.
+pub fn pdf_underlay_tools(kind: codec::entities::UnderlayType) -> Vec<ToolDef> {
     const FRAMES: &[u8] = include_bytes!("../../../assets/icons/underlay_frames.svg");
-    vec![
+    let mut tools = vec![
         tool("_PDFULMONO", "Display in\nMonochrome", FRAMES),
         tool("_PDFULCLIP", "Create Clipping\nBoundary", CLIP),
         tool("_PDFULUNCLIP", "Remove\nClipping", UNCLIP),
@@ -40,16 +42,45 @@ pub fn pdf_underlay_tools() -> Vec<ToolDef> {
             "Enable\nSnap",
             include_bytes!("../../../assets/icons/snap_underlays.svg"),
         ),
-        tool("EXTERNALREFERENCES", "External\nReferences", crate::ui::icons::FOLDER_OPEN),
+        tool(
+            "EXTERNALREFERENCES",
+            "External\nReferences",
+            crate::ui::icons::FOLDER_OPEN,
+        ),
         tool(
             "ULAYERS",
             "Edit\nLayers",
             include_bytes!("../../../assets/icons/underlay_layers.svg"),
         ),
-        tool(
+    ];
+    if kind == codec::entities::UnderlayType::Pdf {
+        tools.push(tool(
             "_PDFULIMPORT",
             "Import As\nObjects",
             include_bytes!("../../../assets/icons/cui_import.svg"),
+        ));
+    }
+    tools
+}
+
+/// Point cloud tools: the three crops, showing, inverting and removing
+/// them, and the palette.
+pub fn point_cloud_tools() -> Vec<ToolDef> {
+    vec![
+        tool("_PCCROPRECT", "Rectangular\nCrop", CLIP),
+        tool("_PCCROPPOLY", "Polygonal\nCrop", CLIP),
+        tool("_PCCROPCIRC", "Circular\nCrop", CLIP),
+        tool(
+            "_PCCROPSHOW",
+            "Show\nCropping",
+            include_bytes!("../../../assets/icons/underlay_frames.svg"),
+        ),
+        tool("_PCCROPINVERT", "Invert\nCropping", CLIP),
+        tool("_PCUNCROP", "Remove All\nCropping", UNCLIP),
+        tool(
+            "EXTERNALREFERENCES",
+            "External\nReferences",
+            crate::ui::icons::FOLDER_OPEN,
         ),
     ]
 }
@@ -62,10 +93,18 @@ pub fn xref_tools() -> Vec<ToolDef> {
             "Edit Reference\nIn-Place",
             include_bytes!("../../../assets/icons/edit_block.svg"),
         ),
-        tool("_XREFOPEN", "Open\nReference", crate::ui::icons::FOLDER_OPEN),
+        tool(
+            "_XREFOPEN",
+            "Open\nReference",
+            crate::ui::icons::FOLDER_OPEN,
+        ),
         tool("_XREFCLIP", "Create Clipping\nBoundary", CLIP),
         tool("_XREFUNCLIP", "Remove\nClipping", UNCLIP),
-        tool("EXTERNALREFERENCES", "External\nReferences", crate::ui::icons::FOLDER_OPEN),
+        tool(
+            "EXTERNALREFERENCES",
+            "External\nReferences",
+            crate::ui::icons::FOLDER_OPEN,
+        ),
     ]
 }
 
@@ -83,6 +122,15 @@ impl Ribbon {
 
     pub fn xref_context(&self) -> bool {
         self.xref_ctx
+    }
+
+    /// Only point clouds are selected: whether the first shows its crops.
+    pub fn set_point_cloud_context(&mut self, context: Option<bool>) {
+        self.point_cloud_ctx = context;
+    }
+
+    pub fn point_cloud_context(&self) -> Option<bool> {
+        self.point_cloud_ctx
     }
 
     /// Select a tab by its module id.

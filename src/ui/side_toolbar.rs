@@ -36,14 +36,14 @@ fn tip_panel(label: &'static str) -> Element<'static, Message> {
         .style(|theme: &Theme| {
             let palette = theme.palette();
             container::Style {
-            background: Some(Background::Color(palette.background.strong.color)),
-            border: Border {
-                color: palette.background.neutral.color,
-                width: 1.0,
-                radius: 3.0.into(),
-            },
-            text_color: Some(palette.background.strong.text),
-            ..Default::default()
+                background: Some(Background::Color(palette.background.strong.color)),
+                border: Border {
+                    color: palette.background.neutral.color,
+                    width: 1.0,
+                    radius: 3.0.into(),
+                },
+                text_color: Some(palette.background.strong.text),
+                ..Default::default()
             }
         })
         .into()
@@ -77,41 +77,36 @@ pub fn view_with_active(
             .height(Length::Fixed(BTN_SIZE))
             .style(move |theme: &Theme, status| {
                 let palette = theme.palette();
-                let hovered = matches!(
-                    status,
-                    button::Status::Hovered | button::Status::Pressed
-                );
+                let hovered = matches!(status, button::Status::Hovered | button::Status::Pressed);
                 button::Style {
-                background: if on {
-                    Some(Background::Color(palette.primary.weak.color))
-                } else {
-                    hovered.then_some(Background::Color(palette.background.strong.color))
-                },
-                border: Border {
-                    radius: 3.0.into(),
-                    color: palette.primary.base.color,
-                    width: if on { 1.0 } else { 0.0 },
-                },
-                text_color: palette.background.base.text,
-                ..Default::default()
+                    background: if on {
+                        Some(Background::Color(palette.primary.weak.color))
+                    } else {
+                        hovered.then_some(Background::Color(palette.background.strong.color))
+                    },
+                    border: Border {
+                        radius: 3.0.into(),
+                        color: palette.primary.base.color,
+                        width: if on { 1.0 } else { 0.0 },
+                    },
+                    text_color: palette.background.base.text,
+                    ..Default::default()
                 }
             });
         // Label tooltip on the left so it never runs off the right edge.
-        col = col.push(
-            tooltip(btn, tip_panel(t.label), tooltip::Position::Left).gap(6),
-        );
+        col = col.push(tooltip(btn, tip_panel(t.label), tooltip::Position::Left).gap(6));
     }
 
     let panel = container(col).padding(4).style(|theme: &Theme| {
         let palette = theme.palette();
         container::Style {
-        background: Some(Background::Color(palette.background.weak.color)),
-        border: Border {
-            color: palette.background.neutral.color,
-            width: 1.0,
-            radius: 5.0.into(),
-        },
-        ..Default::default()
+            background: Some(Background::Color(palette.background.weak.color)),
+            border: Border {
+                color: palette.background.neutral.color,
+                width: 1.0,
+                radius: 5.0.into(),
+            },
+            ..Default::default()
         }
     });
 

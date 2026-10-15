@@ -136,7 +136,11 @@ fn with_layer_config(bytes: &[u8], all: &[PdfLayer], off: &[&PdfLayer]) -> Optio
         .and_then(|i| tail[i + 9..].split_whitespace().next()?.parse().ok())?;
     let size: usize = {
         let region = String::from_utf8_lossy(&bytes[prev.min(bytes.len())..]).into_owned();
-        let region = if region.contains("/Size") { region } else { tail.clone() };
+        let region = if region.contains("/Size") {
+            region
+        } else {
+            tail.clone()
+        };
         let i = region.find("/Size")?;
         region[i + 5..]
             .trim_start()
@@ -193,7 +197,11 @@ fn without_key(dict: &str, key: &str) -> Option<String> {
     let value = rest.trim_start();
     let lead = rest.len() - value.len();
     let length = if value.starts_with("<<") || value.starts_with('[') {
-        let (open, close) = if value.starts_with('[') { ("[", "]") } else { ("<<", ">>") };
+        let (open, close) = if value.starts_with('[') {
+            ("[", "]")
+        } else {
+            ("<<", ">>")
+        };
         let mut depth = 0i32;
         let mut i = 0;
         loop {
@@ -231,6 +239,9 @@ fn without_key(dict: &str, key: &str) -> Option<String> {
 /// them.
 pub const LAYER_OVERRIDE_APP: &str = "AdeskUnderlayLayerOverrideData";
 
+/// The first string of a DGN underlay's layer overrides, before the names.
+pub const DGN_OVERRIDE_PLACEHOLDER: &str = "???DGN_Placeholder???";
+
 pub fn hidden_layers(u: &codec::entities::Underlay) -> Vec<String> {
     u.common
         .extended_data
@@ -239,7 +250,7 @@ pub fn hidden_layers(u: &codec::entities::Underlay) -> Vec<String> {
         .filter(|r| r.application_name.eq_ignore_ascii_case(LAYER_OVERRIDE_APP))
         .flat_map(|r| r.values.iter())
         .filter_map(|v| match v {
-            codec::xdata::XDataValue::String(s) => Some(s.clone()),
+            codec::xdata::XDataValue::String(s) if s != DGN_OVERRIDE_PLACEHOLDER => Some(s.clone()),
             _ => None,
         })
         .collect()

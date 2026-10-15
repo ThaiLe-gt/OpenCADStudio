@@ -80,7 +80,7 @@ const WEB_ALIAS_KEY: &str = "opencadstudio.aliases";
 /// migrated forward (see `introduced_at` / `migrate_aliases`). Version 1 shipped
 /// the pre-REDRAW table; version 2 introduced the REDRAW-family aliases; version 3
 /// introduced HB (HATCHTOBACK); version 4 introduced ER (EXTERNALREFERENCES).
-const DEFAULT_ALIASES_VERSION: u32 = 4;
+const DEFAULT_ALIASES_VERSION: u32 = 6;
 
 #[cfg(target_arch = "wasm32")]
 const WEB_ALIAS_VERSION_KEY: &str = "opencadstudio.aliases.version";
@@ -99,6 +99,8 @@ fn introduced_at(version: u32) -> &'static [(&'static str, &'static str)] {
         ],
         3 => &[("HB", "HATCHTOBACK")],
         4 => &[("ER", "EXTERNALREFERENCES")],
+        5 => &[("-ATT", "-ATTDEF")],
+        6 => &[("VV", "QLAYER")],
         _ => &[],
     }
 }
@@ -241,23 +243,16 @@ pub(super) fn load_aliases() -> FxHashMap<String, String> {
                     // Only advance the version marker once the migrated table is
                     // actually stored, so a failed set_item leaves the marker
                     // behind and the merge is retried next launch.
-                    if storage
-                        .set_item(WEB_ALIAS_KEY, &to_pgp(&map))
-                        .is_ok()
-                    {
-                        let _ = storage.set_item(
-                            WEB_ALIAS_VERSION_KEY,
-                            &DEFAULT_ALIASES_VERSION.to_string(),
-                        );
+                    if storage.set_item(WEB_ALIAS_KEY, &to_pgp(&map)).is_ok() {
+                        let _ = storage
+                            .set_item(WEB_ALIAS_VERSION_KEY, &DEFAULT_ALIASES_VERSION.to_string());
                     }
                 }
                 map
             }
             None => {
-                let _ = storage.set_item(
-                    WEB_ALIAS_VERSION_KEY,
-                    &DEFAULT_ALIASES_VERSION.to_string(),
-                );
+                let _ =
+                    storage.set_item(WEB_ALIAS_VERSION_KEY, &DEFAULT_ALIASES_VERSION.to_string());
                 default_map()
             }
         };
@@ -328,12 +323,7 @@ impl OpenCADStudio {
             .alias_editor_rows
             .iter()
             .filter(|(a, c)| !a.trim().is_empty() && !c.trim().is_empty())
-            .map(|(a, c)| {
-                (
-                    a.trim().to_uppercase(),
-                    c.trim().to_uppercase(),
-                )
-            })
+            .map(|(a, c)| (a.trim().to_uppercase(), c.trim().to_uppercase()))
             .collect();
         self.set_command_aliases(map);
     }
@@ -369,9 +359,8 @@ impl OpenCADStudio {
             );
         }
         self.apply_alias_editor_rows();
-        self.command_line.push_info(
-            crate::tf!("{} alias(es) applied.", self.command_aliases.len()).as_ref(),
-        );
+        self.command_line
+            .push_info(crate::tf!("{} alias(es) applied.", self.command_aliases.len()).as_ref());
     }
 
     /// Reset the working rows and live table to the shipped defaults.

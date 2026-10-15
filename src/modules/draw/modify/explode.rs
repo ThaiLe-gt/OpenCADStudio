@@ -29,8 +29,8 @@ use codec::{CadDocument, EntityType, Handle};
 use crate::command::{CadCommand, CmdResult, WorkingPlane};
 use crate::entities::curve::lwpolyline_world_xy;
 use crate::modules::{IconKind, ModuleEvent, ToolDef};
-use glam::DVec3;
 use crate::t;
+use glam::DVec3;
 
 // ── Ribbon definition ──────────────────────────────────────────────────────
 
@@ -64,9 +64,9 @@ pub fn explode_polyline_segments(entity: &EntityType) -> Vec<EntityType> {
 pub fn explode_entity(entity: &EntityType, document: &CadDocument) -> Vec<EntityType> {
     match entity {
         EntityType::Line(line) => {
-            let Some(association) = codec::entities::CenterMarkAssociation::read(
-                &line.common.extended_data,
-            ) else {
+            let Some(association) =
+                codec::entities::CenterMarkAssociation::read(&line.common.extended_data)
+            else {
                 return vec![];
             };
             crate::scene::centermark::mark_segments(&association)
@@ -114,8 +114,53 @@ pub fn explode_entity(entity: &EntityType, document: &CadDocument) -> Vec<Entity
         }
         EntityType::MLine(ml) => explode_mline(ml),
         EntityType::Dimension(dim) => explode_dimension(dim, document),
+        EntityType::MText(t) => crate::entities::mtext::explode_mtext(t, document),
         _ => vec![],
     }
+}
+
+/// Explode every entity; one piece list per input, input order preserved,
+/// empty lists kept. Used by benchmarks and regression tests.
+pub fn explode_batch(items: &[(Handle, &EntityType)], doc: &CadDocument) -> Vec<Vec<EntityType>> {
+    items.iter().map(|(_, e)| explode_entity(e, doc)).collect()
+}
+
+/// Plan the EXPLODE command for an already lock-filtered selection:
+/// order-preserving, empty pieces dropped (matching the command arm).
+pub fn plan_explode(
+    selected: &[(Handle, &EntityType)],
+    doc: &CadDocument,
+) -> Vec<(Handle, Vec<EntityType>)> {
+    selected
+        .iter()
+        .filter_map(|(handle, entity)| {
+            let pieces = explode_entity(entity, doc);
+            if pieces.is_empty() {
+                None
+            } else {
+                Some((*handle, pieces))
+            }
+        })
+        .collect()
+}
+
+/// Apply precomputed EXPLODE replacements. Initial version is a
+/// byte-for-byte extraction of the command arm's loop (erase one handle,
+/// add pieces one at a time); optimizations change its internals only.
+/// Returns the number of exploded sources.
+pub fn apply_explode_replacements(
+    scene: &mut crate::scene::Scene,
+    replacements: Vec<(Handle, Vec<EntityType>)>,
+) -> usize {
+    let exploded = replacements.len();
+    let handles: Vec<Handle> = replacements.iter().map(|(h, _)| *h).collect();
+    scene.erase_entities(&handles);
+    for (_, pieces) in replacements {
+        for piece in pieces {
+            scene.add_entity(piece);
+        }
+    }
+    exploded
 }
 
 fn explode_polyline(p: &Polyline) -> Vec<EntityType> {
@@ -125,7 +170,7 @@ fn explode_polyline(p: &Polyline) -> Vec<EntityType> {
     }
     let closed = p.flags.is_closed();
     let n_segs = if closed { n } else { n - 1 };
-    let mut result = Vec::new();
+    let mut result = Vec::with_capacity(n_segs);
     for i in 0..n_segs {
         let v0 = &p.vertices[i];
         let v1 = &p.vertices[(i + 1) % n];
@@ -148,7 +193,7 @@ fn explode_polyline3d(p: &codec::entities::Polyline3D) -> Vec<EntityType> {
     }
     let closed = p.is_closed();
     let n_segs = if closed { n } else { n - 1 };
-    let mut result = Vec::new();
+    let mut result = Vec::with_capacity(n_segs);
     for i in 0..n_segs {
         let v0 = &p.vertices[i];
         let v1 = &p.vertices[(i + 1) % n];
@@ -178,7 +223,7 @@ fn explode_polyline2d(p: &Polyline2D) -> Vec<EntityType> {
     let normal = Vector3::new(normal.x, normal.y, normal.z);
     let plane = crate::entities::curve::ocs_plane(normal.clone(), elevation);
 
-    let mut result = Vec::new();
+    let mut result = Vec::with_capacity(n_segs);
     for i in 0..n_segs {
         let v0 = &p.vertices[i];
         let v1 = &p.vertices[(i + 1) % n];
@@ -257,7 +302,7 @@ fn explode_lwpolyline(p: &LwPolyline) -> Vec<EntityType> {
     let elevation = p.elevation;
     let n_segs = if p.is_closed { n } else { n - 1 };
 
-    let mut result = Vec::new();
+    let mut result = Vec::with_capacity(n_segs);
     for i in 0..n_segs {
         let v0 = &p.vertices[i];
         let v1 = &p.vertices[(i + 1) % n];
@@ -343,7 +388,7 @@ fn explode_mline(ml: &MLine) -> Vec<EntityType> {
     let closed = ml.flags.contains(codec::entities::MLineFlags::CLOSED);
     let scale = ml.scale_factor;
     let n_segs = if closed { n } else { n - 1 };
-    let mut result = Vec::new();
+    let mut result = Vec::with_capacity(n_segs * 3);
 
     // Helper: build a Line from two Vector3 positions.
     let make_line = |common: &codec::entities::EntityCommon,
@@ -412,12 +457,11 @@ fn dim_geom_entities(
     dim_common: &codec::entities::EntityCommon,
 ) -> Vec<EntityType> {
     let mut entities = Vec::new();
-    let point = |value: [f32; 3]| {
-        Vector3::new(value[0] as f64, value[1] as f64, value[2] as f64)
-    };
+    let point = |value: [f32; 3]| Vector3::new(value[0] as f64, value[1] as f64, value[2] as f64);
     for (points, common) in [
         (geometry.ext_lines.as_slice(), ext_common),
         (geometry.dim_lines.as_slice(), dim_common),
+        (geometry.arrow_lines.as_slice(), dim_common),
     ] {
         for run in points.split(|point| point[0].is_nan()) {
             for pair in run.windows(2) {
@@ -455,7 +499,11 @@ fn dim_terminator(
     let (px, py) = (-dy, dx);
     // Point at `along` (down the dim line from the tip) and `perp` (sideways).
     let pt = |along: f64, perp: f64| {
-        Vector3::new(tip.x + dx * along + px * perp, tip.y + dy * along + py * perp, tip.z)
+        Vector3::new(
+            tip.x + dx * along + px * perp,
+            tip.y + dy * along + py * perp,
+            tip.z,
+        )
     };
     let mut out: Vec<EntityType> = Vec::new();
     let tri = |a: Vector3, b: Vector3, c: Vector3, out: &mut Vec<EntityType>| {
@@ -466,7 +514,11 @@ fn dim_terminator(
     };
     match arrow {
         A::None => {}
-        A::Triangle { size, filled, size_mul } => {
+        A::Triangle {
+            size,
+            filled,
+            size_mul,
+        } => {
             let size = (*size * *size_mul) as f64;
             let hw = size / 6.0;
             let (l, r) = (pt(size, hw), pt(size, -hw));
@@ -602,17 +654,41 @@ fn dim_center_mark(
     let v = |x: f64, y: f64| Vector3::new(x, y, center.z);
     // Central "+" mark.
     let mut out = vec![
-        dim_seg(v(center.x - mag, center.y), v(center.x + mag, center.y), common),
-        dim_seg(v(center.x, center.y - mag), v(center.x, center.y + mag), common),
+        dim_seg(
+            v(center.x - mag, center.y),
+            v(center.x + mag, center.y),
+            common,
+        ),
+        dim_seg(
+            v(center.x, center.y - mag),
+            v(center.x, center.y + mag),
+            common,
+        ),
     ];
     // Negative DIMCEN adds centre LINES: four radial strokes spanning the edge.
     if dimcen < 0.0 && radius > mag + 1e-6 {
         let inner = (radius - mag).max(0.0);
         let outer = radius + mag;
-        out.push(dim_seg(v(center.x + inner, center.y), v(center.x + outer, center.y), common));
-        out.push(dim_seg(v(center.x - inner, center.y), v(center.x - outer, center.y), common));
-        out.push(dim_seg(v(center.x, center.y + inner), v(center.x, center.y + outer), common));
-        out.push(dim_seg(v(center.x, center.y - inner), v(center.x, center.y - outer), common));
+        out.push(dim_seg(
+            v(center.x + inner, center.y),
+            v(center.x + outer, center.y),
+            common,
+        ));
+        out.push(dim_seg(
+            v(center.x - inner, center.y),
+            v(center.x - outer, center.y),
+            common,
+        ));
+        out.push(dim_seg(
+            v(center.x, center.y + inner),
+            v(center.x, center.y + outer),
+            common,
+        ));
+        out.push(dim_seg(
+            v(center.x, center.y - inner),
+            v(center.x, center.y - outer),
+            common,
+        ));
     }
     out
 }
@@ -648,7 +724,13 @@ fn dim_arc_segs_with_sweep(
 ) -> Vec<EntityType> {
     use std::f64::consts::PI;
     let steps = 12usize.max((sweep.abs() / (PI / 36.0)).ceil() as usize);
-    let pt = |a: f64| Vector3::new(center.x + radius * a.cos(), center.y + radius * a.sin(), center.z);
+    let pt = |a: f64| {
+        Vector3::new(
+            center.x + radius * a.cos(),
+            center.y + radius * a.sin(),
+            center.z,
+        )
+    };
     let mut out = Vec::new();
     let mut prev = pt(start);
     for i in 1..=steps {
@@ -701,11 +783,16 @@ fn dim_metrics(dim: &Dimension, doc: &CadDocument) -> DimMetrics {
         .map(|s| if s.dimscale > 1e-6 { s.dimscale } else { 1.0 })
         .unwrap_or(1.0);
     use crate::scene::convert::tessellate::{arrow_from_block, ArrowKind};
-    let dimasz = style.map(|s| s.dimasz * scale).unwrap_or(0.18 * scale).max(1e-6);
+    let dimasz = style
+        .map(|s| s.dimasz * scale)
+        .unwrap_or(0.18 * scale)
+        .max(1e-6);
     let dimtsz = style.map(|s| s.dimtsz * scale).unwrap_or(0.0);
     let asz = dimasz as f32;
     let (arrow1, arrow2) = if dimtsz > 1e-9 {
-        let t = ArrowKind::Tick { size: dimtsz as f32 };
+        let t = ArrowKind::Tick {
+            size: dimtsz as f32,
+        };
         (t.clone(), t)
     } else if let Some(s) = style {
         if matches!(dim, Dimension::Radius(_) | Dimension::LargeRadial(_)) {
@@ -714,19 +801,35 @@ fn dim_metrics(dim: &Dimension, doc: &CadDocument) -> DimMetrics {
         } else if matches!(dim, Dimension::Diameter(_)) {
             use crate::entities::dim_override as ov;
             let data = &dim.base().common.extended_data;
-            let first = ov::handle(data, ov::DIMBLK1)
-                .unwrap_or(if s.dimsah { s.dimblk1 } else { s.dimblk });
-            let second = ov::handle(data, ov::DIMBLK2)
-                .unwrap_or(if s.dimsah { s.dimblk2 } else { s.dimblk });
-            (arrow_from_block(doc, first, asz), arrow_from_block(doc, second, asz))
+            let first = ov::handle(data, ov::DIMBLK1).unwrap_or(if s.dimsah {
+                s.dimblk1
+            } else {
+                s.dimblk
+            });
+            let second = ov::handle(data, ov::DIMBLK2).unwrap_or(if s.dimsah {
+                s.dimblk2
+            } else {
+                s.dimblk
+            });
+            (
+                arrow_from_block(doc, first, asz),
+                arrow_from_block(doc, second, asz),
+            )
         } else if s.dimsah {
-            (arrow_from_block(doc, s.dimblk1, asz), arrow_from_block(doc, s.dimblk2, asz))
+            (
+                arrow_from_block(doc, s.dimblk1, asz),
+                arrow_from_block(doc, s.dimblk2, asz),
+            )
         } else {
             let a = arrow_from_block(doc, s.dimblk, asz);
             (a.clone(), a)
         }
     } else {
-        let a = ArrowKind::Triangle { size: asz, filled: true, size_mul: 1.0 };
+        let a = ArrowKind::Triangle {
+            size: asz,
+            filled: true,
+            size_mul: 1.0,
+        };
         (a.clone(), a)
     };
     DimMetrics {
@@ -759,7 +862,11 @@ fn dim_metrics(dim: &Dimension, doc: &CadDocument) -> DimMetrics {
 /// A DIMCLR* of 0 (ByBlock) or 256 (ByLayer) keeps the dimension's own colour
 /// so the block inherits it; a specific ACI overrides. DIMLW* < 0 (ByBlock /
 /// ByLayer) keeps the dimension's lineweight.
-fn dim_common(base: &codec::entities::EntityCommon, clr: i16, lw: i16) -> codec::entities::EntityCommon {
+fn dim_common(
+    base: &codec::entities::EntityCommon,
+    clr: i16,
+    lw: i16,
+) -> codec::entities::EntityCommon {
     let mut c = base.clone();
     c.handle = Handle::NULL;
     if clr != 0 && clr != 256 {
@@ -816,8 +923,16 @@ fn angular_block_segs(
         return out;
     }
     // Extension lines run flush from each measured ray point out to the arc.
-    let e1 = Vector3::new(vertex.x + a1.cos() * radius, vertex.y + a1.sin() * radius, vertex.z);
-    let e2 = Vector3::new(vertex.x + a2.cos() * radius, vertex.y + a2.sin() * radius, vertex.z);
+    let e1 = Vector3::new(
+        vertex.x + a1.cos() * radius,
+        vertex.y + a1.sin() * radius,
+        vertex.z,
+    );
+    let e2 = Vector3::new(
+        vertex.x + a2.cos() * radius,
+        vertex.y + a2.sin() * radius,
+        vertex.z,
+    );
     out.push(dim_seg(p1, e1, ext_c));
     out.push(dim_seg(p2, e2, ext_c));
     let mut sweep = a2 - a1;
@@ -825,13 +940,7 @@ fn angular_block_segs(
         while sweep <= 0.0 {
             sweep += 2.0 * PI;
         }
-        out.extend(dim_arc_segs_with_sweep(
-            vertex,
-            radius,
-            a1,
-            sweep,
-            dim_c,
-        ));
+        out.extend(dim_arc_segs_with_sweep(vertex, radius, a1, sweep, dim_c));
     } else {
         out.extend(dim_arc_segs(vertex, radius, a1, a2, dim_c));
     }
@@ -845,8 +954,20 @@ fn angular_block_segs(
         }
     }
     let sgn = if sweep >= 0.0 { 1.0 } else { -1.0 };
-    out.extend(dim_terminator(e1, -a1.sin() * sgn, a1.cos() * sgn, &met.arrow1, dim_c));
-    out.extend(dim_terminator(e2, a2.sin() * sgn, -a2.cos() * sgn, &met.arrow2, dim_c));
+    out.extend(dim_terminator(
+        e1,
+        -a1.sin() * sgn,
+        a1.cos() * sgn,
+        &met.arrow1,
+        dim_c,
+    ));
+    out.extend(dim_terminator(
+        e2,
+        a2.sin() * sgn,
+        -a2.cos() * sgn,
+        &met.arrow2,
+        dim_c,
+    ));
     out
 }
 
@@ -911,12 +1032,9 @@ fn norm2(dx: f64, dy: f64, fx: f64, fy: f64) -> (f64, f64) {
 
 fn explode_dimension(dim: &Dimension, doc: &CadDocument) -> Vec<EntityType> {
     if let Dimension::Arc(arc) = dim {
-        if let Some((local_arc, normal)) =
-            crate::entities::dimension::arc_dimension_in_ocs(arc)
-        {
-            let (x_axis, y_axis) = crate::scene::view::transform::ocs_axes((
-                normal.x, normal.y, normal.z,
-            ));
+        if let Some((local_arc, normal)) = crate::entities::dimension::arc_dimension_in_ocs(arc) {
+            let (x_axis, y_axis) =
+                crate::scene::view::transform::ocs_axes((normal.x, normal.y, normal.z));
             let plane = WorkingPlane::new(
                 DVec3::ZERO,
                 DVec3::new(x_axis.0, x_axis.1, x_axis.2),
@@ -932,9 +1050,8 @@ fn explode_dimension(dim: &Dimension, doc: &CadDocument) -> Vec<EntityType> {
         if let Some((local_radial, normal)) =
             crate::entities::dimension::large_radial_dimension_in_ocs(radial)
         {
-            let (x_axis, y_axis) = crate::scene::view::transform::ocs_axes((
-                normal.x, normal.y, normal.z,
-            ));
+            let (x_axis, y_axis) =
+                crate::scene::view::transform::ocs_axes((normal.x, normal.y, normal.z));
             let plane = WorkingPlane::new(
                 DVec3::ZERO,
                 DVec3::new(x_axis.0, x_axis.1, x_axis.2),
@@ -988,30 +1105,39 @@ fn explode_dimension(dim: &Dimension, doc: &CadDocument) -> Vec<EntityType> {
     // halves are suppressed. When the arrows don't fit between the extension
     // lines (gap < 2·DIMASZ, arrows only) they flip to the outside with short
     // stubs unless DIMSOXD — matching the live fit logic. DIM-ARROWS-OUTSIDE.
-    let push_dim_line = |result: &mut Vec<EntityType>, d1: Vector3, d2: Vector3, ux: f64, uy: f64| {
-        let ticks = met.dimtsz > 1e-9;
-        if !(met.dimsd1 && met.dimsd2) {
-            let dle = if ticks { met.dimdle } else { 0.0 };
-            let a = v3(d1.x - ux * dle, d1.y - uy * dle, d1.z);
-            let b = v3(d2.x + ux * dle, d2.y + uy * dle, d2.z);
-            result.push(make_seg(&a, &b, &dim_c));
-        }
-        let gap = ((d2.x - d1.x).powi(2) + (d2.y - d1.y).powi(2)).sqrt();
-        let outside = !ticks && met.dimasz > 1e-6 && gap < 2.0 * met.dimasz;
-        if outside {
-            // Arrow bodies extend outward (tips still at the origins).
-            result.extend(dim_terminator(d1, -ux, -uy, &met.arrow1, &dim_c));
-            result.extend(dim_terminator(d2, ux, uy, &met.arrow2, &dim_c));
-            if !met.dimsoxd {
-                let stub = 2.0 * met.dimasz;
-                result.push(make_seg(&v3(d1.x - ux * stub, d1.y - uy * stub, d1.z), &d1, &dim_c));
-                result.push(make_seg(&d2, &v3(d2.x + ux * stub, d2.y + uy * stub, d2.z), &dim_c));
+    let push_dim_line =
+        |result: &mut Vec<EntityType>, d1: Vector3, d2: Vector3, ux: f64, uy: f64| {
+            let ticks = met.dimtsz > 1e-9;
+            if !(met.dimsd1 && met.dimsd2) {
+                let dle = if ticks { met.dimdle } else { 0.0 };
+                let a = v3(d1.x - ux * dle, d1.y - uy * dle, d1.z);
+                let b = v3(d2.x + ux * dle, d2.y + uy * dle, d2.z);
+                result.push(make_seg(&a, &b, &dim_c));
             }
-        } else {
-            result.extend(dim_terminator(d1, ux, uy, &met.arrow1, &dim_c));
-            result.extend(dim_terminator(d2, -ux, -uy, &met.arrow2, &dim_c));
-        }
-    };
+            let gap = ((d2.x - d1.x).powi(2) + (d2.y - d1.y).powi(2)).sqrt();
+            let outside = !ticks && met.dimasz > 1e-6 && gap < 2.0 * met.dimasz;
+            if outside {
+                // Arrow bodies extend outward (tips still at the origins).
+                result.extend(dim_terminator(d1, -ux, -uy, &met.arrow1, &dim_c));
+                result.extend(dim_terminator(d2, ux, uy, &met.arrow2, &dim_c));
+                if !met.dimsoxd {
+                    let stub = 2.0 * met.dimasz;
+                    result.push(make_seg(
+                        &v3(d1.x - ux * stub, d1.y - uy * stub, d1.z),
+                        &d1,
+                        &dim_c,
+                    ));
+                    result.push(make_seg(
+                        &d2,
+                        &v3(d2.x + ux * stub, d2.y + uy * stub, d2.z),
+                        &dim_c,
+                    ));
+                }
+            } else {
+                result.extend(dim_terminator(d1, ux, uy, &met.arrow1, &dim_c));
+                result.extend(dim_terminator(d2, -ux, -uy, &met.arrow2, &dim_c));
+            }
+        };
 
     match dim {
         Dimension::Aligned(d) => {
@@ -1040,7 +1166,9 @@ fn explode_dimension(dim: &Dimension, doc: &CadDocument) -> Vec<EntityType> {
             if !met.dimse2 {
                 result.push(make_seg(&e2a, &e2b, &ext_c));
             }
-            let ml = ((d2.x - d1.x).powi(2) + (d2.y - d1.y).powi(2)).sqrt().max(1e-12);
+            let ml = ((d2.x - d1.x).powi(2) + (d2.y - d1.y).powi(2))
+                .sqrt()
+                .max(1e-12);
             let (ux, uy) = ((d2.x - d1.x) / ml, (d2.y - d1.y) / ml);
             push_dim_line(&mut result, d1, d2, ux, uy);
         }
@@ -1076,7 +1204,9 @@ fn explode_dimension(dim: &Dimension, doc: &CadDocument) -> Vec<EntityType> {
             if !met.dimse2 {
                 result.push(make_seg(&e2a, &e2b, &ext_c));
             }
-            let ml = ((d2.x - d1.x).powi(2) + (d2.y - d1.y).powi(2)).sqrt().max(1e-12);
+            let ml = ((d2.x - d1.x).powi(2) + (d2.y - d1.y).powi(2))
+                .sqrt()
+                .max(1e-12);
             let (ux, uy) = ((d2.x - d1.x) / ml, (d2.y - d1.y) / ml);
             push_dim_line(&mut result, d1, d2, ux, uy);
         }
@@ -1099,7 +1229,11 @@ fn explode_dimension(dim: &Dimension, doc: &CadDocument) -> Vec<EntityType> {
             let anchor = dim_text_anchor(base, center, point);
             let ld = norm2(anchor.x - point.x, anchor.y - point.y, 1.0, 0.0);
             let leader = if d.leader_length.abs() > 1e-9 {
-                v3(point.x + ld.0 * d.leader_length, point.y + ld.1 * d.leader_length, point.z)
+                v3(
+                    point.x + ld.0 * d.leader_length,
+                    point.y + ld.1 * d.leader_length,
+                    point.z,
+                )
             } else {
                 anchor
             };
@@ -1119,16 +1253,8 @@ fn explode_dimension(dim: &Dimension, doc: &CadDocument) -> Vec<EntityType> {
             let (ux, uy) = ((edge.x - far.x) / len, (edge.y - far.y) / len);
             let ticks = met.dimtsz > 1e-9;
             let extension = if ticks { met.dimdle } else { 0.0 };
-            let edge_outer = v3(
-                edge.x + ux * extension,
-                edge.y + uy * extension,
-                edge.z,
-            );
-            let far_outer = v3(
-                far.x - ux * extension,
-                far.y - uy * extension,
-                far.z,
-            );
+            let edge_outer = v3(edge.x + ux * extension, edge.y + uy * extension, edge.z);
+            let far_outer = v3(far.x - ux * extension, far.y - uy * extension, far.z);
             if !met.dimsd1 {
                 result.push(make_seg(&edge_outer, &center, &dim_c));
             }
@@ -1166,13 +1292,12 @@ fn explode_dimension(dim: &Dimension, doc: &CadDocument) -> Vec<EntityType> {
                     + (first.y - second.y).powi(2)
                     + (first.z - second.z).powi(2)
             };
-            let (leader_tip, suppressed, fallback) = if distance_squared(anchor, edge)
-                <= distance_squared(anchor, far)
-            {
-                (edge, met.dimsd1, (ux, uy))
-            } else {
-                (far, met.dimsd2, (-ux, -uy))
-            };
+            let (leader_tip, suppressed, fallback) =
+                if distance_squared(anchor, edge) <= distance_squared(anchor, far) {
+                    (edge, met.dimsd1, (ux, uy))
+                } else {
+                    (far, met.dimsd2, (-ux, -uy))
+                };
             if !suppressed && d.leader_length.abs() > 1e-9 {
                 let ld = norm2(
                     anchor.x - leader_tip.x,
@@ -1271,8 +1396,7 @@ fn explode_dimension(dim: &Dimension, doc: &CadDocument) -> Vec<EntityType> {
         }
     }
 
-    let symbol_points =
-        crate::entities::dimension::baked_arc_length_symbol_points(dim, doc, 1.0);
+    let symbol_points = crate::entities::dimension::baked_arc_length_symbol_points(dim, doc, 1.0);
     if symbol_points.len() > 1 {
         let text_c = dim_common(&base.common, met.dimclrt, -2);
         for pair in symbol_points.windows(2) {
@@ -1329,8 +1453,7 @@ fn sync_dimension_base_points_and_collect_pending(doc: &mut CadDocument) -> Vec<
                 Dimension::Angular2Ln(_) => None,
             };
             let base = dimension.base();
-            let needs_sync =
-                definition_point.filter(|point| *point != base.definition_point);
+            let needs_sync = definition_point.filter(|point| *point != base.definition_point);
             let block_missing = base.block_name.trim().is_empty()
                 || !existing_blocks.contains(&base.block_name.to_ascii_lowercase());
             Some((base.common.handle, needs_sync, block_missing))
@@ -1621,7 +1744,10 @@ mod tests {
         // block_name cleared → the dimension is pending again.
         match doc.get_entity(handle) {
             Some(EntityType::Dimension(d)) => {
-                assert!(d.base().block_name.trim().is_empty(), "block_name must be cleared");
+                assert!(
+                    d.base().block_name.trim().is_empty(),
+                    "block_name must be cleared"
+                );
             }
             _ => panic!("dimension missing"),
         }
@@ -1644,7 +1770,10 @@ mod tests {
             Some(EntityType::Dimension(d)) => d.base().block_name.clone(),
             _ => panic!("dimension missing"),
         };
-        assert!(!rebaked.trim().is_empty(), "re-bake must assign a new block");
+        assert!(
+            !rebaked.trim().is_empty(),
+            "re-bake must assign a new block"
+        );
     }
 
     // Collect the line segments baked into the dimension's `*D` block.
@@ -1712,7 +1841,10 @@ mod tests {
             .entities()
             .filter(|e| matches!(e, EntityType::Solid(s) if s.common.owner_handle == rec.handle))
             .count();
-        assert_eq!(solids, 2, "expected 2 filled (SOLID) arrowheads, got {solids}");
+        assert_eq!(
+            solids, 2,
+            "expected 2 filled (SOLID) arrowheads, got {solids}"
+        );
     }
 
     /// The line segments EXPLODE turns the dimension into.
@@ -1793,7 +1925,10 @@ mod tests {
             .entities()
             .filter(|e| matches!(e, EntityType::Line(l) if l.common.owner_handle == rec.handle))
             .count();
-        assert!(lines > 5, "angular bake must include arc chords, got {lines} lines");
+        assert!(
+            lines > 5,
+            "angular bake must include arc chords, got {lines} lines"
+        );
     }
 
     // Diameter endpoints stay equidistant from the circle center.
@@ -1819,12 +1954,9 @@ mod tests {
         let connects = |expected: Vector3| {
             segments.iter().any(|(a, b)| {
                 let near = |p: &Vector3, q: &Vector3| {
-                    (p.x - q.x).abs() < 1e-6
-                        && (p.y - q.y).abs() < 1e-6
-                        && (p.z - q.z).abs() < 1e-6
+                    (p.x - q.x).abs() < 1e-6 && (p.y - q.y).abs() < 1e-6 && (p.z - q.z).abs() < 1e-6
                 };
-                (near(a, &expected) && near(b, &center))
-                    || (near(b, &expected) && near(a, &center))
+                (near(a, &expected) && near(b, &center)) || (near(b, &expected) && near(a, &center))
             })
         };
         assert!(connects(edge), "near diameter half missing");
@@ -1920,5 +2052,76 @@ mod tests {
         assert!((line.thickness + 4.0).abs() < 1e-12);
         assert!((line.start.x - 2.0).abs() < 1e-12);
         assert!((line.end.x - 2.0).abs() < 1e-12);
+    }
+
+    // RED (TDD): a real DIMLINEAR must survive save -> reload with its baked
+    // *D geometry intact and a clean handle graph (no duplicates, no dangling
+    // owners). Headless codec round-trip, no GUI needed.
+    #[test]
+    fn dimlinear_survives_save_reload_with_baked_geometry() {
+        let mut failures = Vec::new();
+        for ext in ["dxf", "dwg"] {
+            let mut doc = CadDocument::new();
+            let mut d =
+                DimensionLinear::new(Vector3::new(0.0, 0.0, 0.0), Vector3::new(10.0, 0.0, 0.0));
+            d.definition_point = Vector3::new(0.0, 5.0, 0.0);
+            d.base.text_middle_point = Vector3::new(5.0, 5.0, 0.0);
+            doc.add_entity(EntityType::Dimension(Dimension::Linear(d)))
+                .unwrap();
+
+            let path =
+                std::env::temp_dir().join(format!("ocs_dim_rt_{}.{ext}", std::process::id()));
+            crate::io::save_as_version(&doc, &path, codec::DxfVersion::AC1032).expect("save");
+            let loaded = crate::io::load_file(&path).expect("load");
+            let _ = std::fs::remove_file(&path);
+
+            let mut seen = std::collections::HashSet::new();
+            for e in loaded.entities() {
+                if !seen.insert(e.common().handle) {
+                    failures.push(format!("{ext}: duplicate handle {:?}", e.common().handle));
+                }
+            }
+            let dims: Vec<_> = loaded
+                .entities()
+                .filter_map(|e| match e {
+                    EntityType::Dimension(d) => Some(d.clone()),
+                    _ => None,
+                })
+                .collect();
+            if dims.len() != 1 {
+                failures.push(format!("{ext}: dimension entity lost"));
+                continue;
+            }
+            let block_name = dims[0].base().block_name.clone();
+            if block_name.trim().is_empty() {
+                failures.push(format!("{ext}: dimension came back blockless"));
+                continue;
+            }
+            let Some(rec) = loaded.block_records.get(&block_name) else {
+                failures.push(format!("{ext}: *D block {block_name} missing after reload"));
+                continue;
+            };
+            let owned: Vec<Handle> = {
+                let mut h = rec.entity_handles.clone();
+                h.push(rec.block_entity_handle);
+                h.push(rec.block_end_handle);
+                h
+            };
+            if rec.entity_handles.is_empty() {
+                failures.push(format!("{ext}: baked block has no sub-entities"));
+            }
+            for h in &owned {
+                if h.is_null() || loaded.get_entity(*h).is_none() {
+                    failures.push(format!(
+                        "{ext}: dangling handle {h:?} in baked block {block_name}"
+                    ));
+                }
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "round-trip failures:\n{}",
+            failures.join("\n")
+        );
     }
 }

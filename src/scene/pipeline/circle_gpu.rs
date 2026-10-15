@@ -254,7 +254,12 @@ pub fn extract_circle_instance_from_geom_indexed(
         ),
         _ => return None,
     };
-    if radius <= 0.0 || !radius.is_finite() || !start_angle.is_finite() || !end_angle.is_finite() || radius > 1e6 {
+    if radius <= 0.0
+        || !radius.is_finite()
+        || !start_angle.is_finite()
+        || !end_angle.is_finite()
+        || radius > 1e6
+    {
         return None;
     }
 
@@ -323,7 +328,12 @@ pub fn extract_circle_instances(
 
 /// Allocation-free check whether this wire consists entirely of analytical circle/arc instances.
 pub fn can_extract_circle_instances(wire: &crate::scene::WireModel) -> bool {
-    if wire.tangent_geoms.is_empty()
+    // Patterned circular curves stay on the regular wire pipeline. Its dash
+    // path is shared with LINE/POLYLINE and remains consistent across file
+    // open/save cycles. The analytical circle path is reserved for continuous
+    // curves until its linetype phase/LOD behaviour is fully equivalent.
+    if wire.pattern_length > 0.0
+        || wire.tangent_geoms.is_empty()
         || !wire.fill_tris.is_empty()
         || wire.fill_is_3d
         || !wire.text_verts.is_empty()
@@ -361,7 +371,8 @@ pub fn extract_circle_instances_into(
     draw_depth: f32,
     out: &mut Vec<CircleInstance>,
 ) -> bool {
-    if wire.tangent_geoms.is_empty()
+    if wire.pattern_length > 0.0
+        || wire.tangent_geoms.is_empty()
         || !wire.fill_tris.is_empty()
         || wire.fill_is_3d
         || !wire.text_verts.is_empty()
@@ -510,14 +521,15 @@ mod tests {
     #[test]
     fn extract_circle_instance_constant_wide_arc() {
         let mut wire = crate::scene::WireModel::default();
-        wire.tangent_geoms.push(crate::scene::model::wire_model::TangentGeom::Arc {
-            center: [100.0, 50.0, 0.0],
-            axis_x: [1.0, 0.0, 0.0],
-            axis_y: [0.0, 1.0, 0.0],
-            radius: 40.0,
-            start_angle: 0.0,
-            end_angle: std::f64::consts::PI,
-        });
+        wire.tangent_geoms
+            .push(crate::scene::model::wire_model::TangentGeom::Arc {
+                center: [100.0, 50.0, 0.0],
+                axis_x: [1.0, 0.0, 0.0],
+                axis_y: [0.0, 1.0, 0.0],
+                radius: 40.0,
+                start_angle: 0.0,
+                end_angle: std::f64::consts::PI,
+            });
         wire.world_width = 12.0;
         wire.color = [1.0, 0.5, 0.0, 1.0];
 
@@ -530,14 +542,15 @@ mod tests {
     #[test]
     fn extract_circle_instance_tapered_arc() {
         let mut wire = crate::scene::WireModel::default();
-        wire.tangent_geoms.push(crate::scene::model::wire_model::TangentGeom::Arc {
-            center: [0.0, 0.0, 0.0],
-            axis_x: [1.0, 0.0, 0.0],
-            axis_y: [0.0, 1.0, 0.0],
-            radius: 30.0,
-            start_angle: 0.2,
-            end_angle: 1.8,
-        });
+        wire.tangent_geoms
+            .push(crate::scene::model::wire_model::TangentGeom::Arc {
+                center: [0.0, 0.0, 0.0],
+                axis_x: [1.0, 0.0, 0.0],
+                axis_y: [0.0, 1.0, 0.0],
+                radius: 30.0,
+                start_angle: 0.2,
+                end_angle: 1.8,
+            });
         wire.world_width = 20.0;
         wire.taper_widths = vec![4.0, 20.0];
         wire.color = [0.2, 0.8, 1.0, 1.0];
@@ -551,15 +564,17 @@ mod tests {
     #[test]
     fn extract_circle_instance_accepts_pick_tris() {
         let mut wire = crate::scene::WireModel::default();
-        wire.tangent_geoms.push(crate::scene::model::wire_model::TangentGeom::Circle {
-            center: [5.0, 5.0, 0.0],
-            radius: 15.0,
-        });
+        wire.tangent_geoms
+            .push(crate::scene::model::wire_model::TangentGeom::Circle {
+                center: [5.0, 5.0, 0.0],
+                radius: 15.0,
+            });
         wire.world_width = 6.0;
         wire.pick_tris = vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]];
         wire.pick_tris_low = vec![[0.0; 3]; 3];
 
-        let insts = extract_circle_instances(&wire, 0.0).expect("wide curve with pick_tris should extract");
+        let insts =
+            extract_circle_instances(&wire, 0.0).expect("wide curve with pick_tris should extract");
         assert_eq!(insts.len(), 1);
         assert_eq!(insts[0].start_width, 6.0);
         assert_eq!(insts[0].params[3], 6.0);
@@ -586,11 +601,18 @@ mod tests {
             None,
             false,
         );
-        assert_eq!(wires.len(), 2, "donut should split into 2 analytical arc wires");
+        assert_eq!(
+            wires.len(),
+            2,
+            "donut should split into 2 analytical arc wires"
+        );
         for w in &wires {
             assert_eq!(w.world_width, 20.0);
             assert_eq!(w.tangent_geoms.len(), 1);
-            assert!(matches!(w.tangent_geoms[0], crate::scene::model::wire_model::TangentGeom::Arc { .. }));
+            assert!(matches!(
+                w.tangent_geoms[0],
+                crate::scene::model::wire_model::TangentGeom::Arc { .. }
+            ));
         }
 
         let depth_map = rustc_hash::FxHashMap::default();

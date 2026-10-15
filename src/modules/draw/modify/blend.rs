@@ -5,12 +5,12 @@
 //! first and second derivatives reproduce the source curves' tangent and
 //! geometric curvature (G2).
 
+use crate::t;
 use codec::entities::{EntityCommon, Spline};
-use kernel::space::curve as space_curve;
 use codec::types::Vector3;
 use codec::{EntityType, Handle};
 use glam::DVec3;
-use crate::t;
+use kernel::space::curve as space_curve;
 use kernel::space::NurbsCurve3;
 
 use crate::command::{CadCommand, CmdOption, CmdResult};
@@ -106,27 +106,15 @@ impl CadCommand for BlendCommand {
         match self.step {
             BlendStep::First => {
                 let c = self.continuity.label();
-                t!(
-                    "BLEND  Select first open curve  [Continuity=%{c}]:",
-                    c = c
-                )
-                .into_owned()
+                t!("BLEND  Select first open curve  [Continuity=%{c}]:", c = c).into_owned()
             }
             BlendStep::Continuity { .. } => {
                 let c = self.continuity.label();
-                t!(
-                    "BLEND  Enter continuity [Tangent/Curvature] <%{c}>:",
-                    c = c
-                )
-                .into_owned()
+                t!("BLEND  Enter continuity [Tangent/Curvature] <%{c}>:", c = c).into_owned()
             }
             BlendStep::Second { .. } => {
                 let c = self.continuity.label();
-                t!(
-                    "BLEND  Select second open curve  [Continuity=%{c}]:",
-                    c = c
-                )
-                .into_owned()
+                t!("BLEND  Select second open curve  [Continuity=%{c}]:", c = c).into_owned()
             }
         }
     }
@@ -631,10 +619,7 @@ fn circumcircle_curvature(point: DVec3, next: DVec3, third: DVec3) -> DVec3 {
 /// the two the blend happens to build today, and quietly wrong the moment a
 /// third was added.
 fn sample_bezier(control_points: &[Vector3], segments: usize) -> Vec<[f64; 3]> {
-    let control: Vec<[f64; 3]> = control_points
-        .iter()
-        .map(|p| [p.x, p.y, p.z])
-        .collect();
+    let control: Vec<[f64; 3]> = control_points.iter().map(|p| [p.x, p.y, p.z]).collect();
     space_curve::bezier_points(&control, segments)
 }
 

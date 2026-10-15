@@ -18,7 +18,12 @@ impl OpenCADStudio {
         self.open_mtext_editor(pos, handle, &initial, height, template.map(|m| *m));
     }
 
-    pub(super) fn handle_suspend_for_mtext_input(&mut self, pos: glam::DVec3, initial: String, height: f64) {
+    pub(super) fn handle_suspend_for_mtext_input(
+        &mut self,
+        pos: glam::DVec3,
+        initial: String,
+        height: f64,
+    ) {
         let i = self.active_tab;
         self.tabs[i].suspended_cmd = self.tabs[i].active_cmd.take();
         self.tabs[i].snap_result = None;
@@ -185,7 +190,11 @@ impl OpenCADStudio {
         self.restore_pre_cmd_tangent();
     }
 
-    pub(super) fn handle_ddedit_entity(&mut self, handle: Handle, new_text: String) -> Option<Task<Message>> {
+    pub(super) fn handle_ddedit_entity(
+        &mut self,
+        handle: Handle,
+        new_text: String,
+    ) -> Option<Task<Message>> {
         let i = self.active_tab;
         if self.reject_locked_edit(i, handle) {
             self.tabs[i].active_cmd = None;

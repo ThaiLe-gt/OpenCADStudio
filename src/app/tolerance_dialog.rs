@@ -68,12 +68,10 @@ impl super::OpenCADStudio {
         }
         let i = self.active_tab;
         let text = state.to_text();
-        let mut preview_entity = EntityType::Tolerance(
-            codec::entities::Tolerance::with_text(
-                codec::types::Vector3::ZERO,
-                text.clone(),
-            ),
-        );
+        let mut preview_entity = EntityType::Tolerance(codec::entities::Tolerance::with_text(
+            codec::types::Vector3::ZERO,
+            text.clone(),
+        ));
         crate::scene::creation_style::apply_current_creation_styles(
             &self.tabs[i].scene.document,
             &mut preview_entity,

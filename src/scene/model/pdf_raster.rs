@@ -18,6 +18,13 @@ pub struct PdfPage {
 
 const RASTER_DPI: f32 = 150.0;
 
+/// Ceiling on the print raster's pixel count (RGBA ⇒ ×4 bytes): an ANSI E
+/// sheet at 300 DPI is ~135 M px and stays under it, while a crafted
+/// MediaBox cannot ask hayro for a multi-gigabyte pixmap — its `u16`
+/// dimensions saturate at 65 535, i.e. a 17 GB allocation (abort or a
+/// multi-minute freeze).
+const MAX_PRINT_RASTER_PIXELS: f64 = 268_435_456.0;
+
 /// Source path, page, DPI bits and whether the page background is transparent.
 type PageKey = (String, String, u32, bool);
 
@@ -75,8 +82,22 @@ pub fn rasterize_page_display(path: &str, page: &str) -> Option<Arc<PdfPage>> {
     rasterize_cached(path, page, RASTER_DPI, true)
 }
 
+/// The display raster at a lower DPI for a page shown small on screen
+/// (never above the on-screen 150 DPI).
+pub fn rasterize_page_display_at(path: &str, page: &str, dpi: f32) -> Option<Arc<PdfPage>> {
+    rasterize_cached(path, page, dpi.clamp(1.0, RASTER_DPI), true)
+}
+
+/// The DPI of the full-size display raster.
+pub const DISPLAY_DPI: f32 = RASTER_DPI;
+
 fn rasterize_cached(path: &str, page: &str, dpi: f32, transparent: bool) -> Option<Arc<PdfPage>> {
-    let key = (path.to_string(), page.to_string(), dpi.to_bits(), transparent);
+    let key = (
+        path.to_string(),
+        page.to_string(),
+        dpi.to_bits(),
+        transparent,
+    );
     if let Some(hit) = page_cache()
         .lock()
         .unwrap_or_else(|error| error.into_inner())
@@ -106,7 +127,33 @@ fn rasterize_uncached(path: &str, page: &str, dpi: f32, transparent: bool) -> Op
     let pdf = Pdf::new(bytes).ok()?;
     let page_no = page.trim().parse::<usize>().unwrap_or(1).max(1);
     let page = pdf.pages().get(page_no - 1)?;
-    let scale = dpi / 72.0;
+    let mut scale = dpi / 72.0;
+    let mut effective_dpi = dpi;
+    // Page size in points, straight from the file's MediaBox/CropBox.
+    let (page_w, page_h) = page.render_dimensions();
+    let longest = (page_w as f64).max(page_h as f64);
+    if longest.is_finite() && longest > 0.0 {
+        if dpi <= DISPLAY_DPI {
+            // Screen rasters get the same longest-side clamp the DWF/DGN
+            // underlays receive (`underlay_vector::RASTER_SIDE`); the page
+            // maps onto the same world rect regardless of pixel count.
+            if longest * f64::from(dpi) / 72.0 > super::underlay_vector::RASTER_SIDE {
+                let clamped = super::underlay_vector::RASTER_SIDE / longest;
+                scale = clamped as f32;
+                effective_dpi = (clamped * 72.0) as f32;
+            }
+        } else {
+            // Print keeps the exact DPI — the sheet size in millimetres is
+            // derived from it (`page.width / dpi`) — so an oversized page
+            // is refused instead of rescaled (a rescale would print the
+            // wrong physical size).
+            let pw = page_w as f64 * f64::from(dpi) / 72.0;
+            let ph = page_h as f64 * f64::from(dpi) / 72.0;
+            if !(pw.is_finite() && ph.is_finite()) || pw * ph > MAX_PRINT_RASTER_PIXELS {
+                return None;
+            }
+        }
+    }
     let pixmap = hayro::render(
         page,
         &RenderCache::new(),
@@ -128,7 +175,7 @@ fn rasterize_uncached(path: &str, page: &str, dpi: f32, transparent: bool) -> Op
         pixels: Arc::new(pixels),
         width,
         height,
-        dpi,
+        dpi: effective_dpi,
     }))
 }
 
@@ -151,7 +198,11 @@ fn rgb_to_hsl([r, g, b]: [f32; 3]) -> (f32, f32, f32) {
     if d <= f32::EPSILON {
         return (0.0, 0.0, l);
     }
-    let s = if l > 0.5 { d / (2.0 - max - min) } else { d / (max + min) };
+    let s = if l > 0.5 {
+        d / (2.0 - max - min)
+    } else {
+        d / (max + min)
+    };
     let h = if max == r {
         ((g - b) / d).rem_euclid(6.0)
     } else if max == g {
@@ -166,7 +217,11 @@ fn hsl_to_rgb(h: f32, s: f32, l: f32) -> [f32; 3] {
     if s <= f32::EPSILON {
         return [l; 3];
     }
-    let q = if l < 0.5 { l * (1.0 + s) } else { l + s - l * s };
+    let q = if l < 0.5 {
+        l * (1.0 + s)
+    } else {
+        l + s - l * s
+    };
     let p = 2.0 * l - q;
     let channel = |t: f32| {
         let t = t.rem_euclid(1.0);
@@ -205,13 +260,21 @@ pub fn page_size_inches(path: &str, page: &str) -> Option<(f64, f64)> {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct PageAdjust {
     /// 0..=100; 100 keeps the colours, lower values pull their lightness
-    /// towards one third.
+    /// towards `contrast_pivot` (hue and saturation kept).
     pub contrast: u8,
+    /// The lightness contrast 0 leaves every colour at, in thousandths:
+    /// measured 500 for PDF and 243 for DWF; a DGN model's follows its
+    /// colours.
+    pub contrast_pivot: u16,
     pub monochrome: bool,
     /// Lighten dark, unsaturated content on a dark background (black lines
     /// and text become white), keeping coloured content.
     pub adjust_for_background: bool,
     pub dark_background: bool,
+    /// A fade blended into the colours before the contrast (a DGN
+    /// model's): the background and the share, 0..=100, of the way each
+    /// colour is taken to it.
+    pub fade_before_contrast: Option<([u8; 3], u8)>,
 }
 
 type AdjustKey = (String, String, PageAdjust);
@@ -221,14 +284,60 @@ fn adjusted_cache() -> &'static Mutex<HashMap<AdjustKey, Arc<Vec<u8>>>> {
     CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+/// One colour (0..=1 channels) with the underlay's contrast / monochrome /
+/// background adjustments applied.
+pub fn adjust_rgb(rgb: [f32; 3], adjust: &PageAdjust) -> [f32; 3] {
+    let mut rgb = rgb;
+    if adjust.monochrome {
+        let l = 0.299 * rgb[0] + 0.587 * rgb[1] + 0.114 * rgb[2];
+        rgb = [l; 3];
+    }
+    if adjust.adjust_for_background && adjust.dark_background {
+        // On a dark background every colour's lightness is turned over
+        // (plus 20/255, capped at full), hue and saturation kept: black
+        // becomes white, dark red light pink. On a light background the
+        // colours stay as drawn.
+        let (h, s, l) = rgb_to_hsl(rgb);
+        rgb = hsl_to_rgb(h, s, (1.0 - l + 20.0 / 255.0).min(1.0));
+    }
+    if let Some((bg, fade)) = adjust.fade_before_contrast {
+        let f = fade.min(100) as f32 / 100.0;
+        for (c, b) in rgb.iter_mut().zip(bg) {
+            *c += (b as f32 / 255.0 - *c) * f;
+        }
+    }
+    if adjust.contrast < 100 {
+        // Lightness is pulled towards the pivot, hue and saturation kept:
+        // contrast 0 leaves every colour at the pivot's lightness.
+        let (h, s, l) = rgb_to_hsl(rgb);
+        let k = adjust.contrast as f32 / 100.0;
+        let pivot = adjust.contrast_pivot as f32 / 1000.0;
+        rgb = hsl_to_rgb(h, s, pivot + (l - pivot) * k);
+    }
+    rgb
+}
+
 /// The display raster with the underlay's contrast / monochrome / background
 /// adjustments applied, memoised per source, page and adjustment.
-pub fn adjusted_pixels(path: &str, page: &str, raster: &PdfPage, adjust: PageAdjust) -> Arc<Vec<u8>> {
-    let identity = adjust.contrast >= 100 && !adjust.monochrome && !adjust.adjust_for_background;
+pub fn adjusted_pixels(
+    path: &str,
+    page: &str,
+    raster: &PdfPage,
+    adjust: PageAdjust,
+) -> Arc<Vec<u8>> {
+    let identity = adjust.contrast >= 100
+        && !adjust.monochrome
+        && !adjust.adjust_for_background
+        && adjust.fade_before_contrast.is_none();
     if identity {
         return raster.pixels.clone();
     }
-    let key = (path.to_string(), page.to_string(), adjust);
+    // One entry per raster size: a page is rasterised again for the zoom.
+    let key = (
+        path.to_string(),
+        format!("{page}@{}x{}", raster.width, raster.height),
+        adjust,
+    );
     if let Some(hit) = adjusted_cache()
         .lock()
         .unwrap_or_else(|error| error.into_inner())
@@ -242,26 +351,14 @@ pub fn adjusted_pixels(path: &str, page: &str, raster: &PdfPage, adjust: PageAdj
         if px[3] == 0 {
             continue;
         }
-        let mut rgb = [px[0] as f32 / 255.0, px[1] as f32 / 255.0, px[2] as f32 / 255.0];
-        if adjust.monochrome {
-            let l = 0.299 * rgb[0] + 0.587 * rgb[1] + 0.114 * rgb[2];
-            rgb = [l; 3];
-        }
-        if adjust.adjust_for_background && adjust.dark_background {
-            // On a dark background every colour's lightness is turned over
-            // (plus 20/255, capped at full), hue and saturation kept: black
-            // becomes white, dark red light pink. On a light background the
-            // colours stay as drawn.
-            let (h, s, l) = rgb_to_hsl(rgb);
-            rgb = hsl_to_rgb(h, s, (1.0 - l + 20.0 / 255.0).min(1.0));
-        }
-        if adjust.contrast < 100 {
-            // Lightness is pulled towards one third, hue and saturation kept:
-            // contrast 0 leaves every colour at a third of full lightness.
-            let (h, s, l) = rgb_to_hsl(rgb);
-            let k = adjust.contrast as f32 / 100.0;
-            rgb = hsl_to_rgb(h, s, 1.0 / 3.0 + (l - 1.0 / 3.0) * k);
-        }
+        let rgb = adjust_rgb(
+            [
+                px[0] as f32 / 255.0,
+                px[1] as f32 / 255.0,
+                px[2] as f32 / 255.0,
+            ],
+            &adjust,
+        );
         for (dst, c) in px[..3].iter_mut().zip(rgb) {
             *dst = (c.clamp(0.0, 1.0) * 255.0).round() as u8;
         }
@@ -314,5 +411,34 @@ mod tests {
 
         assert_eq!((page.width, page.height), (150, 150));
         assert_eq!(page.pixels.len(), 150 * 150 * 4);
+    }
+
+    /// A 15 m square MediaBox at 150 DPI would be 88 583 px a side: hayro
+    /// saturates its `u16` dimensions to 65 535 and `Pixmap::new` asks for
+    /// 65 535² × 4 = **17 GB** — the report's allocation-failure abort.
+    /// The display raster must clamp to `RASTER_SIDE` instead, and the
+    /// print raster (exact DPI, physical size derived from it) must be
+    /// refused rather than rescaled.
+    #[test]
+    fn an_enormous_page_is_clamped_or_refused_never_a_17gb_pixmap() {
+        let mut document = PdfDocument::new("PDF underlay huge-page test");
+        document
+            .pages
+            .push(OutputPage::new(Mm(15_000.0), Mm(15_000.0), Vec::new()));
+        let bytes = document.save(&PdfSaveOptions::default(), &mut Vec::new());
+        let path = "memory://pdf-underlay-huge-page.pdf";
+
+        register_source(path, Arc::new(bytes));
+        let page = rasterize_page_display(path, "1").expect("display raster is clamped");
+        assert_eq!((page.width, page.height), (3072, 3072));
+        assert!(
+            page.dpi < DISPLAY_DPI,
+            "clamped raster reports its effective DPI"
+        );
+
+        assert!(
+            rasterize_page_at_dpi(path, "1", 300.0).is_none(),
+            "a print raster over the pixel budget is refused, not rescaled"
+        );
     }
 }
