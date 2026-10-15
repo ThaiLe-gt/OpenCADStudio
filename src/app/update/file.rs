@@ -1002,6 +1002,9 @@ impl OpenCADStudio {
         } else {
             0.0
         };
+        // The Options field edits a buffer rather than the value, so it has to
+        // be reseeded whenever the value is restored from behind it.
+        self.snap_angle_input = crate::app::settings::format_snap_angle(self.snap_angle_deg);
         // Ortho + running OSNAP are per-drawing (adopted from the header on
         // open / tab switch), not app-global, so they are not applied here.
         self.snapper.otrack_enabled = s.otrack;
@@ -1011,6 +1014,7 @@ impl OpenCADStudio {
         self.qnew_template = s.qnew_template.clone();
         self.font_source_input = s.font_source_url.clone();
         self.donation_prompt_version = s.donation_prompt_version.clone();
+        self.gpu_warning_silenced = s.gpu_warning_silenced.clone();
         self.disabled_plugins = s.disabled_plugins.iter().cloned().collect();
         self.plugin_repos = s.plugin_repos.clone();
         self.command_line.literal_spaces = s.literal_spaces;
@@ -1028,6 +1032,7 @@ impl OpenCADStudio {
         self.texteditmode = s.texteditmode;
         self.quick_dimension_snap_priority = s.quick_dimension_snap_priority.min(1);
         self.dimension_continue_mode = s.dimension_continue_mode.clamp(0, 1);
+        self.delete_objects = s.delete_objects.clamp(0, 3);
         crate::scene::text::sdf_atlas::set_textfill(s.textfill);
         self.backup_on_save = s.backup_on_save;
         self.file_assoc_enabled = s.file_assoc_enabled;
