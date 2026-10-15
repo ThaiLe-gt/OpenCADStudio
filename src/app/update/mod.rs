@@ -618,10 +618,12 @@ impl OpenCADStudio {
             Message::PollWebControl => Task::none(),
             #[cfg(target_arch = "wasm32")]
             Message::MetalBridgePoll => self.on_metal_bridge_poll(),
+            #[cfg(target_arch = "wasm32")]
             Message::MetalOverlayClicked(overlay_id) => {
                 self.publish_metal_overlay_event(&overlay_id, None);
                 Task::none()
             }
+            #[cfg(target_arch = "wasm32")]
             Message::MetalOverlayAction(overlay_id, action_id) => {
                 self.publish_metal_overlay_event(&overlay_id, Some(&action_id));
                 Task::none()

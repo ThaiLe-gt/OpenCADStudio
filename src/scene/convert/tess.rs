@@ -1850,6 +1850,7 @@ pub(crate) fn entity_world_aabb_f64(e: &codec::EntityType) -> Option<[f64; 4]> {
 /// live on different elevations/planes. Keep the 2-D helper above unchanged:
 /// OpenCAD's quadtree and model-space translation commands intentionally work
 /// in the drawing XY plane.
+#[cfg(any(target_arch = "wasm32", test))]
 pub(crate) fn entity_world_aabb_3d_f64(e: &codec::EntityType) -> Option<[f64; 6]> {
     let bbox = e.as_entity().bounding_box();
     let bounds = [

@@ -1,7 +1,9 @@
 use super::document::DocumentTab;
 use super::document::DynComponent;
 use super::history::history_dropdown_labels;
-use super::{ArrowKey, Message, MetalOverlayKind, OpenCADStudio};
+use super::{ArrowKey, Message, OpenCADStudio};
+#[cfg(target_arch = "wasm32")]
+use super::MetalOverlayKind;
 use crate::scene::pick::grip::{grips_to_screen, grips_to_screen_paper, grips_to_screen_rte};
 use crate::scene::view::viewport_pane::ViewportPane;
 use crate::scene::{VIEWCUBE_PAD, VIEWCUBE_REGION_PX};
@@ -24,11 +26,14 @@ mod viewcube;
 
 use controls::{dyn_component_value, viewport_controls};
 use overlay::{
-    mtext_editor_overlay, position_canvas_overlay, position_canvas_overlay_centered,
+    mtext_editor_overlay, position_canvas_overlay,
     position_canvas_overlay_near_cursor,
     qselect_overlay, text_inline_overlay, viewport_context_menu_overlay,
 };
 use viewcube::{viewcube_nav_controls, viewcube_ucs_picker, UCS_PICKER_W};
+
+#[cfg(target_arch = "wasm32")]
+use overlay::position_canvas_overlay_centered;
 
 // Re-export the text-input element ids so sibling modules can address them at
 // the `view::` path as before the split.
@@ -263,6 +268,7 @@ impl OpenCADStudio {
             tab.scene.active_model_tile_bounds(vw, vh).width
         };
         let viewcube_visible = self.show_viewcube
+            && (!self.metal_embedded || self.metal_ribbon_visible)
             && !thumbnail_capture_clean
             && !tab.is_start
             && viewcube_has_room(render_bar_w, active_vp_w);
@@ -312,6 +318,7 @@ impl OpenCADStudio {
                 &self.recent_limit_input,
                 self.start_action_w.clone(),
                 self.start_section,
+                self.metal_welcome.as_ref(),
             )
         } else if is_paper {
             shader(ViewportPane::model(
@@ -1263,6 +1270,7 @@ bg={bg_ms:.1}ms n={view_count}"
         // anchor follows model space. Previously the registry was accepted but
         // never rendered, so users saw only tiny selected geometry at a
         // zoom-to-extents scale and had no A/B/C marker to click.
+        #[cfg(target_arch = "wasm32")]
         if !tab.is_start && !self.metal_model_overlays.is_empty() {
             let (vw, vh) = tab.scene.selection.borrow().vp_size;
             for item in &self.metal_model_overlays {
@@ -1358,7 +1366,7 @@ bg={bg_ms:.1}ms n={view_count}"
         // further. Outside the chip the Fill container is transparent so
         // viewport drawing / selection is unaffected. In a paper layout
         // the active viewport gets its own picker (below) instead.
-        if !is_paper && !tab.is_start {
+        if !is_paper && !tab.is_start && (!self.metal_embedded || self.metal_ribbon_visible) {
             let (vw, vh) = tab.scene.selection.borrow().vp_size;
             let rect = tab.scene.active_model_tile_bounds(vw, vh);
             // Unified control chip: split buttons + render-mode picker +
@@ -1477,7 +1485,9 @@ bg={bg_ms:.1}ms n={view_count}"
                     container(adaptive).width(iced::Length::Fixed(rect.width.max(1.0))),
                 )
                 .position(iced::Point::new(x + 4.0, y + 4.0));
-                viewport_stack = viewport_stack.push(picker_layer);
+                if !self.metal_embedded || self.metal_ribbon_visible {
+                    viewport_stack = viewport_stack.push(picker_layer);
+                }
 
                 // Hide the ViewCube first — before the render bar — when they collide.
                 if viewcube_visible {
@@ -2189,7 +2199,7 @@ bg={bg_ms:.1}ms n={view_count}"
             self.pending_pick_label().is_some(),
             self.show_node_graph,
         );
-        let center_stack: Element<'_, Message> = if thumbnail_capture_clean {
+        let center_stack: Element<'_, Message> = if thumbnail_capture_clean || (self.metal_embedded && !self.metal_ribbon_visible) {
             workspace
         } else if tab.is_start {
             column![
@@ -2239,7 +2249,7 @@ bg={bg_ms:.1}ms n={view_count}"
             // Clean-screen mode drops the ribbon for a full-canvas view; the
             // status bar stays so the mode can be toggled back off.
             let mut col = column![];
-            if !self.clean_screen {
+            if !self.clean_screen && self.metal_ribbon_visible {
                 col = col.push(self.ribbon.view(
                     is_paper,
                     self.tabs[self.active_tab].is_start,
@@ -2252,7 +2262,7 @@ bg={bg_ms:.1}ms n={view_count}"
             // ribbon vs status-bar construction separately (both gated on
             // PERF; zero cost otherwise).
             mark("ribbon");
-            if self.show_file_tabs {
+            if self.show_file_tabs && !self.metal_embedded {
                 col = col.push(doc_tab_bar(
                     &self.tabs,
                     self.active_tab,
@@ -2260,7 +2270,9 @@ bg={bg_ms:.1}ms n={view_count}"
                 ));
             }
             col.push(center_stack)
-                .push({
+                .push(if self.metal_embedded && !self.metal_ribbon_visible {
+                    Element::from(Space::new().height(0))
+                } else {
                     let is_model = tab.scene.current_layout == "Model";
                     let scale_pill_enabled = is_model
                         || tab.scene.active_viewport.is_some()
@@ -3493,8 +3505,12 @@ pub(super) fn start_page_view<'a>(
     recent_limit_input: &'a str,
     action_width_out: std::sync::Arc<std::sync::atomic::AtomicU32>,
     active: super::StartSection,
+    host_welcome: Option<&'a super::MetalWelcome>,
 ) -> Element<'a, Message> {
     responsive(move |size| {
+        if let Some(welcome) = host_welcome {
+            return host_start_page(welcome, recents, thumbs, recent_limit, recent_limit_input, size.width);
+        }
         start_page_content(
             patrons,
             videos,
@@ -3512,6 +3528,169 @@ pub(super) fn start_page_view<'a>(
         )
     })
     .into()
+}
+
+/// The welcome page when Metal hosts OpenCAD: the Metal mark and name, the
+/// drawing actions, a few tips and the recent documents. The upstream
+/// donation, community, tutorial and sponsor content is not shown (it also
+/// needs network access).
+fn host_start_page<'a>(
+    welcome: &'a super::MetalWelcome,
+    recents: &'a [std::path::PathBuf],
+    thumbs: &'a std::collections::HashMap<std::path::PathBuf, Option<iced::widget::image::Handle>>,
+    recent_limit: usize,
+    recent_limit_input: &'a str,
+    avail_w: f32,
+) -> Element<'a, Message> {
+    const RECENT_W: f32 = 280.0;
+    const HERO_W: f32 = 460.0;
+
+    let mark = container(
+        iced::widget::svg(iced::widget::svg::Handle::from_memory(include_bytes!(
+            "../../../assets/metal-mark.svg"
+        )))
+        .width(64)
+        .height(64)
+        .style(|theme: &Theme, _| iced::widget::svg::Style {
+            color: Some(theme.palette().primary.base.color),
+        }),
+    )
+    .padding(12)
+    .style(|theme: &Theme| {
+        let palette = theme.palette();
+        container::Style {
+            background: Some(Background::Color(palette.background.weak.color)),
+            border: Border {
+                color: palette.background.neutral.color,
+                width: 1.0,
+                radius: 22.0.into(),
+            },
+            ..Default::default()
+        }
+    });
+
+    let primary_action = button(
+        row![
+            iced::widget::svg(crate::ui::icons::themed_handle(crate::ui::icons::DOC_NEW))
+                .width(16)
+                .height(16)
+                .style(|theme: &Theme, _| iced::widget::svg::Style {
+                    color: Some(theme.palette().primary.base.text),
+                }),
+            text(crate::tr!("start", "new-drawing")).size(14),
+        ]
+        .spacing(8)
+        .align_y(iced::Center),
+    )
+    .on_press(Message::TabNew)
+    .padding([10, 22])
+    .style(|theme: &Theme, status| start_action_shape(button::primary(theme, status)));
+
+    let open_action = button(
+        row![
+            crate::ui::icons::themed(crate::ui::icons::FOLDER_OPEN, 16.0),
+            text(crate::tr!("start", "open-file")).size(14),
+        ]
+        .spacing(8)
+        .align_y(iced::Center),
+    )
+    .on_press(Message::OpenFile)
+    .padding([10, 22])
+    .style(|theme: &Theme, status| {
+        let palette = theme.palette();
+        let pair = match status {
+            button::Status::Hovered => palette.background.strong,
+            _ => palette.background.weak,
+        };
+        start_action_shape(button::Style {
+            background: Some(Background::Color(pair.color)),
+            text_color: pair.text,
+            border: Border {
+                color: palette.background.neutral.color,
+                width: 1.0,
+                ..Default::default()
+            },
+            ..Default::default()
+        })
+    });
+
+    let mut hero = column![
+        mark,
+        Space::new().height(iced::Length::Fixed(18.0)),
+        text(welcome.title.as_str()).size(32),
+        Space::new().height(iced::Length::Fixed(6.0)),
+        text(welcome.subtitle.as_str())
+            .size(15)
+            .style(start_muted_style)
+            .align_x(iced::alignment::Horizontal::Center),
+        Space::new().height(iced::Length::Fixed(26.0)),
+        row![primary_action, open_action].spacing(12),
+    ]
+    .align_x(iced::Center)
+    .width(Fill);
+
+    if !welcome.tips.is_empty() {
+        let tips = welcome.tips.iter().fold(column![].spacing(10), |list, tip| {
+            list.push(
+                row![
+                    text("•").size(13).style(start_primary_style),
+                    text(tip.as_str()).size(13).style(start_muted_style),
+                ]
+                .spacing(8),
+            )
+        });
+        hero = hero.push(Space::new().height(iced::Length::Fixed(32.0))).push(
+            container(tips)
+                .padding(16)
+                .width(Fill)
+                .style(|theme: &Theme| {
+                    let palette = theme.palette();
+                    container::Style {
+                        background: Some(Background::Color(palette.background.weak.color)),
+                        border: Border {
+                            color: palette.background.neutral.color,
+                            width: 1.0,
+                            radius: 8.0.into(),
+                        },
+                        ..Default::default()
+                    }
+                }),
+        );
+    }
+
+    let side_by_side = avail_w >= RECENT_W + 360.0 + 48.0;
+    let hero_area = if side_by_side { avail_w - RECENT_W - 48.0 } else { avail_w - 32.0 };
+    let hero = container(container(hero).width(iced::Length::Fixed(HERO_W.min(hero_area).max(200.0))))
+        .center_x(Fill)
+        .center_y(Fill)
+        .width(Fill)
+        .height(Fill);
+
+    let recent = recent_files_panel(
+        recents,
+        thumbs,
+        recent_limit,
+        recent_limit_input,
+        if side_by_side { iced::Length::Fixed(RECENT_W) } else { Fill },
+    );
+    let body: Element<'a, Message> = if side_by_side {
+        row![recent, hero].spacing(16).height(Fill).into()
+    } else {
+        column![container(hero).height(Fill), container(recent).height(iced::Length::Fixed(220.0))]
+            .spacing(16)
+            .width(Fill)
+            .height(Fill)
+            .into()
+    };
+    container(body)
+        .style(|theme: &Theme| container::Style {
+            background: Some(Background::Color(theme.palette().background.base.color)),
+            ..Default::default()
+        })
+        .padding(16)
+        .width(Fill)
+        .height(Fill)
+        .into()
 }
 
 fn start_page_content<'a>(

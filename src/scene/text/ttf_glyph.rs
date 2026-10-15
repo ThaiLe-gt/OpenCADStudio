@@ -183,6 +183,7 @@ pub fn glyph(family: &str, ch: char) -> Option<Arc<Glyph>> {
 /// glyph must use the same box, not the Latin cap height. Cap-height scaling
 /// makes ideographs ~1.3–1.5× too big (1 em ≈ 1.3–1.5 cap heights in CJK
 /// fonts), so every line of substituted Chinese text ran past its frame.
+#[cfg(not(target_arch = "wasm32"))]
 fn em_scale(face: &ttf_parser::Face) -> f32 {
     CAP_UNITS / face.units_per_em().max(1) as f32
 }

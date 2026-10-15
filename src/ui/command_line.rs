@@ -1089,6 +1089,18 @@ pub fn ranked_matches(
     dynamic: &[String],
     aliases: &rustc_hash::FxHashMap<String, String>,
 ) -> Vec<String> {
+    ranked_matches_limit(needle, dynamic, aliases, AUTOCOMPLETE_LIMIT)
+}
+
+/// [`ranked_matches`] with the caller's own cap, for hosts that list more
+/// suggestions than the command line's popup does (the control `commands`
+/// search).
+pub fn ranked_matches_limit(
+    needle: &str,
+    dynamic: &[String],
+    aliases: &rustc_hash::FxHashMap<String, String>,
+    limit: usize,
+) -> Vec<String> {
     let needle = needle.trim().to_uppercase();
     if needle.is_empty() {
         return Vec::new();
@@ -1118,7 +1130,7 @@ pub fn ranked_matches(
         matches.retain(|m| m != target);
         matches.insert(0, target.clone());
     }
-    matches.truncate(AUTOCOMPLETE_LIMIT);
+    matches.truncate(limit);
     matches
 }
 

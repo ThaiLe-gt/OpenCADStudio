@@ -21,6 +21,7 @@ use iced::{mouse, Point, Task};
 
 // The host limits each model proposal to 24 components, then merges targets
 // into one atomic transaction. The native bound applies to that whole batch.
+#[cfg(any(target_arch = "wasm32", test))]
 fn validate_native_component_count(count: u32) -> Result<(), String> {
     if count > 500 {
         return Err("native transaction supports at most 500 component transforms".into());
@@ -30,6 +31,7 @@ fn validate_native_component_count(count: u32) -> Result<(), String> {
 
 // The host verifies these rectangles against its locked template evidence.
 // Keep the native copy path restricted to straight, closed scaffold geometry.
+#[cfg(any(target_arch = "wasm32", test))]
 fn is_native_scaffold_rectangle(entity: &AcadEntityType) -> bool {
     let (closed, vertices): (bool, Vec<(f64, f64, f64)>) = match entity {
         AcadEntityType::Polyline2D(p) => (p.is_closed(), p.vertices.iter()
@@ -526,6 +528,7 @@ fn plot_scene_content(
 }
 
 impl OpenCADStudio {
+    #[cfg(target_arch = "wasm32")]
     pub(super) fn publish_metal_overlay_event(&self, overlay_id: &str, action_id: Option<&str>) {
         #[cfg(target_arch = "wasm32")]
         {
@@ -557,10 +560,6 @@ impl OpenCADStudio {
                     let _ = parent.post_message(&message, "*");
                 }
             }
-        }
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            let _ = (overlay_id, action_id);
         }
     }
 
@@ -1303,6 +1302,75 @@ impl OpenCADStudio {
     }
 
 
+    /// Apply the presentation the Metal host published in `window.__METAL_UI`
+    /// (`{ scheme, toolbar, title, subtitle, tips }`): the colour scheme follows the host, the
+    /// ribbon is shown only when the host asks for it, and the welcome page
+    /// takes the host's text. Absent in standalone builds, which keep their
+    /// own settings.
+    #[cfg(target_arch = "wasm32")]
+    fn apply_metal_ui(&mut self, window: &web_sys::Window) {
+        use wasm_bindgen::JsValue;
+
+        let Ok(ui) = js_sys::Reflect::get(window.as_ref(), &JsValue::from_str("__METAL_UI"))
+        else {
+            return;
+        };
+        if !ui.is_object() {
+            return;
+        }
+        let field = |name: &str| js_sys::Reflect::get(&ui, &JsValue::from_str(name)).ok();
+        let embedded = field("embedded").and_then(|value| value.as_bool()).unwrap_or(false);
+        if embedded && !self.metal_embedded {
+            self.show_properties = false;
+            self.ribbon.set_properties(false);
+        }
+        self.metal_embedded = embedded;
+        self.metal_ribbon_visible = field("toolbar")
+            .and_then(|value| value.as_bool())
+            .unwrap_or(false);
+        let text_field = |name: &str| {
+            field(name)
+                .and_then(|value| value.as_string())
+                .unwrap_or_default()
+        };
+        let tips = field("tips")
+            .filter(|value| js_sys::Array::is_array(value))
+            .map(|value| {
+                js_sys::Array::from(&value)
+                    .iter()
+                    .filter_map(|tip| tip.as_string())
+                    .filter(|tip| !tip.is_empty())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let welcome = crate::app::MetalWelcome {
+            title: Some(text_field("title"))
+                .filter(|title| !title.is_empty())
+                .unwrap_or_else(|| "Open CAD Studio".to_string()),
+            subtitle: text_field("subtitle"),
+            tips,
+        };
+        if self.metal_welcome.as_ref() != Some(&welcome) {
+            self.metal_welcome = Some(welcome);
+        }
+        let scheme = field("scheme").and_then(|value| value.as_string());
+        if let Some(scheme) = scheme.filter(|scheme| scheme == "light" || scheme == "dark") {
+            if self.metal_scheme_applied.as_deref() != Some(scheme.as_str()) {
+                let theme = if scheme == "dark" {
+                    iced::Theme::Dark
+                } else {
+                    iced::Theme::Light
+                };
+                self.ui_theme.name = theme.to_string();
+                self.ui_theme.palette = crate::app::config::UiThemePalette::from_iced(theme.seed());
+                self.theme_color_inputs = self.ui_theme.palette.hex_values();
+                self.active_theme = theme;
+                self.sync_model_space_theme(true);
+                self.metal_scheme_applied = Some(scheme);
+            }
+        }
+    }
+
     #[cfg(target_arch = "wasm32")]
     pub(super) fn on_metal_bridge_poll(&mut self) -> Task<Message> {
         use wasm_bindgen::{JsCast, JsValue};
@@ -1310,6 +1378,7 @@ impl OpenCADStudio {
         let Some(window) = web_sys::window() else {
             return Task::none();
         };
+        self.apply_metal_ui(&window);
         // Ingest the host overlay registry. Comments, agent presence and future
         // collaboration items all share this one model-space bridge contract.
         if let Ok(registry) = js_sys::Reflect::get(
@@ -1530,7 +1599,8 @@ impl OpenCADStudio {
             }
         }
         let state_key = format!(
-            "{}|{}|{}|{}|{}",
+            "{}|{}|{}|{}|{}|{}",
+            tab.id,
             document_name,
             layout,
             revision,

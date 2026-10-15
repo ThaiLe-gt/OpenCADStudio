@@ -1238,6 +1238,10 @@ impl OpenCADStudio {
                                     );
                                 }
                                 effective.dimtxsty = resolved.dimtxsty;
+                                effective.dimblk = resolved.dimblk;
+                                effective.dimblk1 = resolved.dimblk1;
+                                effective.dimblk2 = resolved.dimblk2;
+                                effective.dimldrblk = resolved.dimldrblk;
                             },
                             Err(reason) => {
                                 entity.as_object_mut().expect("entity JSON object").insert(
@@ -1811,6 +1815,10 @@ mod tests {
         style.dimdec = 0;
         style.dimclrd = 1;
         style.dimclrt = 3;
+        style.dimblk = codec::Handle::new(0xDEAD);
+        style.dimblk1 = codec::Handle::new(0xDEAE);
+        style.dimblk2 = codec::Handle::new(0xDEAF);
+        style.dimldrblk = codec::Handle::new(0xDEAD);
         document.dim_styles.add(style).unwrap();
         let mut dimension = DimensionLinear::horizontal(
             Vector3::new(10.0, 30.0, 0.0),
@@ -1833,6 +1841,12 @@ mod tests {
         assert_eq!(entity["effectiveDimensionStyle"]["dimclrt"], 3);
         assert_eq!(entity["effectiveDimensionStyle"]["dimdec"], 0);
         assert!(entity.get("dimensionStyleResourceError").is_none());
+        assert_eq!(entity["effectiveDimensionStyle"]["dimblk"], 0);
+        assert_eq!(entity["effectiveDimensionStyle"]["dimblk1"], 0);
+        assert_eq!(entity["effectiveDimensionStyle"]["dimblk2"], 0);
+        assert_eq!(entity["effectiveDimensionStyle"]["dimldrblk"], 0);
+        assert_eq!(app.tabs[app.active_tab].scene.document.dim_styles.get("REFERENCE_DIM")
+            .unwrap().dimblk, codec::Handle::new(0xDEAD));
         let document = &mut app.tabs[app.active_tab].scene.document;
         let style = document.dim_styles.get_mut("REFERENCE_DIM").unwrap();
         style.dimtxsty = "Gdim".into();

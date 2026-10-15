@@ -2161,6 +2161,24 @@ pub fn set_saved_active_layout(doc: &mut CadDocument, name: &str) {
     set_drawing_variable(doc, "CTAB", name);
 }
 
+/// Use the renderer's closed filled default for missing arrow blocks. Evidence,
+/// copied styles and saved styles must describe the same native presentation.
+pub(crate) fn normalize_dimension_arrow_handles(
+    style: &mut codec::tables::DimStyle,
+    block_handles: &rustc_hash::FxHashSet<codec::Handle>,
+) {
+    for handle in [
+        &mut style.dimblk,
+        &mut style.dimblk1,
+        &mut style.dimblk2,
+        &mut style.dimldrblk,
+    ] {
+        if !handle.is_null() && !block_handles.contains(handle) {
+            *handle = codec::Handle::NULL;
+        }
+    }
+}
+
 /// Materialise the current-style choices into their format-specific storage
 /// before saving, treating the current-style *names* as the single source of
 /// truth:
@@ -2176,22 +2194,10 @@ pub fn set_saved_active_layout(doc: &mut CadDocument, name: &str) {
 fn sync_current_styles_on_save(doc: &mut CadDocument) {
     use codec::objects::ObjectType;
 
-    // The renderer uses a closed filled arrow when a referenced block is
-    // missing. Persist that same default instead of a dangling hard pointer:
-    // Rhino otherwise drops every dimension using the affected DIMSTYLE.
-    let block_handles: rustc_hash::FxHashSet<_> =
-        doc.block_records.iter().map(|record| record.handle).collect();
+    // Dangling hard pointers cause Rhino to drop dimensions using the style.
+    let block_handles = doc.block_records.iter().map(|record| record.handle).collect();
     for style in doc.dim_styles.iter_mut() {
-        for handle in [
-            &mut style.dimblk,
-            &mut style.dimblk1,
-            &mut style.dimblk2,
-            &mut style.dimldrblk,
-        ] {
-            if !handle.is_null() && !block_handles.contains(handle) {
-                *handle = codec::Handle::NULL;
-            }
-        }
+        normalize_dimension_arrow_handles(style, &block_handles);
     }
 
     let th = doc

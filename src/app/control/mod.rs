@@ -433,10 +433,13 @@ impl OpenCADStudio {
             "document_id":tab.id,"revision":tab.edit_revision,"geometry_revision":tab.scene.geometry_epoch,"camera_revision":tab.scene.camera_generation,
             "hand_seed":format!("{:X}",tab.scene.document.header.handle_seed.max(tab.scene.document.next_handle())),
             "plugins":plugin_ids(),
-            "documents":self.tabs.iter().map(|t|json!({"id":t.id,"title":t.tab_title,"path":t.current_path,"dirty":t.dirty,"revision":t.edit_revision,"start":t.is_start})).collect::<Vec<_>>(),
+            "documents":self.tabs.iter().map(|t|json!({"id":t.id,"title":t.tab_display_name(),"path":t.current_path,"dirty":t.dirty,"revision":t.edit_revision,"start":t.is_start})).collect::<Vec<_>>(),
             "selection":tab.scene.selected_handles_in_order().iter().map(|h|format!("{:X}",h.value())).collect::<Vec<_>>(),
             "command":command,"modal":self.active_modal.as_ref().map(|m|format!("{m:?}")),
             "layout":tab.scene.current_layout,
+            "ui":{"embedded":self.metal_embedded,"nativeControls":!self.metal_embedded || self.metal_ribbon_visible,
+                "layouts":tab.scene.layout_names(),"undo":tab.history.undo_stack.len(),"redo":tab.history.redo_stack.len(),
+                "grid":self.show_grid,"snap":self.snapper.grid_snap(),"ortho":self.ortho_mode,"properties":self.show_properties},
             "ucs":tab.active_ucs.as_ref().map(|u|json!({"name":u.name,"origin":[u.origin.x,u.origin.y,u.origin.z],"x_axis":[u.x_axis.x,u.x_axis.y,u.x_axis.z],"y_axis":[u.y_axis.x,u.y_axis.y,u.y_axis.z],"elevation":u.elevation})),
             "cursor":{"world":tab.last_cursor_world.to_array(),"screen":[tab.last_cursor_screen.x,tab.last_cursor_screen.y]},
             "viewport_size":({let s=tab.scene.selection.borrow();[s.vp_size.0,s.vp_size.1]}),
@@ -572,6 +575,25 @@ impl OpenCADStudio {
                     Task::none(),
                 );
             }
+            // `ranked`: the command line's own autocomplete order (prefix matches first, an alias
+            // shown as its target) with each command's category, for hosts that offer a search box.
+            if req["ranked"].as_bool() == Some(true) {
+                let search = req["search"].as_str().unwrap_or("");
+                let limit = req["limit"].as_u64().unwrap_or(12).clamp(1, 50) as usize;
+                let commands: Vec<Value> = crate::ui::command_line::ranked_matches_limit(
+                    search,
+                    &self.command_line.dynamic_commands,
+                    &self.command_line.command_aliases,
+                    limit,
+                )
+                .into_iter()
+                .map(|name| json!({"name":name,"category":command_category(&name)}))
+                .collect();
+                return (
+                    json!({"ok":true,"ranked":true,"returned":commands.len(),"commands":commands}),
+                    Task::none(),
+                );
+            }
             if let Some(search) = req["search"].as_str().filter(|search| !search.is_empty()) {
                 let search = search.to_ascii_uppercase();
                 names.retain(|name| name.contains(&search));
@@ -686,22 +708,27 @@ impl OpenCADStudio {
                     Task::none(),
                 );
             }
-        let tab = &self.tabs[self.active_tab];
+        // Tab lifecycle requests bind the target document, even when another tab is active.
+        let revision_tab = if matches!(op, "activate" | "close") {
+            self.tabs.iter().find(|t| Some(t.id) == req["document_id"].as_u64())
+                .unwrap_or(&self.tabs[self.active_tab])
+        } else { &self.tabs[self.active_tab] };
         if req["revision"]
             .as_u64()
-            .is_some_and(|v| v != tab.edit_revision)
+            .is_some_and(|v| v != revision_tab.edit_revision)
             || req["geometry_revision"]
                 .as_u64()
-                .is_some_and(|v| v != tab.scene.geometry_epoch)
+                .is_some_and(|v| v != revision_tab.scene.geometry_epoch)
             || req["camera_revision"]
                 .as_u64()
-                .is_some_and(|v| v != tab.scene.camera_generation)
+                .is_some_and(|v| v != revision_tab.scene.camera_generation)
         {
             return (
                 json!({"ok":false,"status":"failed","code":"stale_state","error":"Refresh state before editing","state":self.control_state()}),
                 Task::none(),
             );
         }
+        let tab = &self.tabs[self.active_tab];
         if query {
             let response = match op {
                 "properties" => self.control_properties(),
@@ -1343,6 +1370,7 @@ pub(crate) use sheets::new_guid_v4;
 
 #[cfg(test)]
 mod p1_tests;
+#[cfg(not(target_arch = "wasm32"))]
 pub(super) fn action_names() -> &'static [&'static str] {
     actions::NAMES
 }
@@ -1368,6 +1396,27 @@ mod tests {
             r
         }
     }
+    #[test]
+    fn tab_lifecycle_checks_the_target_revision() {
+        let mut app = OpenCADStudio::new_for_test();
+        request(&mut app, json!({"op":"new"}));
+        let first = app.active_tab;
+        app.tabs[first].edit_revision = 7;
+        let first_id = app.tabs[first].id;
+        request(&mut app, json!({"op":"new"}));
+        let second_id = app.tabs[app.active_tab].id;
+        let (stale, _) = app.control_request(json!({"op":"close","document_id":first_id,"revision":6,"discard":true,"request_id":"stale-close"}));
+        assert_eq!(stale["code"], "stale_state");
+        let (accepted, task) = app.control_request(json!({"op":"activate","document_id":first_id,"revision":7,"request_id":"activate-first"}));
+        assert_ne!(accepted["ok"], false);
+        app.drive_headless_task(task).unwrap();
+        assert_eq!(app.tabs[app.active_tab].id, first_id);
+        let (closed, task) = app.control_request(json!({"op":"close","document_id":second_id,"revision":0,"discard":false,"request_id":"close-second"}));
+        assert_ne!(closed["ok"], false);
+        app.drive_headless_task(task).unwrap();
+        assert!(!app.tabs.iter().any(|tab| tab.id == second_id));
+    }
+
     #[test]
     fn control_stepwise_drawing_undo_and_properties() {
         let mut app = OpenCADStudio::new_for_test();
@@ -1431,6 +1480,31 @@ mod tests {
         assert_eq!(app.automation_op(r#"{"op":"entities"}"#)["total"], 1);
         request(&mut app, json!({"op":"undo"}));
         assert_eq!(app.automation_op(r#"{"op":"entities"}"#)["total"], 0);
+    }
+    #[test]
+    fn ranked_command_search_lists_prefix_matches_first_with_categories() {
+        let mut app = OpenCADStudio::new_for_test();
+        let found = app
+            .control_request(json!({"op":"commands","search":"line","ranked":true,"limit":50}))
+            .0;
+        assert_eq!(found["ok"], true);
+        let names: Vec<&str> = found["commands"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|command| command["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(names.first(), Some(&"LINE"));
+        assert!(names.iter().take_while(|name| name.starts_with("LINE")).count() >= 1);
+        assert_eq!(found["commands"][0]["category"], "create");
+        let capped = app
+            .control_request(json!({"op":"commands","search":"l","ranked":true,"limit":3}))
+            .0;
+        assert_eq!(capped["commands"].as_array().unwrap().len(), 3);
+        let none = app
+            .control_request(json!({"op":"commands","search":"","ranked":true}))
+            .0;
+        assert_eq!(none["commands"].as_array().unwrap().len(), 0);
     }
     #[test]
     fn command_discovery_explains_batch_and_interactive_use() {

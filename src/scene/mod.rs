@@ -68,9 +68,12 @@ pub(crate) use boundary::{
 // modules (each does `use super::*`) keep referencing them unqualified.
 pub(crate) use convert::tess::{
 
-    entity_aabb, entity_world_aabb_3d_f64, entity_world_aabb_f64, is_unindexable_entity,
+    entity_aabb, entity_world_aabb_f64, is_unindexable_entity,
     tessellate_entity_dim_text,
 };
+
+#[cfg(target_arch = "wasm32")]
+pub(crate) use convert::tess::entity_world_aabb_3d_f64;
 
 /// Keep construction-history curves in the same per-entity tessellation memo
 /// as their parent, so navigation never rebuilds them on every frame.

@@ -2,6 +2,7 @@ mod alias;
 mod automation;
 pub(crate) mod control;
 mod reference_dimension_style;
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn automation_action_names() -> &'static [&'static str] {
     control::action_names()
 }
@@ -366,8 +367,18 @@ pub enum StartSection {
     Supporters,
 }
 
+/// Text the Metal host shows on the welcome page, already in the person's
+/// language.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct MetalWelcome {
+    pub title: String,
+    pub subtitle: String,
+    pub tips: Vec<String>,
+}
+
 /// A transient host-owned item embedded in OpenCAD model space. Overlay items
 /// are not CAD entities and therefore never leak into DWG/DXF persistence.
+#[cfg(target_arch = "wasm32")]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum MetalOverlayKind {
     Agent,
@@ -377,6 +388,7 @@ pub(crate) enum MetalOverlayKind {
     Generic,
 }
 
+#[cfg(target_arch = "wasm32")]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct MetalModelOverlayAction {
     pub id: String,
@@ -384,6 +396,7 @@ pub(crate) struct MetalModelOverlayAction {
     pub tone: String,
 }
 
+#[cfg(target_arch = "wasm32")]
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct MetalModelOverlayItem {
     pub id: String,
@@ -424,8 +437,11 @@ pub(super) struct OpenCADStudio {
     active_tab: usize,
     hovered_doc_tab: Option<usize>,
     tab_counter: usize,
+    #[cfg(target_arch = "wasm32")]
     metal_model_overlays: Vec<MetalModelOverlayItem>,
+    #[cfg(target_arch = "wasm32")]
     metal_overlay_drag: Option<String>,
+    #[cfg(target_arch = "wasm32")]
     metal_qa_camera: Option<(usize, String, u64, crate::scene::view::camera::Camera)>,
     ribbon: Ribbon,
     /// Recently opened files, newest first — backs the Start page panel.
@@ -507,6 +523,19 @@ pub(super) struct OpenCADStudio {
     status_menu_tooltip_hidden: bool,
     /// Clean-screen mode: hide ribbon and side panels for a full canvas.
     clean_screen: bool,
+    /// Whether the ribbon is shown. The Metal host hides it by default and
+    /// toggles it through `window.__METAL_UI`; standalone builds keep it shown.
+    metal_ribbon_visible: bool,
+    /// Metal owns document tabs and, by default, the surrounding viewport controls.
+    metal_embedded: bool,
+    /// Last colour scheme (`"light"`/`"dark"`) applied from the Metal host, so
+    /// the theme is only replaced when the host's scheme changes and not on
+    /// every poll (a person may still choose another theme in Options).
+    #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+    metal_scheme_applied: Option<String>,
+    /// What the Metal host puts on the welcome page; `Some` selects the
+    /// host's welcome page in place of the upstream one.
+    metal_welcome: Option<MetalWelcome>,
     /// Quick Properties: show a compact floating property panel on selection.
     quick_properties: bool,
     /// Canvas-space cursor position where Quick Properties was last opened.
@@ -2146,8 +2175,10 @@ pub enum Message {
     MetalBridgePoll,
     /// A host-owned model-space bubble was clicked. These overlays are UI
     /// only and never become drawing entities.
+    #[cfg(target_arch = "wasm32")]
     MetalOverlayClicked(String),
     /// An action inside a host-owned model-space bubble was clicked.
+    #[cfg(target_arch = "wasm32")]
     MetalOverlayAction(String, String),
     /// Web: a per-script font finished fetching — `Ok(bytes)` or `Err(reason)`.
     WebFontLoaded(
@@ -4025,8 +4056,11 @@ impl OpenCADStudio {
             active_tab: 0,
             hovered_doc_tab: None,
             tab_counter: 0,
+            #[cfg(target_arch = "wasm32")]
             metal_model_overlays: Vec::new(),
+            #[cfg(target_arch = "wasm32")]
             metal_overlay_drag: None,
+            #[cfg(target_arch = "wasm32")]
             metal_qa_camera: None,
             ribbon: Ribbon::new(),
             // Populated from the consolidated config after construction
@@ -4074,6 +4108,10 @@ impl OpenCADStudio {
             otrack_cross: None,
             otrack_kind: None,
             clean_screen: false,
+            metal_ribbon_visible: true,
+            metal_embedded: false,
+            metal_scheme_applied: None,
+            metal_welcome: None,
             quick_properties: false,
             quick_properties_anchor: Point::new(12.0, 12.0),
             selection_cycling: false,

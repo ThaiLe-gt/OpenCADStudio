@@ -57,8 +57,37 @@
       // small same-origin queue only transports user-approved file bytes and NEW.
       window.__METAL_OPENCAD_COMMANDS = [];
       window.__METAL_OPENCAD_COMMAND_IDS = new Set();
+      // Presentation the host chooses: colour scheme, whether the ribbon is
+      // shown, and the welcome page text. The host puts its starting values in
+      // the page address so the first frame already matches; later changes
+      // arrive as `set_ui` commands. The Rust application reads this object.
+      try {
+        const query = (window.location && window.location.search) || "";
+        const param = name => {
+          const match = new RegExp("[?&]" + name + "=([^&]*)").exec(query);
+          return match ? decodeURIComponent(match[1].replace(/\+/g, " ")) : undefined;
+        };
+        if (param("scheme") !== undefined) {
+          let tips = [];
+          try { tips = JSON.parse(param("tips") || "[]"); } catch {}
+          window.__METAL_UI = {
+            scheme: param("scheme"), toolbar: param("toolbar") === "1", title: param("title") || "",
+            subtitle: param("subtitle") || "", tips: Array.isArray(tips) ? tips.filter(tip => typeof tip === "string") : []
+          };
+        }
+      } catch {}
       window.__METAL_ENQUEUE_COMMAND = (command, replyOrigin = "*") => {
         if (!command || command.source !== "metal") return;
+        if (command.type === "set_ui") {
+          window.__METAL_UI = {
+            scheme: command.scheme === "dark" ? "dark" : "light",
+            toolbar: command.toolbar === true,
+            title: typeof command.title === "string" ? command.title : "",
+            subtitle: typeof command.subtitle === "string" ? command.subtitle : "",
+            tips: Array.isArray(command.tips) ? command.tips.filter(tip => typeof tip === "string") : []
+          };
+          return;
+        }
         if (command.type === "model_overlay_registry") {
           window.__METAL_MODEL_OVERLAY_REGISTRY = command.registry;
           return;

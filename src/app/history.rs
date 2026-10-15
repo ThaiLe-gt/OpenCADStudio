@@ -351,6 +351,7 @@ impl OpenCADStudio {
     }
 
     /// Undo only the exact preview transaction, never an intervening edit.
+    #[cfg(any(target_arch = "wasm32", test))]
     pub(super) fn rollback_native_transaction(&mut self, i: usize, label: &str) -> Result<(), String> {
         if let Some(pending) = &self.tabs[i].history.pending {
             if pending.label != label {
@@ -365,6 +366,7 @@ impl OpenCADStudio {
         Ok(())
     }
 
+    #[cfg(any(target_arch = "wasm32", test))]
     pub(super) fn begin_multi_message_history(&mut self, i: usize, label: impl Into<String>) {
         self.push_undo_snapshot(i, label);
         if let Some(pending) = &mut self.tabs[i].history.pending {

@@ -97,6 +97,7 @@ pub(super) const NAMES: &[&str] = &[
 ];
 
 /// Parse the `at` placement point for `embed_image`: `[x,y]` or `[x,y,z]`.
+#[cfg(not(target_arch = "wasm32"))]
 fn embed_point(req: &Value) -> Result<codec::types::Vector3, Value> {
     let values = req["at"]
         .as_array()

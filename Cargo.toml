@@ -145,6 +145,17 @@ web-sys = { version = "=0.3.85", features = [
 ] }
 iced = { git = "https://github.com/iced-rs/iced.git", rev = "23604ff22ab0aad9e00b9327cb7b8546ed84db39", features = ["webgl", "fira-sans"] }
 
+# Optimize the CAD application, codec and kernel while retaining debug information,
+# panic unwinding and quick builds for the remaining dependencies.
+[profile.dev.package.OpenCADStudio]
+opt-level = 2
+
+[profile.dev.package.opencadcodec]
+opt-level = 1
+
+[profile.dev.package.opencadkernel]
+opt-level = 1
+
 [profile.release]
 strip = true
 

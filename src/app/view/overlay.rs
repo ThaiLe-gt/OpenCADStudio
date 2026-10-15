@@ -954,6 +954,7 @@ pub(super) fn position_canvas_overlay_near_cursor<'a>(
 /// Centre a fixed-size model-space marker on its projected native anchor.
 /// Unlike cursor menus, model markers must not acquire a screen-space offset:
 /// that offset grows relative to geometry when the user zooms out.
+#[cfg(target_arch = "wasm32")]
 pub(super) fn position_canvas_overlay_centered<'a>(
     anchor: iced::Point,
     bottom_inset: f32,
